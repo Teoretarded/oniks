@@ -16,7 +16,9 @@ import sys
 import numpy as np
 import pygame
 
+from game.cameras import TRANSITION_TIME
 from main import PHYS_DT, App
+from sim.missile import PH_CRUISE
 from world.generation import BASE_POS
 
 OUT_DIR = "renders"
@@ -25,9 +27,11 @@ MAX_WARMUP_FRAMES = 1200         # cap on terrain LOD streaming warm-up
 
 
 def _set_cam(state, pos, yaw: float, pitch: float) -> None:
-    state.freecam.pos = np.asarray(pos, dtype=np.float64).copy()
-    state.freecam.yaw = float(yaw)
-    state.freecam.pitch = float(pitch)
+    state.rig.set_mode("free")   # free mode enters with no blend
+    freecam = state.rig.freecam
+    freecam.pos = np.asarray(pos, dtype=np.float64).copy()
+    freecam.yaw = float(yaw)
+    freecam.pitch = float(pitch)
 
 
 def _aim(state, pos, target) -> None:
@@ -41,6 +45,58 @@ def _aim(state, pos, target) -> None:
 _BX, _BY, _BZ = BASE_POS
 # Sun azimuth (heading of renderer SUN_DIR's horizontal component).
 _SUN_YAW = float(np.arctan2(0.35, 0.55))
+
+
+# --- flight scenes (Task 18): the sandbox sim drives the missile -------------
+
+def _fly(state, seconds: float, until=None) -> None:
+    """Step the sandbox sim, optionally stopping when ``until()`` is true."""
+    for _ in range(int(round(seconds / PHYS_DT))):
+        state.sim_step(PHYS_DT)
+        if until is not None and until():
+            return
+
+
+def _scene_launch(s) -> None:
+    """t = +2.0 s after launch: missile mid-boost over the raised TEL."""
+    m = s.world.launch("hi-lo", np.array([0.0, 0.0, 120_000.0]))
+    s.followed = m
+    _fly(s, 2.0)
+    # frame the TEL (bottom) and the climbing missile + plume (top): aim 40%
+    # of the way up so the launcher stays inside the lower frame edge
+    base = np.array(BASE_POS)
+    _aim(s, (_BX + 62.0, _BY + 22.0, _BZ - 55.0), base + (m.pos - base) * 0.4)
+
+
+def _scene_cruise(s) -> None:
+    """Chase cam mid-flight: established hi-profile cruise at 14 km."""
+    m = s.world.launch("hi-lo", np.array([0.0, 0.0, 250_000.0]))
+    s.followed = m
+    _fly(s, 120.0, until=lambda: m.phase == PH_CRUISE)
+    _fly(s, 20.0)                    # level off on the cruise alt + grow a trail
+    s.rig.set_mode("chase")
+    s.rig.update(TRANSITION_TIME + 0.05, m)   # finish the blend (cam snaps)
+
+
+def _scene_terminal(s) -> None:
+    """Sea-skim 300 m short of a tanker, seeker locked, broadside camera."""
+    tanker = next(sh for sh in s.world.ships
+                  if sh.ship_type == "tanker" and sh.pos[2] < 60_000.0)
+    lead = tanker.pos + tanker.velocity() * 60.0      # rough launch lead
+    m = s.world.launch("lo-lo", np.array([lead[0], 0.0, lead[2]]))
+    s.followed = m
+    _fly(s, 180.0,
+         until=lambda: (not m.alive
+                        or np.linalg.norm(m.pos - tanker.pos) <= 300.0))
+    # over-the-shoulder: camera behind-abeam the sea-skimming missile,
+    # looking down the attack line at the tanker beyond
+    line = tanker.pos - m.pos
+    line_hat = line / max(np.linalg.norm(line), 1e-9)
+    perp = np.cross(line_hat, (0.0, 1.0, 0.0))
+    if perp[0] < 0.0:
+        perp = -perp                 # abeam on the sun (east) side: hulls lit
+    _aim(s, m.pos - line_hat * 40.0 + perp * 45.0 + (0.0, 10.0, 0.0),
+         m.pos + line_hat * 60.0)
 
 # --- models showcase: every vehicle/weapon model on a flat concrete pad ----
 # The pad is a quay just offshore (water ~50 m deep, home cliffs as backdrop).
@@ -68,10 +124,11 @@ SCENES = {
     # slight pitch up puts the sun disc at the frame top)
     "ocean_low": lambda s: _set_cam(s, (40_000.0, 8.0, 200_000.0),
                                     _SUN_YAW, 0.04),
-    # cam 2.5 m above the terrain at the base, looking north-east along the
+    # cam 2.5 m above the terrain near the base, looking north-east along the
     # coastline at a grazing angle: huge terrain LOD cells nearly edge-on is
-    # the worst case for log-depth interpolation (Task 16b regression scene)
-    "base_ground": lambda s: _set_cam(s, (_BX, _BY + 2.5, _BZ),
+    # the worst case for log-depth interpolation (Task 16b regression scene).
+    # Offset 25 m east of BASE_POS so the TEL parked there stays out of frame.
+    "base_ground": lambda s: _set_cam(s, (_BX + 25.0, _BY + 2.5, _BZ),
                                       np.pi / 4.0, -0.02),
     # models lineup from 3 orbit angles (models face north = +Z)
     "models_front": lambda s: _aim(s, (PAD_X + 20.0, PAD_TOP + 7.0, PAD_Z + 26.0),
@@ -94,7 +151,14 @@ SCENES = {
                                           (SHORE_X - 10.0, 4.0, HARBOR_Z - 20.0)),
     "models_shore_high": lambda s: _aim(s, (SHORE_X + 80.0, 380.0, SHORE_Z + 40.0),
                                         (SHORE_X, 0.0, SHORE_Z + 150.0)),
+    # flight scenes (Task 18): scripted launches, the scene steps its own sim
+    "launch": _scene_launch,
+    "cruise": _scene_cruise,
+    "terminal": _scene_terminal,
 }
+# Flight scenes advance the sim themselves to a precise moment, so shoot()
+# must not add its own wave-phase steps on top.
+SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")
@@ -188,8 +252,13 @@ def _render_frame(app: App, name: str) -> None:
 
 
 def shoot(app: App, name: str) -> str:
+    if name in SCENE_STEPS:
+        # Flight scenes script a launch: start from a fresh sandbox so the
+        # launcher is armed and the sky is empty regardless of scene order.
+        from game.sandbox import SandboxState
+        app.states.switch(SandboxState(app))
     SCENES[name](app.state)
-    for _ in range(SIM_STEPS):
+    for _ in range(SCENE_STEPS.get(name, SIM_STEPS)):
         app.state.sim_step(PHYS_DT)
     # Terrain LOD0/LOD1 meshes stream in over frames (budgeted builds);
     # draw until the build queue drains so the still shows full detail.
