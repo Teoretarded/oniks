@@ -21,6 +21,7 @@ import numpy as np
 
 from engine import math3d
 from engine.meshdata import MeshData
+from engine.shaderlib import HAZE_GLSL
 
 RINGS = [  # (outer_radius_m, cell_m, wave_weight)
     (2_000, 16, 1.0),
@@ -107,19 +108,9 @@ void main(){
 OCEAN_FRAG = """
 #version 330 core
 in vec3 v_nrm; in vec3 v_view_vec;
-uniform vec3 u_sun_dir, u_sun_color;
-uniform vec3 u_haze_color, u_sun_haze_color; uniform float u_haze_density, u_cam_alt;
+uniform vec3 u_sun_color;
 out vec4 frag;
-// keep in sync with apply_haze in engine/renderer.py LIT_FRAG
-vec3 apply_haze(vec3 color, vec3 view_vec, float cam_alt){
-    float dist = length(view_vec);
-    float h = max(cam_alt + view_vec.y * 0.5, 0.0);
-    float density = u_haze_density * exp(-h / 6000.0);
-    float f = 1.0 - exp(-density * dist);
-    vec3 dir = view_vec / max(dist, 1.0);
-    float sun_amt = pow(max(dot(dir, u_sun_dir), 0.0), 8.0);
-    return mix(color, mix(u_haze_color, u_sun_haze_color, sun_amt), f);
-}
+""" + HAZE_GLSL + """
 void main(){
     vec3 n = normalize(v_nrm);
     vec3 v = normalize(-v_view_vec);

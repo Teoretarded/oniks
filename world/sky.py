@@ -40,8 +40,13 @@ def build_sky_dome(radius: float = SKY_RADIUS, stacks: int = 16,
     b = np.roll(grid[:-1, :], -1, axis=1)
     c = np.roll(grid[1:, :], -1, axis=1)
     e = grid[1:, :]
-    # winding irrelevant: culling is disabled while the dome draws
-    idx = np.stack((a, c, b, a, e, c), axis=-1).ravel()
+    # winding irrelevant: culling is disabled while the dome draws.
+    # Pole rows collapse one triangle of each quad to zero area (a == b at
+    # the south pole, c == e at the north pole), so drop those: the other
+    # triangle of each quad fans from the pole and covers the cap alone.
+    t0 = np.stack((a, c, b), axis=-1)[1:]    # skip south-pole row
+    t1 = np.stack((a, e, c), axis=-1)[:-1]   # skip north-pole row
+    idx = np.concatenate((t0.ravel(), t1.ravel()))
     return MeshData(v, idx.astype(np.uint32))
 
 
@@ -89,3 +94,6 @@ class Sky:
         self.mesh.draw()
         glEnable(GL_CULL_FACE)
         glDepthMask(GL_TRUE)
+
+    def delete(self) -> None:
+        self.mesh.delete()
