@@ -5,8 +5,8 @@ particle renderer and the cinematic CameraRig. ``sim_step`` advances the
 world and turns sim happenings into effects (booster plume, exhaust trail,
 explosions / splashes / deck fires, the dropped booster's ballistic tumble);
 ``render`` draws the scene in the fixed order sky -> terrain -> ocean ->
-sites -> ships -> TEL -> missiles -> particles. HUD (Task 19), tactical map
-(Task 20) and audio (Task 21) hook in on top of this state later.
+sites -> ships -> TEL -> missiles -> particles -> HUD overlay. The tactical
+map (Task 20) and audio (Task 21) hook in on top of this state later.
 
 GL-touching module (imports world.sky etc.) — never imported by unit tests.
 """
@@ -19,8 +19,10 @@ from engine import math3d
 from engine.camera import Camera
 from engine.mesh import Mesh
 from engine.particles import Effects, ParticleRenderer
+from engine.text import TextRenderer
 from game.cameras import CameraRig
 from game.controls import SandboxControls
+from game.hud import HUD
 from game.states import GameState
 from models.bastion import build_bastion_tel
 from models.common import rot_x, rot_y, rot_z
@@ -123,6 +125,9 @@ class SandboxState(GameState):
         self.effects = Effects(seed=4)
         self.particles = ParticleRenderer()
         self.controls = SandboxControls(self)
+        self.text = TextRenderer()      # shared by HUD (and the Task-20 map)
+        self.hud = HUD(self.text)
+        self.hud_visible = True
 
         # Player intent (the Task-20 map will drive these)
         self.profile = "hi-lo"
@@ -305,6 +310,8 @@ class SandboxState(GameState):
         self._draw_tel()
         self._draw_missiles()
         self.particles.draw(self.renderer, self.effects)
+        if self.hud_visible:
+            self.hud.draw(self, w, h)
 
     def _draw_ships(self) -> None:
         for ship in self.world.ships:

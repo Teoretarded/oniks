@@ -78,6 +78,23 @@ def _scene_cruise(s) -> None:
     s.rig.update(TRANSITION_TIME + 0.05, m)   # finish the blend (cam snaps)
 
 
+def _scene_hud(s) -> None:
+    """Task 19 HUD review: chase cam in terminal homing, seeker locked on a
+    tanker ~2.5 km out — flight telemetry block, camera/controls hint line
+    and the target bracket with range text all visible at once."""
+    tanker = next(sh for sh in s.world.ships
+                  if sh.ship_type == "tanker" and sh.pos[2] < 60_000.0)
+    lead = tanker.pos + tanker.velocity() * 60.0      # rough launch lead
+    m = s.world.launch("lo-lo", np.array([lead[0], 0.0, lead[2]]))
+    s.followed = m
+    _fly(s, 180.0,
+         until=lambda: (not m.alive
+                        or (m.locked_ship is not None
+                            and np.linalg.norm(m.pos - tanker.pos) <= 2500.0)))
+    s.rig.set_mode("chase")
+    s.rig.update(TRANSITION_TIME + 0.05, m)   # finish the blend (cam snaps)
+
+
 def _scene_terminal(s) -> None:
     """Sea-skim 300 m short of a tanker, seeker locked, broadside camera."""
     tanker = next(sh for sh in s.world.ships
@@ -155,10 +172,12 @@ SCENES = {
     "launch": _scene_launch,
     "cruise": _scene_cruise,
     "terminal": _scene_terminal,
+    # HUD overlay review (Task 19): the only scene rendered with the HUD on.
+    "hud": _scene_hud,
 }
 # Flight scenes advance the sim themselves to a precise moment, so shoot()
 # must not add its own wave-phase steps on top.
-SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0}
+SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")
@@ -257,6 +276,9 @@ def shoot(app: App, name: str) -> str:
         # launcher is armed and the sky is empty regardless of scene order.
         from game.sandbox import SandboxState
         app.states.switch(SandboxState(app))
+    # Only the dedicated "hud" scene renders the overlay: the scenery and
+    # model scenes are reviewed for the 3D image itself.
+    app.state.hud_visible = name == "hud"
     SCENES[name](app.state)
     for _ in range(SCENE_STEPS.get(name, SIM_STEPS)):
         app.state.sim_step(PHYS_DT)
