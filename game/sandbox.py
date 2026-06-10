@@ -7,7 +7,9 @@ explosions / splashes / deck fires, the dropped booster's ballistic tumble);
 ``render`` draws the scene in the fixed order sky -> terrain -> ocean ->
 sites -> ships -> TEL -> missiles -> particles -> HUD/map overlay. The
 tactical map (M) replaces the HUD while open and drives the player intent
-fields (target_point / waypoints); audio (Task 21) hooks in later.
+fields (target_point / waypoints). Audio rides the same seams: launch /
+boom / splash one-shots fire where the effects do, and per-missile
+booster/cruise loops are reconciled every frame in ``render``.
 
 GL-touching module (imports world.sky etc.) — never imported by unit tests.
 """
@@ -72,6 +74,9 @@ SPLASH_SCALE = 1.4             # clean water impact
 SHIP_HIT_SPLASH_MAX_Y = 8.0    # hull hits below this height also splash
 
 LAUNCH_PUFF_COUNT = 22         # cold-launch gas puff at the canister mouth
+
+CRUISE_LOOP_GAIN = 1.0         # ramjet loop gain (low level baked in the wav)
+BOOSTER_LOOP_GAIN = 1.0        # booster roar loop gain
 
 TEL_ERECT_TIME = 4.0           # s for the canisters to swing 0 <-> 88 deg
 TEL_ELEV_STEPS = 12            # prebaked TEL meshes across the elevation arc
@@ -179,6 +184,7 @@ class SandboxState(GameState):
         if m is not None:
             self.followed = m
             self._launch_puff(m.pos)
+            self.app.audio.play("launch", pos=m.pos)
         return m
 
     def effective_time_scale(self) -> float:
@@ -214,10 +220,13 @@ class SandboxState(GameState):
             if kind == "ship_hit":
                 self.effects.explosion(pos, EXPLOSION_SCALE_SHIP,
                                        water=pos[1] < SHIP_HIT_SPLASH_MAX_Y)
+                self.app.audio.boom(pos)
             elif kind == "splash":
                 self.effects.splash(pos, scale=SPLASH_SCALE)
+                self.app.audio.play("splash", pos=pos)
             else:                           # ground_hit
                 self.effects.explosion(pos, EXPLOSION_SCALE_GROUND)
+                self.app.audio.boom(pos)
 
         self._ship_fires(dt)
         self._update_boosters(dt)
@@ -284,11 +293,51 @@ class SandboxState(GameState):
                                        + np.clip(target - self._tel_frac,
                                                  -step, step), 0.0, 1.0))
 
+    # ---------------------------------------------------------------- audio
+
+    def _loop_sources(self) -> dict:
+        """Per-missile engine loops for AudioManager.update_loops: booster
+        roar through BOOST, ramjet hiss while the sustainer burns. Empty
+        while paused (a frozen sim should not roar)."""
+        if self.app.paused:
+            return {}
+        sources = {}
+        for m in self.world.missiles:
+            if m.phase == PH_BOOST:
+                sources[id(m)] = ("booster", m.pos, BOOSTER_LOOP_GAIN)
+            elif m.phase in RAMJET_PHASES and m.fuel > 0.0:
+                sources[id(m)] = ("cruise", m.pos, CRUISE_LOOP_GAIN)
+        return sources
+
+    # ----------------------------------------------------------- state hooks
+
+    def leave(self) -> None:
+        """ESC to menu: silence the engine loops, release any mouse grab."""
+        self.app.audio.stop_loops()
+        self.controls.release_mouse()
+
+    def dispose(self) -> None:
+        """Free this session's GL objects (called when SANDBOX restarts)."""
+        meshes = ([self._mesh_oniks, self._mesh_booster]
+                  + list(self._ship_meshes.values()) + self._tel_meshes
+                  + [mesh for mesh, _ in self._site_draws])
+        for mesh in meshes:
+            mesh.delete()
+        self.terrain.delete()
+        self.ocean.delete()
+        self.sky.delete()
+        self.particles.delete()
+        self.tactical_map.delete()
+        self.text.delete()
+
     # --------------------------------------------------------------- render
 
     def render(self, dt_real: float) -> None:
         self.controls.update(dt_real)            # free-cam flies in real time
         self.rig.update(dt_real, self.followed)
+        audio = self.app.audio
+        audio.set_listener(self.camera.eye)      # gains follow the camera
+        audio.update_loops(self._loop_sources())
         w, h = self.window.size()
         self.renderer.begin(self.camera, w / h)
         self.sky.draw(self.renderer)

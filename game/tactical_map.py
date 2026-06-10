@@ -319,13 +319,15 @@ class TacticalMap:
         if ev.type == pygame.MOUSEBUTTONDOWN:
             if ev.button == 1:
                 self._click_target(ev.pos)
+                self.sandbox.app.audio.ui_click()
                 return True
             if ev.button == 2:
                 self._panning = True
                 return True
             if ev.button == 3:
-                add_waypoint(self.sandbox.waypoints,
-                             self.view.screen_to_world(ev.pos))
+                if add_waypoint(self.sandbox.waypoints,
+                                self.view.screen_to_world(ev.pos)):
+                    self.sandbox.app.audio.ui_click()
                 return True
             if ev.button in (4, 5):          # legacy wheel: MOUSEWHEEL handles
                 return True
@@ -337,6 +339,7 @@ class TacticalMap:
             return True
         if ev.type == pygame.KEYDOWN and ev.key == pygame.K_x:
             clear_waypoints(self.sandbox.waypoints)
+            self.sandbox.app.audio.ui_click()
             return True
         return False
 

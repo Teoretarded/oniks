@@ -329,6 +329,10 @@ def main(argv: list[str]) -> None:
             f"unknown scene(s) {unknown}; choose from {list(SCENES)}")
     os.makedirs(OUT_DIR, exist_ok=True)
     app = App(hidden=True)
+    # The App boots into the menu (Task 21); the scenery/model scenes shoot
+    # straight from a sandbox, so enter one (flight scenes re-enter fresh).
+    from game.sandbox import SandboxState
+    app.states.switch(SandboxState(app))
     for name in names:
         print(f"saved {shoot(app, name)}")
     pygame.quit()

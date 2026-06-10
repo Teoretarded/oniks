@@ -1,6 +1,6 @@
 """ONIKS entry point: pygame init, GL window, state machine, fixed-timestep loop.
 
-Run: python main.py    (ESC quits; avg FPS printed on exit)
+Run: python main.py    (starts at the menu; avg FPS printed on exit)
 
 The App loop below is THE loop — this exact structure stays for the whole
 game: real time accumulates into fixed 120 Hz sim steps (scaled by
@@ -10,7 +10,12 @@ time instead of spiraling; rendering runs once per frame with real dt.
 App flags driven by game/controls.py: ``paused`` (P), ``frame_step`` (N:
 exactly one sim step while paused), ``screenshot_requested`` (F2, saved
 after the frame renders). ``time_scale`` is re-read from the state each
-frame (the sandbox forces 1x while a launch is in EJECT/BOOST).
+frame (the sandbox forces 1x while a launch is in EJECT/BOOST; the menu
+returns 0 so no sim time accumulates while it is up).
+
+State flow (Task 21): App starts at MenuState; SANDBOX starts a fresh
+world, ESC in the sandbox returns to the menu (sim frozen, RESUME appears),
+QUIT or window close ends ``run`` via ``app.running``.
 """
 
 from __future__ import annotations
@@ -20,9 +25,14 @@ import time
 
 import pygame
 
-from engine.renderer import Renderer
-from engine.window import Window
-from game.states import StateMachine
+from game.audio import AudioManager
+
+# Mixer settings must be staged before Window's pygame.init() (plan-fixed).
+AudioManager.pre_init()
+
+from engine.renderer import Renderer            # noqa: E402
+from engine.window import Window                # noqa: E402
+from game.states import MenuState, StateMachine  # noqa: E402
 
 PHYS_DT = 1.0 / 120.0
 SCREENSHOT_DIR = "renders"
@@ -33,31 +43,47 @@ class App:
                  height: int = 900):
         self.window = Window(width, height, hidden=hidden)
         self.renderer = Renderer()
+        # Hidden windows are batch tools (screenshot/perf harness): silent.
+        self.audio = AudioManager(enabled=not hidden)
         self.time_scale = 1.0
         self.paused = False
         self.frame_step = False             # N: one sim step while paused
         self.screenshot_requested = False   # F2: saved after render
+        self.running = True                 # cleared by QUIT / menu QUIT
         self.states = StateMachine()
-        from game.sandbox import SandboxState   # after the GL context exists
-        self.states.switch(SandboxState(self))
+        self.sandbox = None                 # live game session (RESUME target)
+        self.menu = MenuState(self)
+        self.states.switch(self.menu)
 
     @property
     def state(self):
         return self.states.current
+
+    # ------------------------------------------------------- state switching
+
+    def start_sandbox(self) -> None:
+        """Menu SANDBOX item: start a fresh game session."""
+        from game.sandbox import SandboxState   # after the GL context exists
+        if self.sandbox is not None:
+            self.sandbox.dispose()          # free the replaced session's GL
+        self.paused = False
+        self.sandbox = SandboxState(self)
+        self.states.switch(self.sandbox)
+
+    def open_menu(self) -> None:
+        """ESC in the sandbox: back to the menu (sandbox kept for RESUME)."""
+        self.states.switch(self.menu)
 
     def run(self) -> None:
         clock = pygame.time.Clock()
         acc = 0.0
         frames = 0
         t0 = time.perf_counter()
-        running = True
-        while running:
+        while self.running:
             dt_real = min(clock.tick() / 1000.0, 0.1)
             for ev in pygame.event.get():
-                if ev.type == pygame.QUIT or (
-                        ev.type == pygame.KEYDOWN
-                        and ev.key == pygame.K_ESCAPE):
-                    running = False         # ESC: menu arrives with Task 21
+                if ev.type == pygame.QUIT:
+                    self.running = False
                 elif ev.type == pygame.VIDEORESIZE:
                     self.window.handle_resize(ev.w, ev.h)
                 else:

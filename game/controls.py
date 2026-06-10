@@ -37,9 +37,13 @@ class FreeCamControls:
             pygame.event.set_grab(True)
             pygame.mouse.get_rel()              # flush stale motion
         elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 3:
-            self._looking = False
-            pygame.event.set_grab(False)
-            pygame.mouse.set_visible(True)
+            self.release()
+
+    def release(self) -> None:
+        """End a mouse-look drag (button-up, or the state is left mid-drag)."""
+        self._looking = False
+        pygame.event.set_grab(False)
+        pygame.mouse.set_visible(True)
 
     def update(self, dt_real: float) -> None:
         """Poll held keys/mouse and move the camera (real time, unscaled)."""
@@ -90,11 +94,18 @@ class SandboxControls:
                                   and sandbox.rig.mode == "free"):
             self.free.handle_event(ev)      # RMB mouse-look grab
 
+    def release_mouse(self) -> None:
+        """Drop any live mouse-look grab (sandbox.leave safety)."""
+        self.free.release()
+
     def _handle_key(self, key) -> None:
         sandbox = self.sandbox
         app = sandbox.app
-        if key == pygame.K_m:
+        if key == pygame.K_ESCAPE:
+            app.open_menu()                 # sim freezes; RESUME continues
+        elif key == pygame.K_m:
             sandbox.map_open = not sandbox.map_open
+            app.audio.ui_click()
         elif key == pygame.K_c:
             sandbox.rig.cycle_mode()
         elif key == pygame.K_SPACE:

@@ -211,18 +211,23 @@ class TextRenderer:
         return out.reshape(n * 6, _FLOATS_PER_VERT)
 
     def draw_text(self, x, y, s: str, color=(1.0, 1.0, 1.0),
-                  size: int = BODY_SIZE) -> None:
-        """Queue ``s`` with its top-left corner at (x, y) screen pixels."""
+                  size: int = BODY_SIZE, scale: float = 1.0) -> None:
+        """Queue ``s`` with its top-left corner at (x, y) screen pixels.
+
+        ``scale`` multiplies the glyph quads + advances (e.g. the menu
+        title: 28 pt atlas glyphs x3) without rebaking the atlas; width is
+        ``text_width(s, size) * scale``.
+        """
         g = self.glyphs[size]
         codes = self._codes(s)
         if len(codes) == 0:
             return
-        adv = g.adv[codes].astype(np.float64)
+        adv = g.adv[codes].astype(np.float64) * scale
         pen = np.round(float(x)
                        + np.concatenate(([0.0], np.cumsum(adv)[:-1])))
         self._batch.append(self._quads(
             pen.astype(np.float32), np.float32(round(float(y))),
-            g.w[codes], g.h[codes],
+            g.w[codes] * np.float32(scale), g.h[codes] * np.float32(scale),
             g.u0[codes], g.v0[codes], g.u1[codes], g.v1[codes],
             _rgba(color)))
 

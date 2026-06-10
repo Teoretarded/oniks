@@ -53,7 +53,7 @@ BRACKET_LINE_W = 2.0        # px stroke
 BRACKET_TEXT_GAP = 6.0      # px between the bracket and the range text
 
 CONTROLS_HINT = ("C cam  M map  SPACE launch  1/2 profile  "
-                 "P pause  N step  -/= time  F2 shot")
+                 "P pause  N step  -/= time  F2 shot  ESC menu")
 
 
 def world_to_screen(sandbox, pos_f64, w: float, h: float):
