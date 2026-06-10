@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from engine import math3d
 from engine.meshdata import MeshData
 
 RINGS = [  # (outer_radius_m, cell_m, wave_weight)
@@ -141,7 +142,6 @@ class Ocean:
         self.shader = Shader(OCEAN_VERT, OCEAN_FRAG)
 
     def draw(self, renderer, camera, time: float) -> None:
-        from engine import math3d
         renderer.set_common(self.shader)
         self.shader.set_float("u_time", float(time) % 3600.0)
         for (_outer, cell, _ww), mesh in zip(RINGS, self.meshes):
