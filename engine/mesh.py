@@ -45,6 +45,9 @@ class Mesh:
         vertices = np.ascontiguousarray(md.vertices, dtype=np.float32)
         indices = np.ascontiguousarray(md.indices, dtype=np.uint32)
         self.index_count = int(indices.size)
+        # Bounding-sphere radius about the model origin (renderer culling).
+        self.radius = (float(np.linalg.norm(vertices[:, 0:3], axis=1).max())
+                       if len(vertices) else 0.0)
 
         self.vao = glGenVertexArrays(1)
         self.vbo = glGenBuffers(1)
