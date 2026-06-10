@@ -20,6 +20,16 @@ physics works, game is optimized, models look good."
   fbm everywhere). Masked per-island evaluation = bit-identical ~3-10x speedup (Task 8 note).
   Do in the perf pass (Task 22) if tile streaming hitches show up.
 
+## Pre-loop backlog additions (Phase B+C milestone review)
+
+- [ ] **Bastion TEL needs an art pass.** Current model reads as a green slab with wheels; the
+  launcher cam makes it a hero object. Needs: articulated cab (windows, fenders), visible
+  chassis/axle line, beefier canister proportions with end caps and frame mounts, mudguards.
+- [x] **Log-depth grazing-angle artifact** (terrain holes through huge LOD2 triangles at
+  low land cameras) — fixed in Phase D Task 16b via fragment-shader gl_FragDepth.
+- [ ] Ocean wave stripes still read repetitive at mid distance in model scenes (same item
+  as Phase A backlog — confirm after glint/wave variation pass).
+
 ## Iterations
 
 (filled in during Phase F)
