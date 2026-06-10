@@ -36,8 +36,7 @@ from world.generation import BASE_POS
 from world.ocean import Ocean
 from world.sky import Sky
 from world.terrain import Terrain
-from world.world import (CANISTER_MOUTH_OFFSET, LAUNCH_ELEV_DEG, WorldState,
-                         launch_realtime_lock)
+from world.world import LAUNCH_ELEV_DEG, WorldState, launch_realtime_lock
 
 # --- Tuning constants ---------------------------------------------------------
 

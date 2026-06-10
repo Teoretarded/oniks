@@ -77,7 +77,10 @@ class SandboxControls:
     def handle_event(self, ev) -> None:
         if ev.type == pygame.KEYDOWN:
             self._handle_key(ev.key)
-        if self.sandbox.rig.mode == "free":
+        # Forward to the free cam while in free mode — and also while a
+        # mouse-look drag is live, so leaving free mode mid-drag still sees
+        # the button-up and releases the grab.
+        if self.sandbox.rig.mode == "free" or self.free._looking:
             self.free.handle_event(ev)      # RMB mouse-look grab
 
     def _handle_key(self, key) -> None:

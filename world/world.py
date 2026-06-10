@@ -117,8 +117,8 @@ class WorldState:
         base = np.array(BASE_POS, dtype=np.float64)
         pos = base + CANISTER_MOUTH_OFFSET
         tp = np.asarray(target_point, dtype=np.float64)
-        first = waypoints[0] if len(waypoints) else (tp[0], tp[2])
-        heading = float(np.arctan2(first[0] - pos[0], first[1] - pos[2]))
+        fx, fz = waypoints[0] if len(waypoints) else (tp[0], tp[2])
+        heading = float(np.arctan2(fx - pos[0], fz - pos[2]))
         m = Missile(ONIKS, pos, heading, profile, tp, waypoints=waypoints)
         self.missiles.append(m)
         self.reload_left = BASTION.reload_s
