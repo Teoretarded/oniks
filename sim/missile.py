@@ -52,6 +52,13 @@ DESCENT_GLIDE_DEG = 9.0    # nominal glide slope used to size descent_range
 # Terminal phase starts when below this multiple of skim altitude.
 TERMINAL_ALT_FACTOR = 4.0
 
+# Close-range hi-lo handling (Task 22b): a hi-lo shot whose total route ground
+# distance is shorter than descent_range * CLOSE_HILO_FACTOR cannot reach full
+# cruise altitude without overshooting the target and circling back. The
+# commanded cruise altitude scales down quadratically with route length so
+# short shots stay low (a 35 km shot commands ~1 km, a 100 km shot ~8 km).
+CLOSE_HILO_FACTOR = 1.25
+
 # Inside this range the seeker (or the unguided aim point) gets full 3D PN —
 # the final dive out of the sea-skim onto the hull/aim point.
 FINAL_PN_RANGE = 800.0     # m
@@ -67,6 +74,14 @@ THRUST_SCALE = 4.0e5       # N per Mach of error at KP_THRUST = 1
 STALL_SPEED = 200.0        # m/s
 
 _UP = np.array([0.0, 1.0, 0.0])
+
+
+def _descent_range(weapon, cruise_alt):
+    """Range-to-go at which the hi profile starts down: nominal glide slope
+    from cruise_alt plus a margin to get level before terminal."""
+    return ((cruise_alt - weapon.skim_alt)
+            / np.tan(np.radians(DESCENT_GLIDE_DEG))
+            + weapon.terminal_range * 0.4)
 
 
 def _rotate_toward(vhat, target_dir, max_angle):
@@ -116,11 +131,23 @@ class Missile:
         self.locked_ship = None
         self.alive = True
         self.impact_pos = None
-        # Range-to-go at which the hi profile starts down: nominal 9-degree
-        # glide from cruise altitude plus a margin to get level before terminal.
-        self.descent_range = ((weapon.cruise_alt_hi - weapon.skim_alt)
-                              / np.tan(np.radians(DESCENT_GLIDE_DEG))
-                              + weapon.terminal_range * 0.4)
+        # Commanded cruise altitude and the range-to-go at which the hi
+        # profile starts down. A hi-lo shot whose route is shorter than the
+        # descent envelope scales its cruise altitude down (quadratically with
+        # route length) and recomputes the descent range to match, so close
+        # targets are hit directly instead of overshot from 14 km (Task 22b).
+        self.cruise_alt = weapon.cruise_alt_hi
+        self.descent_range = _descent_range(weapon, self.cruise_alt)
+        if self.hi:
+            pts = [(float(self.pos[0]), float(self.pos[2]))] + self.route
+            d_route = sum(np.hypot(x1 - x0, z1 - z0)
+                          for (x0, z0), (x1, z1) in zip(pts, pts[1:]))
+            envelope = self.descent_range * CLOSE_HILO_FACTOR
+            if d_route < envelope:
+                self.cruise_alt = max(weapon.lo_alt,
+                                      weapon.cruise_alt_hi
+                                      * (d_route / envelope) ** 2)
+                self.descent_range = _descent_range(weapon, self.cruise_alt)
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
 
@@ -179,10 +206,10 @@ class Missile:
         lift = GRAVITY * _UP   # cancel gravity so altitude PDs have no droop
         if self.phase == PH_CLIMB:
             g = (steer_heading_accel(self.vel, self._route_heading())
-                 + (altitude_hold_accel(alt, vs, w.cruise_alt_hi,
+                 + (altitude_hold_accel(alt, vs, self.cruise_alt,
                                         ALT_KP, ALT_KD, ALT_MAX_A)) * _UP + lift)
         elif self.phase == PH_CRUISE:
-            target_alt = w.cruise_alt_hi if self.hi else w.lo_alt
+            target_alt = self.cruise_alt if self.hi else w.lo_alt
             g = (steer_heading_accel(self.vel, self._route_heading())
                  + altitude_hold_accel(alt, vs, target_alt,
                                        ALT_KP, ALT_KD, ALT_MAX_A) * _UP + lift)
@@ -250,7 +277,7 @@ class Missile:
             self.phase = PH_BOOST
         if self.phase == PH_BOOST and self.t >= w.eject_time + w.booster_time:
             self.phase = PH_CLIMB if self.hi else PH_CRUISE
-        if self.phase == PH_CLIMB and alt >= CLIMB_TO_CRUISE_FRAC * w.cruise_alt_hi:
+        if self.phase == PH_CLIMB and alt >= CLIMB_TO_CRUISE_FRAC * self.cruise_alt:
             self.phase = PH_CRUISE
         if self.phase == PH_CRUISE:
             down_range = self.descent_range if self.hi else w.terminal_range

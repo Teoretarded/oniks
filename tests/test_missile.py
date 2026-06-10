@@ -64,6 +64,33 @@ def test_fuel_lasts_long_range():
         if not m.alive: break
     assert m.impact_pos is not None and m.fuel > 0.0   # made 340 km with fuel to spare
 
+def test_hi_lo_close_range_no_overshoot():
+    """Task 22b: a hi-lo shot at a target inside the descent envelope must not
+    climb to full cruise altitude, overshoot, and circle back."""
+    target = np.array([0., 0., 35_000.])
+    m = _launch(target=target); w = _World()
+    path_len = 0.0; peak_alt = 0.0
+    for _ in range(int(300 / DT)):
+        m.update(DT, w)
+        path_len += float(np.linalg.norm(m.pos - m.prev_pos))
+        peak_alt = max(peak_alt, float(m.pos[1]))
+        if not m.alive: break
+    assert not m.alive and m.impact_pos is not None
+    assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 600.0
+    direct = float(np.hypot(target[0] - 0.0, target[2] - 0.0))
+    assert path_len < 1.5 * direct           # no overshoot-and-circle-back
+    assert peak_alt < 3000.0                 # stays low on a short shot
+
+def test_hi_lo_long_range_unchanged():
+    """Task 22b: route length far beyond the descent envelope -> the full
+    commanded hi cruise altitude is unchanged."""
+    m = _launch(target=(0., 0., 250_000.)); w = _World()
+    for _ in range(int(180 / DT)):
+        m.update(DT, w)
+        if m.phase == PH_CRUISE and m.t > 120: break
+    assert m.phase == PH_CRUISE
+    assert abs(m.pos[1] - ONIKS.cruise_alt_hi) < 800.0
+
 def test_waypoints_pop_as_the_route_is_flown():
     """Regression (found by Task 20): route waypoints are (x, z) pairs but
     waypoint_reached takes a 3-vector — flying past a waypoint used to crash."""
