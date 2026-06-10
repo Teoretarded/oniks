@@ -48,6 +48,12 @@ _SUN_YAW = float(np.arctan2(0.35, 0.55))
 # triangles, while near-camera ocean rings are fine-grained and render clean.
 PAD_X, PAD_Z = 800.0, 3_000.0
 PAD_TOP = 2.5                       # quay deck height above sea level (m)
+# ships anchor in a bow-to-stern line in open water NW of the pad (so the
+# broadside camera sees all three without overlap); structures get their own
+# pad east of it, with the harbor (a waterline model) in open water beyond
+FLEET_X, FLEET_Z = PAD_X - 300.0, PAD_Z + 500.0
+SHORE_X, SHORE_Z = PAD_X + 320.0, PAD_Z + 60.0
+HARBOR_Z = SHORE_Z + 280.0
 
 SCENES = {
     # cam 3000 m above base looking north (whole bay in view; pulled 1.4 km
@@ -68,10 +74,58 @@ SCENES = {
                                   (PAD_X + 9.0, PAD_TOP + 1.5, PAD_Z + 1.0)),
     "models_high": lambda s: _aim(s, (PAD_X + 26.0, PAD_TOP + 25.0, PAD_Z - 28.0),
                                   (PAD_X - 2.0, PAD_TOP, PAD_Z + 1.0)),
+    # ships (bow-to-stern line heading north): broadside, bow quarter, plan
+    "models_fleet_side": lambda s: _aim(s, (FLEET_X + 500.0, 40.0, FLEET_Z + 30.0),
+                                        (FLEET_X, 5.0, FLEET_Z + 30.0)),
+    "models_fleet_quarter": lambda s: _aim(s, (FLEET_X + 260.0, 22.0, FLEET_Z + 480.0),
+                                           (FLEET_X - 20.0, 5.0, FLEET_Z + 100.0)),
+    "models_fleet_high": lambda s: _aim(s, (FLEET_X + 40.0, 400.0, FLEET_Z - 360.0),
+                                        (FLEET_X, 0.0, FLEET_Z + 40.0)),
+    # structures pad (radar station + fuel depot) and the harbor
+    "models_shore_front": lambda s: _aim(s, (SHORE_X + 150.0, 25.0, SHORE_Z - 140.0),
+                                         (SHORE_X - 5.0, 8.0, SHORE_Z)),
+    "models_shore_harbor": lambda s: _aim(s, (SHORE_X + 150.0, 30.0, HARBOR_Z - 170.0),
+                                          (SHORE_X - 10.0, 4.0, HARBOR_Z - 20.0)),
+    "models_shore_high": lambda s: _aim(s, (SHORE_X + 80.0, 380.0, SHORE_Z + 40.0),
+                                        (SHORE_X, 0.0, SHORE_Z + 150.0)),
 }
-MODEL_SCENES = ("models_front", "models_side", "models_high")
+MODEL_SCENES = ("models_front", "models_side", "models_high",
+                "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
+                "models_shore_front", "models_shore_harbor", "models_shore_high")
 
 _model_draws: list | None = None    # [(Mesh, pos_f64), ...] built lazily
+
+
+def _pad_mesh(hx: float, hz: float):
+    """Concrete quay pad: deck grid tessellated ~4 m + skirt walls in ~8 m
+    segments. One giant quad would interpolate the vertex-shader log depth so
+    far off at grazing angles that the (finely tessellated) ocean wins the
+    depth test and eats the deck."""
+    from engine.meshdata import MeshBuilder, make_box, make_grid
+    from models.common import PALETTE
+
+    b = MeshBuilder()
+    nx, nz = round(hx / 2.0) + 1, round(hz / 2.0) + 1
+    xs = np.linspace(-hx, hx, nx)
+    zs = np.linspace(-hz, hz, nz)
+    cols = np.empty((nz, nx, 3), dtype=np.float32)
+    cols[:] = PALETTE["concrete"]
+    b.add_mesh(make_grid(xs, zs, np.zeros((nz, nx)), cols))
+    nsx = max(1, round(hx / 4.0))                 # north + south walls
+    seg = 2.0 * hx / nsx
+    for i in range(nsx):
+        x0 = -hx + seg * (i + 0.5)
+        for sz in (1.0, -1.0):
+            b.add_mesh(make_box((seg, 4.0, 0.6), PALETTE["concrete"],
+                                offset=(x0, -2.02, sz * (hz - 0.3))))
+    nsz = max(1, round(hz / 4.0))                 # east + west walls
+    seg = 2.0 * hz / nsz
+    for i in range(nsz):
+        z0 = -hz + seg * (i + 0.5)
+        for sx in (1.0, -1.0):
+            b.add_mesh(make_box((0.6, 4.0, seg), PALETTE["concrete"],
+                                offset=(sx * (hx - 0.3), -2.02, z0)))
+    return b.build()
 
 
 def _ensure_model_draws() -> list:
@@ -80,47 +134,41 @@ def _ensure_model_draws() -> list:
     if _model_draws is not None:
         return _model_draws
     from engine.mesh import Mesh
-    from engine.meshdata import MeshBuilder, make_box, make_grid
+    from engine.meshdata import MeshBuilder, make_box
     from models.bastion import build_bastion_tel
     from models.common import PALETTE
     from models.oniks import build_oniks, build_oniks_booster
+    from models.ships_models import build_cargo, build_tanker, build_warship
+    from models.structures import (build_fuel_depot, build_harbor,
+                                   build_radar_station)
 
-    # Quay deck: tessellated ~4 m cells. One giant quad would interpolate the
-    # vertex-shader log depth so far off at grazing angles that the (finely
-    # tessellated) ocean wins the depth test and eats the deck.
-    hx, hz = 24.0, 15.0
-    b = MeshBuilder()
-    xs = np.linspace(-hx, hx, 13)
-    zs = np.linspace(-hz, hz, 9)
-    cols = np.empty((9, 13, 3), dtype=np.float32)
-    cols[:] = PALETTE["concrete"]
-    b.add_mesh(make_grid(xs, zs, np.zeros((9, 13)), cols))
-    # skirt walls down past the waves, in short segments (same depth reason)
-    for i in range(6):                            # north + south walls
-        x0 = -hx + 4.0 + 8.0 * i
-        for sz in (1.0, -1.0):
-            b.add_mesh(make_box((8.0, 4.0, 0.6), PALETTE["concrete"],
-                                offset=(x0, -2.02, sz * (hz - 0.3))))
-    for i in range(4):                            # east + west walls
-        z0 = -hz + 3.75 + 7.5 * i
-        for sx in (1.0, -1.0):
-            b.add_mesh(make_box((0.6, 4.0, 7.5), PALETTE["concrete"],
-                                offset=(sx * (hx - 0.3), -2.02, z0)))
-    pad = b.build()
     # display stands under the missile + booster assembly
     stands = MeshBuilder()
     for z in (-5.2, -2.0, 2.0):
         stands.add_mesh(make_box((0.35, 0.95, 0.5), PALETTE["concrete"],
                                  offset=(0.0, 0.475, z)))
     p = np.array([PAD_X, PAD_TOP, PAD_Z], dtype=np.float64)
+    f = np.array([FLEET_X, 0.0, FLEET_Z], dtype=np.float64)
+    s = np.array([SHORE_X, PAD_TOP, SHORE_Z], dtype=np.float64)
     # diagonal spread so the NE "front" camera sees each silhouette clear
     _model_draws = [
-        (Mesh(pad), p),                                          # deck at PAD_TOP
+        (Mesh(_pad_mesh(24.0, 15.0)), p),                        # deck at PAD_TOP
         (Mesh(build_bastion_tel(elevation_deg=88.0)), p + (-12.0, 0.0, 7.0)),
         (Mesh(build_bastion_tel(elevation_deg=0.0)), p + (1.0, 0.0, 1.0)),
         (Mesh(stands.build()), p + (13.0, 0.0, -5.0)),
         (Mesh(build_oniks()), p + (13.0, 0.95, -5.0)),
         (Mesh(build_oniks_booster()), p + (13.0, 0.95, -10.45)),  # behind tail
+        # ships at anchor (waterline origins) in a bow-to-stern line
+        (Mesh(build_tanker()), f + (0.0, 0.0, -200.0)),
+        (Mesh(build_cargo()), f + (0.0, 0.0, 60.0)),
+        (Mesh(build_warship()), f + (0.0, 0.0, 280.0)),
+        # structures pad: fuel depot west half, radar station east edge
+        (Mesh(_pad_mesh(70.0, 40.0)), s),
+        (Mesh(build_fuel_depot()), s + (-25.0, 0.0, 0.0)),
+        (Mesh(build_radar_station()), s + (45.0, 0.0, -12.0)),
+        # harbor floats on its own (quay tops 2.5 m over the waterline)
+        (Mesh(build_harbor()),
+         np.array([SHORE_X, 0.0, HARBOR_Z], dtype=np.float64)),
     ]
     return _model_draws
 

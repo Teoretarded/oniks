@@ -46,3 +46,13 @@ def rot_z(angle: float) -> np.ndarray:
     return np.array([[c, -s, 0.0],
                      [s, c, 0.0],
                      [0.0, 0.0, 1.0]])
+
+
+def sphere_profile(radius: float, bands: int = 10) -> list[tuple[float, float]]:
+    """(z, r) lathe profile for a full sphere of ``radius`` about the origin.
+
+    Feed to ``make_lathe`` (which revolves around +Z); a sphere is symmetric,
+    so the result works for any axis without rotation.
+    """
+    ts = np.linspace(math.pi, 0.0, bands + 1)
+    return [(radius * math.cos(t), radius * math.sin(t)) for t in ts]

@@ -6,6 +6,8 @@ import numpy as np
 from models.bastion import build_bastion_tel
 from models.common import PALETTE
 from models.oniks import build_oniks, build_oniks_booster
+from models.ships_models import build_cargo, build_tanker, build_warship
+from models.structures import build_fuel_depot, build_harbor, build_radar_station
 
 
 def _check(md):
@@ -19,7 +21,9 @@ def _check(md):
 def test_all_builders_finite_unit_normals():
     for md in (build_oniks(), build_oniks_booster(),
                build_bastion_tel(elevation_deg=0.0),
-               build_bastion_tel(elevation_deg=88.0)):
+               build_bastion_tel(elevation_deg=88.0),
+               build_cargo(), build_tanker(), build_warship(),
+               build_radar_station(), build_fuel_depot(), build_harbor()):
         _check(md)
 
 
@@ -57,3 +61,41 @@ def test_tel_elevation_raises_canisters():
     stowed = build_bastion_tel(elevation_deg=0.0)
     raised = build_bastion_tel(elevation_deg=88.0)
     assert raised.vertices[:, 1].max() > stowed.vertices[:, 1].max() + 4.0
+
+
+def test_ship_dimensions():
+    # (builder, length over all, beam) — real-scale, plan-locked
+    for build, length, beam in ((build_cargo, 180.0, 28.0),
+                                (build_tanker, 240.0, 40.0),
+                                (build_warship, 150.0, 19.0)):
+        md = build()
+        p = md.vertices[:, 0:3]
+        assert abs((p[:, 2].max() - p[:, 2].min()) - length) <= 1.0, build.__name__
+        assert abs((p[:, 0].max() - p[:, 0].min()) - beam) <= 1.0, build.__name__
+        # origin at the waterline center: hull straddles z = 0 evenly
+        assert abs(p[:, 2].max() + p[:, 2].min()) <= 2.0, build.__name__
+        # nothing deeper than 2 m below the waterline
+        assert p[:, 1].min() >= -2.001, build.__name__
+
+
+def test_structures_above_ground():
+    for build in (build_radar_station, build_fuel_depot, build_harbor):
+        md = build()
+        assert md.vertices[:, 1].min() >= -2.001, build.__name__
+
+
+def test_radar_station_radome_on_top():
+    md = build_radar_station()
+    y = md.vertices[:, 1]
+    top = md.vertices[y >= y.max() - 0.5]
+    assert np.all(np.isclose(top[:, 6:9], PALETTE["radar_white"], atol=1e-4))
+
+
+def test_fuel_depot_tank_height():
+    md = build_fuel_depot()
+    white = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["tank_white"],
+                              atol=1e-4), axis=1)
+    assert white.any()
+    y = md.vertices[white, 1]
+    # 12 m cylinder walls topped by domes (dome adds a few meters, not a tower)
+    assert 12.0 <= y.max() <= 16.0
