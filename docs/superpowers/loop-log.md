@@ -30,6 +30,17 @@ physics works, game is optimized, models look good."
 - [ ] Ocean wave stripes still read repetitive at mid distance in model scenes (same item
   as Phase A backlog — confirm after glint/wave variation pass).
 
+## Pre-loop backlog additions (Phase D milestone review)
+
+- [ ] **16x time accel tanks to ~3.4 FPS** — per-ship Python loop in world.step dominates
+  (Task 18 finding). Primary target for Task 22 perf pass (vectorize ship updates or batch
+  the per-substep work).
+- [ ] **Close-range hi-lo overshoot** — a hi-lo launch inside the ~105 km descent envelope
+  climbs to 14 km, flies past, and circles back before killing. Fix as Phase E Task 22b:
+  scale cruise altitude to the available distance.
+- [ ] Harbor site sits slightly inland; waterline-style harbor model looks odd up close
+  (fine at gameplay distance). Candidate: nudge site seaward or add a shore apron.
+
 ## Iterations
 
 (filled in during Phase F)
