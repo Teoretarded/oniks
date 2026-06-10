@@ -95,6 +95,27 @@ def _scene_hud(s) -> None:
     s.rig.update(TRANSITION_TIME + 0.05, m)   # finish the blend (cam snaps)
 
 
+def _scene_map(s) -> None:
+    """Task 20 tactical map review: full-world view with the contact picture,
+    a planned dogleg route to a tracked mid-ocean contact, a live missile
+    mid-cruise (diamond + trail + remaining route), range rings, lanes,
+    sites, the base star and the seeker basket at the target."""
+    _fly(s, 2.0)                       # first contact refresh forms the board
+    world = s.world
+    # Track the contact nearest mid-ocean (z ~ 220 km): a long, readable route.
+    sid = min(world.contacts.tracks,
+              key=lambda c: abs(float(
+                  world.contacts.estimated_pos(c, world.sim_time)[2])
+                  - 220_000.0))
+    s.tactical_map.selected_contact = sid
+    s.tactical_map.record(world)       # target_point tracks the contact
+    s.waypoints = [(-70_000.0, 60_000.0), (-35_000.0, 140_000.0)]
+    s.request_launch()
+    _fly(s, 110.0)                     # mid-cruise: trail + route remainder
+    s.map_open = True
+    _set_cam(s, (_BX, _BY + 3000.0, -2_000.0), 0.0, -0.42)
+
+
 def _scene_terminal(s) -> None:
     """Sea-skim 300 m short of a tanker, seeker locked, broadside camera."""
     tanker = next(sh for sh in s.world.ships
@@ -174,10 +195,12 @@ SCENES = {
     "terminal": _scene_terminal,
     # HUD overlay review (Task 19): the only scene rendered with the HUD on.
     "hud": _scene_hud,
+    # Tactical map review (Task 20): map open over a dimmed overview.
+    "map": _scene_map,
 }
 # Flight scenes advance the sim themselves to a precise moment, so shoot()
 # must not add its own wave-phase steps on top.
-SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0}
+SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")

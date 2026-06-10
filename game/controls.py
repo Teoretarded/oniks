@@ -3,11 +3,14 @@
     ESC menu | M map | C camera | SPACE launch | 1/2 profile hi-lo/lo-lo
     P pause | N frame-step | - / = time accel down/up (1,2,4,8,16) | F2 screenshot
     free cam: WASD QE, mouse look (RMB drag), SHIFT fast, CTRL+SHIFT very fast
+    map (while open): LMB target, RMB waypoint, X clear waypoints,
+    wheel zoom at cursor, MMB drag / arrow keys pan
 
-Plus T (temporary Task-18 debug, replaced by the Task-20 tactical map):
-launch at the nearest contact. Time accel refuses to exceed 1x while a
-missile is in EJECT/BOOST — the requested rate is kept here and the sandbox
-auto-restores it once the launch reaches CLIMB/CRUISE.
+While the map is open its interactions consume events first; everything it
+doesn't claim (SPACE, P, time accel, M itself...) falls through to the
+normal bindings. Time accel refuses to exceed 1x while a missile is in
+EJECT/BOOST — the requested rate is kept here and the sandbox auto-restores
+it once the launch reaches CLIMB/CRUISE.
 """
 
 from __future__ import annotations
@@ -75,19 +78,23 @@ class SandboxControls:
         return TIME_SCALES[self._scale_idx]
 
     def handle_event(self, ev) -> None:
-        if ev.type == pygame.KEYDOWN:
+        sandbox = self.sandbox
+        # The open tactical map gets first claim on events (mouse + X).
+        consumed = sandbox.map_open and sandbox.tactical_map.handle_event(ev)
+        if not consumed and ev.type == pygame.KEYDOWN:
             self._handle_key(ev.key)
         # Forward to the free cam while in free mode — and also while a
-        # mouse-look drag is live, so leaving free mode mid-drag still sees
-        # the button-up and releases the grab.
-        if self.sandbox.rig.mode == "free" or self.free._looking:
+        # mouse-look drag is live, so leaving free mode (or opening the map)
+        # mid-drag still sees the button-up and releases the grab.
+        if self.free._looking or (not consumed and not sandbox.map_open
+                                  and sandbox.rig.mode == "free"):
             self.free.handle_event(ev)      # RMB mouse-look grab
 
     def _handle_key(self, key) -> None:
         sandbox = self.sandbox
         app = sandbox.app
         if key == pygame.K_m:
-            sandbox.map_open = not sandbox.map_open   # map arrives in Task 20
+            sandbox.map_open = not sandbox.map_open
         elif key == pygame.K_c:
             sandbox.rig.cycle_mode()
         elif key == pygame.K_SPACE:
@@ -107,12 +114,6 @@ class SandboxControls:
             self._scale_idx = min(len(TIME_SCALES) - 1, self._scale_idx + 1)
         elif key == pygame.K_F2:
             app.screenshot_requested = True
-        elif key == pygame.K_t:
-            # TEMPORARY (Task 18 debug): target + launch at the nearest
-            # contact. The Task-20 tactical map replaces this with real
-            # target selection.
-            sandbox.debug_target_nearest()
-            sandbox.request_launch()
 
     def update(self, dt_real: float) -> None:
         """Per-frame held-key poll (free-cam flight only, real time)."""

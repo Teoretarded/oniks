@@ -5,8 +5,9 @@ particle renderer and the cinematic CameraRig. ``sim_step`` advances the
 world and turns sim happenings into effects (booster plume, exhaust trail,
 explosions / splashes / deck fires, the dropped booster's ballistic tumble);
 ``render`` draws the scene in the fixed order sky -> terrain -> ocean ->
-sites -> ships -> TEL -> missiles -> particles -> HUD overlay. The tactical
-map (Task 20) and audio (Task 21) hook in on top of this state later.
+sites -> ships -> TEL -> missiles -> particles -> HUD/map overlay. The
+tactical map (M) replaces the HUD while open and drives the player intent
+fields (target_point / waypoints); audio (Task 21) hooks in later.
 
 GL-touching module (imports world.sky etc.) — never imported by unit tests.
 """
@@ -24,6 +25,7 @@ from game.cameras import CameraRig
 from game.controls import SandboxControls
 from game.hud import HUD
 from game.states import GameState
+from game.tactical_map import TacticalMap
 from models.bastion import build_bastion_tel
 from models.common import rot_x, rot_y, rot_z
 from models.oniks import build_oniks, build_oniks_booster
@@ -125,16 +127,17 @@ class SandboxState(GameState):
         self.effects = Effects(seed=4)
         self.particles = ParticleRenderer()
         self.controls = SandboxControls(self)
-        self.text = TextRenderer()      # shared by HUD (and the Task-20 map)
+        self.text = TextRenderer()      # shared by the HUD and the map
         self.hud = HUD(self.text)
         self.hud_visible = True
 
-        # Player intent (the Task-20 map will drive these)
+        # Player intent (driven by the tactical map)
         self.profile = "hi-lo"
         self.target_point = None        # float64 (3,) sea-level aim point
         self.waypoints: list = []       # (x, z) flown before the target
         self.followed = None            # missile the cinematic cameras track
-        self.map_open = False           # placeholder until Task 20
+        self.map_open = False           # M toggles the tactical map
+        self.tactical_map = TacticalMap(self)
 
         # Effects bookkeeping
         self._trails: dict[int, object] = {}      # id(missile) -> TrailRibbon
@@ -178,20 +181,6 @@ class SandboxState(GameState):
             self._launch_puff(m.pos)
         return m
 
-    def debug_target_nearest(self) -> None:
-        """TEMPORARY (Task 18): target the contact nearest the base.
-        The Task-20 tactical map replaces this with real target selection."""
-        board = self.world.contacts
-        base = self._tel_pos
-        best_d, best = float("inf"), None
-        for sid in board.tracks:
-            est = board.estimated_pos(sid, self.world.sim_time)
-            d = float(np.hypot(est[0] - base[0], est[2] - base[2]))
-            if d < best_d:
-                best_d, best = d, est
-        if best is not None:
-            self.target_point = np.array([best[0], 0.0, best[2]])
-
     def effective_time_scale(self) -> float:
         """Requested accel, forced to 1x while a launch is in EJECT/BOOST."""
         if launch_realtime_lock(self.world.missiles):
@@ -207,6 +196,7 @@ class SandboxState(GameState):
         world = self.world
         prev = [(m, m.phase) for m in world.missiles]
         world.step(dt)
+        self.tactical_map.record(world)     # map trails + tracked target
         live = {id(m) for m in world.missiles}
 
         self._missile_effects(world.missiles)
@@ -310,7 +300,10 @@ class SandboxState(GameState):
         self._draw_tel()
         self._draw_missiles()
         self.particles.draw(self.renderer, self.effects)
-        if self.hud_visible:
+        if self.map_open:
+            self.tactical_map.update(dt_real)   # arrow-key panning
+            self.tactical_map.draw(w, h)
+        elif self.hud_visible:
             self.hud.draw(self, w, h)
 
     def _draw_ships(self) -> None:
