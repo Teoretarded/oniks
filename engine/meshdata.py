@@ -291,6 +291,8 @@ def make_fin(root_chord, tip_chord, span, sweep, thickness, color,
     _add_poly(verts, idx, list(reversed(bot)), (0.0, -1.0, 0.0), color)
     for i in range(4):
         j = (i + 1) % 4
+        if math.dist(loop[i], loop[j]) < _EPS:  # degenerate edge (e.g. tip_chord=0)
+            continue
         corners = (bot[i], bot[j], top[j], top[i])
         _add_poly(verts, idx, corners,
                   _face_normal(corners[0], corners[1], corners[2]), color)
