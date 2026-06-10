@@ -239,8 +239,10 @@ class Missile:
         speed = float(np.linalg.norm(self.vel))
         vhat = self.vel / speed if speed > 1e-9 else _UP.copy()
 
-        # Pop reached waypoints (never the final target point).
-        while len(self.route) > 1 and waypoint_reached(self.pos, self.route[0]):
+        # Pop reached waypoints (never the final target point). Route entries
+        # are (x, z) pairs; waypoint_reached expects a 3-vector.
+        while len(self.route) > 1 and waypoint_reached(
+                self.pos, (self.route[0][0], 0.0, self.route[0][1])):
             self.route.pop(0)
 
         # --- phase transitions ---

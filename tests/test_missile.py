@@ -64,6 +64,18 @@ def test_fuel_lasts_long_range():
         if not m.alive: break
     assert m.impact_pos is not None and m.fuel > 0.0   # made 340 km with fuel to spare
 
+def test_waypoints_pop_as_the_route_is_flown():
+    """Regression (found by Task 20): route waypoints are (x, z) pairs but
+    waypoint_reached takes a 3-vector — flying past a waypoint used to crash."""
+    m = Missile(ONIKS, np.array([0., 60., 0.]), heading=0.0, profile="hi-lo",
+                target_point=np.array([0., 0., 200_000.]),
+                waypoints=((100., 1_000.), (0., 100_000.)))
+    w = _World()
+    assert len(m.route) == 3                     # 2 waypoints + target point
+    m.pos = np.array([0., 4_000., 1_000.])       # within radius of waypoint 1
+    m.update(DT, w)
+    assert m.route == [(0., 100_000.), (0., 200_000.)]
+
 def test_determinism():
     a = _launch(); b = _launch(); w = _World()
     for _ in range(int(30 / DT)): a.update(DT, w)
