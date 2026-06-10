@@ -146,7 +146,9 @@ class HUD:
         if world.launcher_armed:
             status, col = "ARMED", ARMED_COL
         else:
-            status = f"RELOADING {int(np.ceil(world.reload_left))} s"
+            # Epsilon: fixed-step decrements leave reload_left ~1e-13 above
+            # the exact second, which would ceil one second too high.
+            status = f"RELOADING {int(np.ceil(world.reload_left - 1e-9))} s"
             col = RELOAD_COL
         rows = [
             ("STATUS", status, col),
