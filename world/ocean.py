@@ -80,8 +80,7 @@ layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_nrm; layout(locat
 uniform mat4 u_proj, u_view_rot, u_model;
 uniform vec2 u_world_origin;
 uniform float u_time;
-uniform float u_log_depth_fcoef;
-out vec3 v_nrm; out vec3 v_view_vec;
+out vec3 v_nrm; out vec3 v_view_vec; out float v_flogz;
 void main(){
     vec2 wxz = a_pos.xz + u_world_origin;   // true world xz -> waves don't swim
     float ww = a_col.r;                      // wave weight
@@ -101,17 +100,23 @@ void main(){
     vec4 world_rel = u_model * vec4(a_pos.x, y, a_pos.z, 1.0);  // camera-relative
     v_view_vec = world_rel.xyz;
     gl_Position = u_proj * u_view_rot * world_rel;
-    gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * u_log_depth_fcoef - 1.0) * gl_Position.w;
+    // Depth comes from the fragment shader (exact per-pixel log depth via
+    // v_flogz); z = 0 clips at the camera plane — see the lit shader in
+    // engine/renderer.py (Task 16b).
+    gl_Position.z = 0.0;
+    v_flogz = 1.0 + gl_Position.w;
 }
 """
 
 OCEAN_FRAG = """
 #version 330 core
-in vec3 v_nrm; in vec3 v_view_vec;
+in vec3 v_nrm; in vec3 v_view_vec; in float v_flogz;
 uniform vec3 u_sun_color;
+uniform float u_log_depth_fcoef;
 out vec4 frag;
 """ + HAZE_GLSL + """
 void main(){
+    gl_FragDepth = log2(max(v_flogz, 1e-6)) * (u_log_depth_fcoef * 0.5);
     vec3 n = normalize(v_nrm);
     vec3 v = normalize(-v_view_vec);
     vec3 col = mix(vec3(0.045, 0.14, 0.21), u_haze_color,

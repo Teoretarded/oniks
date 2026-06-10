@@ -43,9 +43,10 @@ _BX, _BY, _BZ = BASE_POS
 _SUN_YAW = float(np.arctan2(0.35, 0.55))
 
 # --- models showcase: every vehicle/weapon model on a flat concrete pad ----
-# The pad is a quay just offshore (water ~50 m deep, home cliffs as backdrop):
-# low land cameras hit the log-depth near-plane artifact on huge terrain
-# triangles, while near-camera ocean rings are fine-grained and render clean.
+# The pad is a quay just offshore (water ~50 m deep, home cliffs as backdrop).
+# Historically it ALSO dodged the pre-Task-16b vertex-log-depth artifact on
+# huge terrain triangles; that is fixed now (see base_ground scene), but the
+# offshore composition is kept.
 PAD_X, PAD_Z = 800.0, 3_000.0
 PAD_TOP = 2.5                       # quay deck height above sea level (m)
 # ships anchor in a bow-to-stern line in open water NW of the pad (so the
@@ -67,6 +68,11 @@ SCENES = {
     # slight pitch up puts the sun disc at the frame top)
     "ocean_low": lambda s: _set_cam(s, (40_000.0, 8.0, 200_000.0),
                                     _SUN_YAW, 0.04),
+    # cam 2.5 m above the terrain at the base, looking north-east along the
+    # coastline at a grazing angle: huge terrain LOD cells nearly edge-on is
+    # the worst case for log-depth interpolation (Task 16b regression scene)
+    "base_ground": lambda s: _set_cam(s, (_BX, _BY + 2.5, _BZ),
+                                      np.pi / 4.0, -0.02),
     # models lineup from 3 orbit angles (models face north = +Z)
     "models_front": lambda s: _aim(s, (PAD_X + 20.0, PAD_TOP + 7.0, PAD_Z + 26.0),
                                    (PAD_X - 1.0, PAD_TOP + 2.5, PAD_Z - 1.0)),
@@ -98,9 +104,10 @@ _model_draws: list | None = None    # [(Mesh, pos_f64), ...] built lazily
 
 def _pad_mesh(hx: float, hz: float):
     """Concrete quay pad: deck grid tessellated ~4 m + skirt walls in ~8 m
-    segments. One giant quad would interpolate the vertex-shader log depth so
-    far off at grazing angles that the (finely tessellated) ocean wins the
-    depth test and eats the deck."""
+    segments. (The tessellation worked around the pre-Task-16b vertex-only
+    log depth, where one giant quad lost the depth test to the finely
+    tessellated ocean at grazing angles; fragment-shader depth made it
+    unnecessary, but it is cheap and kept.)"""
     from engine.meshdata import MeshBuilder, make_box, make_grid
     from models.common import PALETTE
 

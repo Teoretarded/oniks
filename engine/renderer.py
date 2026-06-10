@@ -2,8 +2,12 @@
 
 This is the render boundary (LOCKED): positions arrive float64, are made
 camera-relative via ``camera.rel`` and only then cast to float32, so there
-is zero jitter even 600 km from the origin. Logarithmic depth (written in
-the vertex shader) keeps z-precision over the 900 km far plane.
+is zero jitter even 600 km from the origin. Logarithmic depth keeps
+z-precision over the 900 km far plane: the fragment shader writes the exact
+per-pixel log depth (gl_FragDepth) while the vertex shader outputs z = 0 so
+the near plane clips exactly at the camera plane — vertex-only log depth
+interpolates linearly across triangles, which both mis-sorts and mis-clips
+huge triangles (1.2 km terrain LOD2 cells) at grazing angles (Task 16b).
 
 GL-touching module: never imported by unit tests.
 """
@@ -28,25 +32,33 @@ LIT_VERT = """
 #version 330 core
 layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_nrm; layout(location=2) in vec3 a_col;
 uniform mat4 u_proj, u_view_rot, u_model;
-uniform float u_log_depth_fcoef;
-out vec3 v_nrm; out vec3 v_col; out vec3 v_view_vec;
+out vec3 v_nrm; out vec3 v_col; out vec3 v_view_vec; out float v_flogz;
 void main(){
     vec4 world_rel = u_model * vec4(a_pos, 1.0);      // camera-relative world
     v_view_vec = world_rel.xyz;
     v_nrm = mat3(u_model) * a_nrm;
     v_col = a_col;
     gl_Position = u_proj * u_view_rot * world_rel;
-    gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * u_log_depth_fcoef - 1.0) * gl_Position.w;
+    // Depth comes from the fragment shader (exact per-pixel log depth via
+    // v_flogz) — vertex-interpolated log depth mis-sorts and mis-clips
+    // huge triangles (1.2 km terrain LOD2 cells) at grazing angles
+    // (Task 16b). z = 0 makes the near plane clip exactly at the camera
+    // plane (the only z linear in w does that) and disables far z-clipping,
+    // which is fine: draws are culled at MAX_DRAW_DIST < FAR anyway.
+    gl_Position.z = 0.0;
+    v_flogz = 1.0 + gl_Position.w;
 }
 """
 
 LIT_FRAG = """
 #version 330 core
-in vec3 v_nrm; in vec3 v_col; in vec3 v_view_vec;
+in vec3 v_nrm; in vec3 v_col; in vec3 v_view_vec; in float v_flogz;
 uniform vec3 u_sun_color;
+uniform float u_log_depth_fcoef;
 out vec4 frag;
 """ + HAZE_GLSL + """
 void main(){
+    gl_FragDepth = log2(max(v_flogz, 1e-6)) * (u_log_depth_fcoef * 0.5);
     vec3 n = normalize(v_nrm);
     float ndl = max(dot(n, u_sun_dir), 0.0);
     vec3 hemi = mix(vec3(0.18,0.16,0.14), vec3(0.35,0.42,0.52), n.y*0.5+0.5);
