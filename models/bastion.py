@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
-
 from engine.meshdata import MeshBuilder, MeshData, make_box, make_cylinder, make_wedge
 from models.common import PALETTE, rot_x
 

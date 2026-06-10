@@ -60,7 +60,9 @@ def build_oniks() -> MeshData:
     b.add_mesh(make_lathe(profile, SEG, body_c))
     # lip face: thin forward-facing ring closing the body wall thickness
     b.add_mesh(make_lathe([(_LIP_Z, _LIP_R), (_LIP_Z, _LIP_R - 0.015)], SEG, body_c))
-    # intake duct: inward-facing funnel from the lip back to the cone base
+    # intake duct: funnel from the lip back to the cone base; the profile
+    # runs BACKWARD in z on purpose — make_lathe's normal/winding rule
+    # (n = (dz, -dr)) then faces the surface inward, like a duct interior
     b.add_mesh(make_lathe([(_LIP_Z, _LIP_R - 0.015), (_CONE_BASE_Z, _CONE_BASE_R)],
                           SEG, radome_c))
     # inset shock cone (radome) out to the nose tip
