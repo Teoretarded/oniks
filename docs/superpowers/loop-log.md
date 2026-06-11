@@ -63,6 +63,17 @@ physics works, game is optimized, models look good."
 
 ## Iterations
 
+- **2026-06-11 Feel & Polish final verification (controller's own pass, clean machine).**
+  Suite: full run exit 0 (~250 tests incl. slow e2e intercepts, retarget, launch timings).
+  Perf: 10.82 ms avg / 14.02 p95 vs 16.0 budget — best result yet, gaming load closed.
+  Render review vs references: Oniks intake signature (knife-edge lip, black annulus,
+  protruding cone) matches yakhont_armia2018 — PASS; launch frames match the storyboard
+  (S-300 hang frame flame-free with cover debris; Oniks t3 shows the cap tumbling in the
+  trail) — PASS; settings/menu match the ui_reference spec — PASS. SATISFIED this round.
+  Cosmetic backlog for a future pass (non-blocking): folded wings ride slightly proud of
+  the hull (visible ~0.55 s); 5P85 lattice umbilical mast + MAZ split-cab not modeled;
+  unlit wing faces read near-black at some sun angles (ambient lift candidate); terrain
+  remains the blandest element from altitude despite the S5 improvements.
 - **2026-06-11 Feel & Polish gate (Task GATE).** The package's sim_step regression
   (measured 12.29 ms avg at babdef4, ~14.8 ms on the gate machine-state; was ~5.4 before
   the package) was profiled per-substep and removed without behavior changes — suite +
