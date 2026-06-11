@@ -5,9 +5,11 @@ world.generation and the bastion model *constants* (engine.meshdata is
 numpy-only). The render/effects side lives in game/sandbox.py, which drains
 ``WorldState.events`` each sim step:
 
-    ("ship_hit", pos)    missile struck a ship hull (sim/damage.py)
-    ("splash", pos)      missile hit the water surface (pos[1] == 0)
-    ("ground_hit", pos)  missile hit terrain (pos[1] > 0)
+    ("ship_hit", pos)         missile struck a ship hull (sim/damage.py)
+    ("splash", pos)           missile hit the water surface (pos[1] == 0)
+    ("ground_hit", pos)       missile hit terrain (pos[1] > 0)
+    ("aircraft_down", pos)    falling aircraft crashed on terrain (pos[1] > 0)
+    ("aircraft_splash", pos)  falling aircraft hit the sea (pos[1] == 0)
 
 All positions float64, SI units, axes per LOCKED CONVENTIONS.
 """
@@ -17,13 +19,14 @@ from __future__ import annotations
 import numpy as np
 
 from models import bastion
+from sim.aircraft import AC_FALLING, AC_GONE, Aircraft
 from sim.arsenal import BASTION, ONIKS
 from sim.contacts import ContactBoard
 from sim.damage import apply_missile_hits
 from sim.missile import PH_BOOST, PH_EJECT, Missile
 from sim.ships import Ship
-from world.generation import (BASE_POS, LANES, SEED, SHIP_SPAWNS, SITES,
-                              terrain_height_scalar)
+from world.generation import (AIRCRAFT_SPAWNS, BASE_POS, LANES, SEED,
+                              SHIP_SPAWNS, SITES, terrain_height_scalar)
 
 # --- Launcher tuning ----------------------------------------------------------
 
@@ -55,6 +58,9 @@ class WorldState:
         self.rng = np.random.default_rng(rng_seed)
         self.ships = [self._spawn_ship(i, spawn)
                       for i, spawn in enumerate(SHIP_SPAWNS)]
+        self.aircraft = [Aircraft(s["aircraft_id"], s["aircraft_type"],
+                                  s["anchor_a"], s["anchor_b"])
+                         for s in AIRCRAFT_SPAWNS]
         self.sites = SITES
         self.missiles: list[Missile] = []
         self.contacts = ContactBoard((BASE_POS[0], BASE_POS[2]))
@@ -80,13 +86,20 @@ class WorldState:
     # ------------------------------------------------------------------ step
 
     def step(self, dt: float) -> None:
-        """Advance ships, missiles, damage and the contact board by ``dt``;
-        emit effects events and prune dead missiles."""
+        """Advance ships, aircraft, missiles, damage and the contact board by
+        ``dt``; emit effects events and prune dead missiles."""
         self.sim_time += dt
         if self.reload_left > 0.0:
             self.reload_left = max(0.0, self.reload_left - dt)
         for ship in self.ships:
             ship.update(dt)
+        for ac in self.aircraft:
+            was_falling = ac.state == AC_FALLING
+            ac.update(dt)
+            if was_falling and ac.state == AC_GONE:   # impact ends the spiral
+                kind = ("aircraft_down" if ac.impact_pos[1] > 1e-6
+                        else "aircraft_splash")
+                self.events.append((kind, ac.impact_pos.copy()))
         flying = [m for m in self.missiles if m.alive]
         for m in flying:
             m.update(dt, self)
@@ -100,6 +113,7 @@ class WorldState:
         if any(not m.alive for m in self.missiles):
             self.missiles = [m for m in self.missiles if m.alive]
         self.contacts.update(self.ships, dt, self.sim_time)
+        self.contacts.update(self.aircraft, dt, self.sim_time)
 
     def drain_events(self) -> list:
         """Return and clear the pending effects events."""

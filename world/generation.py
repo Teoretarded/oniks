@@ -251,6 +251,28 @@ SITES = [  # land targets: {id, kind, pos(x,z), name}
 _BASE_X, _BASE_Z = 0.0, -600.0
 BASE_POS = (_BASE_X, float(terrain_height(np.array([_BASE_X]), np.array([_BASE_Z]))[0]), _BASE_Z)
 
+# S-300 battery site (friendly, NOT a target): home-coast land far east of the
+# base. The plan's nominal (85_000, terrain, -3_500) was verified dry
+# (terrain_height ~ 111 m > 5 m), so the constant is frozen at the nominal.
+_SAM_X, _SAM_Z = 85_000.0, -3_500.0
+SAM_SITE_POS = (_SAM_X, float(terrain_height(np.array([_SAM_X]), np.array([_SAM_Z]))[0]), _SAM_Z)
+
+# Enemy patrol aircraft: 4 racetracks given as two diagonal anchor corners of
+# the loop rectangle (legs = the long side, 60-100 km; width fits a 180-degree
+# turn at 1.5 deg/s). Two patrols orbit inside the S300's 150 km envelope
+# (legs spanning z ~ 70-130 km); one patrol and one fast type orbit beyond it
+# (z ~ 180-260 km) — visible on the map but out of range, teaching the ring.
+AIRCRAFT_SPAWNS = [
+    {"aircraft_id": "air_patrol_00", "aircraft_type": "patrol",
+     "anchor_a": (40_000.0, 70_000.0), "anchor_b": (56_000.0, 130_000.0)},
+    {"aircraft_id": "air_patrol_01", "aircraft_type": "patrol",
+     "anchor_a": (110_000.0, 70_000.0), "anchor_b": (126_000.0, 130_000.0)},
+    {"aircraft_id": "air_patrol_02", "aircraft_type": "patrol",
+     "anchor_a": (-20_000.0, 180_000.0), "anchor_b": (-4_000.0, 260_000.0)},
+    {"aircraft_id": "air_fast_03", "aircraft_type": "fast",
+     "anchor_a": (140_000.0, 190_000.0), "anchor_b": (160_000.0, 250_000.0)},
+]
+
 SHIP_SPAWNS = [  # 14 ships distributed over the lanes
     {"ship_type": "cargo",   "lane_index": 0, "lane_t0": 0.10, "speed": 8.0},
     {"ship_type": "tanker",  "lane_index": 0, "lane_t0": 0.35, "speed": 6.5},

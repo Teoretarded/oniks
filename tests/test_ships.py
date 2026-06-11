@@ -2,7 +2,8 @@
 import numpy as np
 import pytest
 
-from sim.contacts import ContactBoard, UPDATE_PERIODS
+from sim.aircraft import Aircraft
+from sim.contacts import AIR_UPDATE_PERIODS, ContactBoard, UPDATE_PERIODS
 from sim.ships import (BURN_TIME, HULL_DRAFT, SHIP_TYPES, ST_ALIVE, ST_BURNING,
                        ST_GONE, ST_SINKING, Ship)
 
@@ -200,3 +201,78 @@ def test_sinking_ship_drops_after_one_refresh_cycle():
     t += 1.0
     board.update([ship], 1.0, t)                           # refresh at t=20 -> dropped
     assert "s1" not in board.tracks
+
+
+# --- air contacts (Task S1: aircraft on the same board) ---------------------------
+
+def _aircraft(z0, aircraft_id):
+    """Patrol racetrack starting at (0, z0): range from a (0,0) base ~= z0."""
+    return Aircraft(aircraft_id, "patrol", (0.0, z0), (16_000.0, z0 + 60_000.0))
+
+
+def test_air_refresh_periods_faster_than_surface():
+    assert AIR_UPDATE_PERIODS == ((100_000, 15.0), (300_000, 30.0), (1e12, 60.0))
+
+
+def test_air_contact_period_by_range_and_is_air_flag():
+    near = _aircraft(50_000.0, "air_near")
+    mid = _aircraft(250_000.0, "air_mid")
+    far = _aircraft(340_000.0, "air_far")
+    ship = Ship("surf", "cargo", [(0.0, 50_000.0), (0.0, 120_000.0)], 0.0)
+    board = ContactBoard((0.0, 0.0))
+    board.update([ship, near, mid, far], 1.0, 0.0)
+    assert board.tracks["air_near"]["t_next"] == pytest.approx(15.0)
+    assert board.tracks["air_mid"]["t_next"] == pytest.approx(30.0)
+    assert board.tracks["air_far"]["t_next"] == pytest.approx(60.0)
+    assert board.tracks["air_near"]["is_air"] is True
+    assert board.tracks["surf"]["is_air"] is False
+    assert board.tracks["surf"]["t_next"] == pytest.approx(UPDATE_PERIODS[0][1])
+
+
+def test_air_track_stale_then_refreshes_at_15s():
+    ac = _aircraft(50_000.0, "air_1")
+    board = ContactBoard((0.0, 0.0))
+    board.update([ac], 1.0, 0.0)
+    p0 = board.tracks["air_1"]["pos"].copy()
+    t = 0.0
+    for _ in range(14):                                    # t = 1 .. 14: stale
+        t += 1.0
+        ac.update(1.0)
+        board.update([ac], 1.0, t)
+    assert np.array_equal(board.tracks["air_1"]["pos"], p0)
+    assert board.tracks["air_1"]["age"] == pytest.approx(14.0)
+    t += 1.0                                               # t = 15: 50 km -> 15 s period
+    ac.update(1.0)
+    board.update([ac], 1.0, t)
+    assert board.tracks["air_1"]["age"] == 0.0
+    assert np.allclose(board.tracks["air_1"]["pos"], ac.pos)
+
+
+def test_air_estimated_pos_dead_reckons_in_3d():
+    ac = _aircraft(50_000.0, "air_1")
+    board = ContactBoard((0.0, 0.0))
+    board.update([ac], 1.0, 0.0)
+    t = 0.0
+    for _ in range(10):                                    # 10 s of staleness
+        t += 1.0
+        ac.update(1.0)
+        board.update([ac], 1.0, t)
+    est = board.estimated_pos("air_1", t)
+    assert est[1] == pytest.approx(6_500.0)                # altitude carried in 3D
+    assert not np.allclose(board.tracks["air_1"]["pos"], ac.pos, atol=0.5)
+    assert np.allclose(est, ac.pos, atol=1e-3)             # dead-reckoned is current
+
+
+def test_falling_aircraft_drops_after_one_refresh_cycle():
+    ac = _aircraft(50_000.0, "air_1")
+    board = ContactBoard((0.0, 0.0))
+    board.update([ac], 1.0, 0.0)
+    ac.kill()                                              # AC_FALLING: not trackable
+    t = 0.0
+    for _ in range(14):                                    # tracked until next refresh
+        t += 1.0
+        board.update([ac], 1.0, t)
+    assert "air_1" in board.tracks
+    t += 1.0
+    board.update([ac], 1.0, t)                             # refresh at t=15 -> dropped
+    assert "air_1" not in board.tracks

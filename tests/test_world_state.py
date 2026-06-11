@@ -43,7 +43,7 @@ def test_step_advances_ships_time_and_contacts():
         ws.step(DT)
     assert abs(ws.sim_time - 1.0) < 1e-9
     assert np.linalg.norm(ws.ships[0].pos - p0) > 1.0     # ship sailed
-    assert len(ws.contacts.tracks) == len(ws.ships)       # all tracked
+    assert len(ws.contacts.tracks) == len(ws.ships) + len(ws.aircraft)  # all tracked
 
 
 def test_launch_spawns_missile_at_canister_mouth():
