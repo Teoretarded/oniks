@@ -10,16 +10,24 @@ pygame.image.save. Prints saved paths.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
 import numpy as np
 import pygame
 
+from engine import math3d
 from game.cameras import TRANSITION_TIME
 from main import PHYS_DT, App
+from models import s300 as s300_const
+from models.aircraft_model import build_patrol_aircraft
+from models.common import rot_y
+from models.s300 import build_s300_missile, build_s300_tel
+from sim.arsenal import S300
 from sim.missile import PH_CRUISE
-from world.generation import BASE_POS
+from sim.sam import SPH_BOOST, SamMissile
+from world.generation import BASE_POS, SAM_SITE_POS
 
 OUT_DIR = "renders"
 SIM_STEPS = 240                  # 2 s of ocean-wave phase
@@ -136,6 +144,123 @@ def _scene_terminal(s) -> None:
     _aim(s, m.pos - line_hat * 40.0 + perp * 45.0 + (0.0, 10.0, 0.0),
          m.pos + line_hat * 60.0)
 
+# --- S-300 expansion scenes (Task S3) ---------------------------------------
+# The sandbox does not draw the new platform yet (that is Task S4 wiring), so
+# these scenes bake their meshes (rotation pre-applied — the _site_draws
+# tuples carry no rotation) and inject them into the state's site-draw list,
+# which renders inside the normal pass order (before particles, so the
+# launch plume and contrails alpha-blend correctly over the new models).
+
+_SAM_SITE = np.array(SAM_SITE_POS, dtype=np.float64)
+_SAM_PAD_TOP = 111.5          # pad deck (terrain there spans ~110.9-111.4 m)
+_S300_HALF_LEN = 3.75         # 48N6 mid-body origin -> tail/nose
+_UP = np.array([0.0, 1.0, 0.0])
+
+
+def _add_draw(state, meshdata, pos, rotation=None) -> None:
+    """Upload ``meshdata`` (rotation baked in) and add it to the site draws."""
+    from engine.mesh import Mesh
+    from engine.meshdata import MeshBuilder
+    if rotation is not None:
+        b = MeshBuilder()
+        b.add_mesh(meshdata, rotation=rotation)
+        meshdata = b.build()
+    state._site_draws.append((Mesh(meshdata),
+                              np.asarray(pos, dtype=np.float64).copy()))
+
+
+def _inject_s300_site(s) -> np.ndarray:
+    """Concrete pad + erected 4-tube TEL at SAM_SITE; returns the TEL origin."""
+    pad = np.array([_SAM_SITE[0], _SAM_PAD_TOP, _SAM_SITE[2]])
+    _add_draw(s, _pad_mesh(11.0, 9.5), pad)
+    _add_draw(s, build_s300_tel(elevation_deg=90.0), pad)
+    return pad
+
+
+def _scene_s300_site(s) -> None:
+    """The erected 5P85 TEL on its pad, 3/4 view from the sunny NE quarter."""
+    _fly(s, 2.0)
+    tel = _inject_s300_site(s)
+    _aim(s, tel + (18.5, 4.4, 14.5), tel + (0.0, 4.7, -1.2))
+
+
+def _scene_s300_launch(s) -> None:
+    """t = +1.2 s after a cold launch: 48N6 ~50 m up, eject puff at the tube
+    mouth, the motor's first flame under the climbing missile."""
+    _fly(s, 2.0)
+    tel = _inject_s300_site(s)
+    mouth = tel + (s300_const.TUBE_X, s300_const.PIVOT_Y + s300_const.MOUTH_RUN,
+                   s300_const.PIVOT_Z)
+    m = SamMissile(S300, mouth, s.world.aircraft[0])
+    trail = s.effects.add_trail()
+    # catapult gas puff at the mouth (mirrors the sandbox cold-launch puff)
+    s.effects.smoke.emit(22, mouth, 1.2, (0.0, 4.0, 0.0), 3.0,
+                         (1.5, 3.0), (2.0, 9.0),
+                         ((0.85, 0.84, 0.82), (0.55, 0.55, 0.58)),
+                         s.effects.rng)
+    v = _UP.copy()
+    for _ in range(int(round(1.2 / PHYS_DT))):
+        m.update(PHYS_DT, s.world)
+        v = m.vel / max(np.linalg.norm(m.vel), 1e-9)
+        if m.phase == SPH_BOOST:                  # ignition at t = 0.6 s
+            tail = m.pos - v * _S300_HALF_LEN
+            trail.add_point(tail)
+            s.effects.booster_plume(tail, v, 1.0)
+        s.sim_step(PHYS_DT)                       # ages puff/plume/trail
+    _add_draw(s, build_s300_missile(), m.pos,
+              rotation=math3d.rotation_from_forward(v))
+    # frame the TEL at the frame bottom and the missile + plume above it
+    _aim(s, tel + (50.0, 38.0, 42.0), tel + (0.0, 32.0, 0.0))
+
+
+def _scene_s300_intercept(s) -> None:
+    """Terminal: the 48N6 diving onto a patrol aircraft, 600 m to go at
+    6.5 km altitude — camera abeam the approach line framing both."""
+    _fly(s, 2.0)
+    ac = s.world.aircraft[0]
+    acp = ac.pos.copy()
+    # approach unit vector: up-range from SAM_SITE, diving 18 deg onto target
+    hd = acp - _SAM_SITE
+    hd[1] = 0.0
+    hd /= np.linalg.norm(hd)
+    dive = math.radians(18.0)
+    u = hd * math.cos(dive)
+    u[1] = -math.sin(dive)
+    mp = acp - u * 600.0
+    _add_draw(s, build_s300_missile(), mp,
+              rotation=math3d.rotation_from_forward(u))
+    _add_draw(s, build_patrol_aircraft(), acp, rotation=rot_y(ac.heading))
+    # contrail arcing up behind the missile (it came down off the loft);
+    # ages set oldest->newest so the ribbon widens/fades away from the nose
+    trail = s.effects.add_trail()
+    for d in np.arange(3600.0, -1.0, -40.0):
+        trail.add_point(mp - u * d + _UP * (d * d * 2.2e-5))
+    trail._age[trail._indices()] = np.linspace(8.0, 0.0, len(trail))
+    perp = np.cross(u, _UP)
+    perp /= np.linalg.norm(perp)
+    if perp[0] < 0.0:
+        perp = -perp                              # abeam on the sun side
+    # camera near the missile, aimed at the angular bisector of the two
+    # bodies so the diving 48N6 (upper) and its target (lower, beyond)
+    # bracket the frame center
+    cam = mp + perp * 62.0 - u * 28.0 + _UP * 14.0
+    d_m = (mp - cam) / np.linalg.norm(mp - cam)
+    d_a = (acp - cam) / np.linalg.norm(acp - cam)
+    _aim(s, cam, cam + (d_m + d_a) * 100.0)
+
+
+def _scene_aircraft_patrol(s) -> None:
+    """A patrol aircraft on its racetrack leg over the ocean, 300 m off."""
+    _fly(s, 2.0)
+    ac = s.world.aircraft[0]
+    acp = ac.pos.copy()
+    h = ac.heading
+    fwd = np.array([math.sin(h), 0.0, math.cos(h)])
+    right = np.array([math.cos(h), 0.0, -math.sin(h)])
+    _add_draw(s, build_patrol_aircraft(), acp, rotation=rot_y(h))
+    _aim(s, acp + right * 255.0 + fwd * 135.0 + _UP * 45.0, acp)
+
+
 # --- models showcase: every vehicle/weapon model on a flat concrete pad ----
 # The pad is a quay just offshore (water ~50 m deep, home cliffs as backdrop).
 # Historically it ALSO dodged the pre-Task-16b vertex-log-depth artifact on
@@ -197,10 +322,17 @@ SCENES = {
     "hud": _scene_hud,
     # Tactical map review (Task 20): map open over a dimmed overview.
     "map": _scene_map,
+    # S-300 expansion scenes (Task S3): new models in situ.
+    "s300_site": _scene_s300_site,
+    "s300_launch": _scene_s300_launch,
+    "s300_intercept": _scene_s300_intercept,
+    "aircraft_patrol": _scene_aircraft_patrol,
 }
 # Flight scenes advance the sim themselves to a precise moment, so shoot()
 # must not add its own wave-phase steps on top.
-SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0}
+SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0,
+               "s300_site": 0, "s300_launch": 0, "s300_intercept": 0,
+               "aircraft_patrol": 0}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")
