@@ -322,6 +322,58 @@ def _scene_aircraft_patrol(s) -> None:
     _aim(s, acp + right * 255.0 + fwd * 135.0 + _UP * 45.0, acp)
 
 
+# --- Task OM2: model close-ups (visual gate vs the reference photos) ----------
+# A single Oniks round on stands over the quay pad, shot from the reference
+# photo angles (yakhont_armia2018 front-quarter, oniks_sketch profile,
+# yakhont_army2022 low quarter); the 5P85 TEL from the Slovak_S300PS_5V55R
+# rear-quarter and the Kyiv 2021 stowed front-quarter.
+
+def _stage_oniks(s, nose_cap: bool = False, wings_folded: bool = False):
+    """Stage one Oniks round (nose north) on stands; returns its mid-body."""
+    from engine.meshdata import MeshBuilder, make_box
+    from models.common import PALETTE
+    from models.oniks import build_oniks
+    p = np.array([PAD_X, PAD_TOP, PAD_Z], dtype=np.float64)
+    _add_draw(s, _pad_mesh(24.0, 15.0), p)
+    stands = MeshBuilder()
+    for z in (-3.2, 1.6):
+        stands.add_mesh(make_box((0.4, 1.52, 0.5), PALETTE["concrete"],
+                                 offset=(0.0, 0.76, z)))
+    _add_draw(s, stands.build(), p)
+    center = p + np.array([0.0, 1.85, 0.0])
+    _add_draw(s, build_oniks(nose_cap=nose_cap, wings_folded=wings_folded),
+              center)
+    return center
+
+
+def _scene_oniks_front(s) -> None:
+    """Front-quarter on the nose: the annular intake ring, the protruding
+    dark cone and the deep black annulus (yakhont_armia2018 composition)."""
+    c = _stage_oniks(s)
+    _aim(s, c + np.array([4.2, 1.1, 8.8]), c + np.array([0.0, 0.1, 3.4]))
+
+
+def _scene_oniks_side(s) -> None:
+    """Full broadside profile: fineness ratio, ogive shoulder, wing/rudder
+    stations and the flank raceway (oniks_sketch composition)."""
+    c = _stage_oniks(s)
+    _aim(s, c + np.array([7.8, 0.6, 0.0]), c)
+
+
+def _scene_oniks_rear(s) -> None:
+    """Low rear-quarter: the big clipped-delta wings in X, the in-line tail
+    rudders and the red tail cap (yakhont_army2022 low-angle look)."""
+    c = _stage_oniks(s)
+    _aim(s, c + np.array([5.0, 1.8, -8.2]), c + np.array([0.0, 0.0, -2.2]))
+
+
+def _scene_oniks_folded(s) -> None:
+    """The in-tube variant: SUO cap on, surfaces folded flat
+    (brahmos_display_drdo01 smooth capped nose)."""
+    c = _stage_oniks(s, nose_cap=True, wings_folded=True)
+    _aim(s, c + np.array([5.2, 1.0, 6.8]), c + np.array([0.0, 0.0, 2.4]))
+
+
 # --- models showcase: every vehicle/weapon model on a flat concrete pad ----
 # The pad is a quay just offshore (water ~50 m deep, home cliffs as backdrop).
 # Historically it ALSO dodged the pre-Task-16b vertex-log-depth artifact on
@@ -397,15 +449,24 @@ SCENES = {
     "s300_launch_t3": _scene_s300_launch_t3,
     "s300_intercept": _scene_s300_intercept,
     "aircraft_patrol": _scene_aircraft_patrol,
+    # Task OM2: model close-ups (visual gate vs the reference photos)
+    "oniks_front": _scene_oniks_front,
+    "oniks_side": _scene_oniks_side,
+    "oniks_rear": _scene_oniks_rear,
+    "oniks_folded": _scene_oniks_folded,
 }
 # Flight scenes advance the sim themselves to a precise moment, so shoot()
-# must not add its own wave-phase steps on top.
+# must not add its own wave-phase steps on top. The OM2 close-ups stage
+# their own draws, so they get a FRESH sandbox (membership in this dict)
+# plus the usual wave-phase steps.
 SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0,
                "oniks_launch_t1": 0, "oniks_launch_t2": 0,
                "oniks_launch_t3": 0, "oniks_launch_t4": 0,
                "s300_site": 0, "s300_launch": 0, "s300_launch_t1": 0,
                "s300_launch_t2": 0, "s300_launch_t3": 0,
-               "s300_intercept": 0, "aircraft_patrol": 0}
+               "s300_intercept": 0, "aircraft_patrol": 0,
+               "oniks_front": SIM_STEPS, "oniks_side": SIM_STEPS,
+               "oniks_rear": SIM_STEPS, "oniks_folded": SIM_STEPS}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")
@@ -455,16 +516,19 @@ def _ensure_model_draws() -> list:
     from engine.meshdata import MeshBuilder, make_box
     from models.bastion import build_bastion_tel
     from models.common import PALETTE
-    from models.oniks import build_oniks, build_oniks_booster
+    from models.oniks import build_oniks, build_oniks_nose_cap
     from models.ships_models import build_cargo, build_tanker, build_warship
     from models.structures import (build_fuel_depot, build_harbor,
                                    build_radar_station)
 
-    # display stands under the missile + booster assembly
+    # display stands under the missile rounds (Task OM2 lineup: bare
+    # deployed round + folded/capped round + the jettisoned SUO cap; the
+    # external booster model is retired)
     stands = MeshBuilder()
-    for z in (-5.2, -2.0, 2.0):
-        stands.add_mesh(make_box((0.35, 0.95, 0.5), PALETTE["concrete"],
-                                 offset=(0.0, 0.475, z)))
+    for x in (13.0, 17.0):
+        for z in (-7.6, -3.4):
+            stands.add_mesh(make_box((0.35, 0.62, 0.5), PALETTE["concrete"],
+                                     offset=(x, 0.31, z)))
     p = np.array([PAD_X, PAD_TOP, PAD_Z], dtype=np.float64)
     f = np.array([FLEET_X, 0.0, FLEET_Z], dtype=np.float64)
     s = np.array([SHORE_X, PAD_TOP, SHORE_Z], dtype=np.float64)
@@ -473,9 +537,11 @@ def _ensure_model_draws() -> list:
         (Mesh(_pad_mesh(24.0, 15.0)), p),                        # deck at PAD_TOP
         (Mesh(build_bastion_tel(elevation_deg=88.0)), p + (-12.0, 0.0, 7.0)),
         (Mesh(build_bastion_tel(elevation_deg=0.0)), p + (1.0, 0.0, 1.0)),
-        (Mesh(stands.build()), p + (13.0, 0.0, -5.0)),
+        (Mesh(stands.build()), p),
         (Mesh(build_oniks()), p + (13.0, 0.95, -5.0)),
-        (Mesh(build_oniks_booster()), p + (13.0, 0.95, -10.45)),  # behind tail
+        (Mesh(build_oniks(nose_cap=True, wings_folded=True)),
+         p + (17.0, 0.95, -5.0)),
+        (Mesh(build_oniks_nose_cap()), p + (15.0, 0.32, -10.2)),
         # ships at anchor (waterline origins) in a bow-to-stern line
         (Mesh(build_tanker()), f + (0.0, 0.0, -200.0)),
         (Mesh(build_cargo()), f + (0.0, 0.0, 60.0)),

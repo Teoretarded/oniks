@@ -3,10 +3,11 @@ key real-world dimensions are enforced (GL-free; builders use engine.meshdata)."
 
 import numpy as np
 
+import models.oniks as oniks_model
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
 from models.common import PALETTE
-from models.oniks import build_oniks, build_oniks_booster
+from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_missile, build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
 from models.structures import build_fuel_depot, build_harbor, build_radar_station
@@ -20,8 +21,16 @@ def _check(md):
     assert np.allclose(np.linalg.norm(n, axis=1), 1.0, atol=1e-3)
 
 
+def _color_mask(md, key):
+    return np.all(np.isclose(md.vertices[:, 6:9], PALETTE[key], atol=1e-4),
+                  axis=1)
+
+
 def test_all_builders_finite_unit_normals():
-    for md in (build_oniks(), build_oniks_booster(),
+    for md in (build_oniks(),
+               build_oniks(nose_cap=True),
+               build_oniks(nose_cap=True, wings_folded=True),
+               build_oniks_nose_cap(),
                build_bastion_tel(elevation_deg=0.0),
                build_bastion_tel(elevation_deg=88.0),
                build_s300_tel(elevation_deg=0.0),
@@ -33,24 +42,81 @@ def test_all_builders_finite_unit_normals():
         _check(md)
 
 
+# --- Task OM2: Oniks v2 reference dimensions ----------------------------------
+
+
 def test_oniks_dimensions():
     md = build_oniks()
     z = md.vertices[:, 2]
-    # 8.9 m long within 1 cm, mid-body origin (nose at +4.45)
-    assert abs((z.max() - z.min()) - 8.9) <= 0.01
-    assert abs(z.max() - 4.45) <= 0.01
+    # bare round 8.6 m within 2 cm, mid-body origin (cone tip at +4.30)
+    assert abs((z.max() - z.min()) - 8.6) <= 0.02
+    assert abs(z.max() - 4.30) <= 0.02
+    # 8.9 m including the nose cap (the reference's TPK-round figure)
+    zc = build_oniks(nose_cap=True).vertices[:, 2]
+    assert abs((zc.max() - zc.min()) - 8.9) <= 0.02
     # body diameter 0.67 m: body-colored lathe stays within r 0.34
-    body = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["missile_body"],
-                             atol=1e-4), axis=1)
+    body = _color_mask(md, "oniks_body")
     assert body.any()
     r = np.linalg.norm(md.vertices[body, 0:2], axis=1)
     assert r.max() <= 0.34
 
 
-def test_booster_dimensions():
-    md = build_oniks_booster()
+def test_oniks_intake_annulus():
+    """Signature 1: sharp cone protruding ~0.45 m ahead of the lip out of a
+    deep-black annulus recessed >= 0.4 m."""
+    md = build_oniks()
+    z = md.vertices[:, 2]
+    blk = _color_mask(md, "intake_black")
+    assert blk.any()
+    duct_z = md.vertices[blk, 2]
+    assert duct_z.max() - duct_z.min() >= 0.40       # genuinely recessed duct
+    assert abs((z.max() - duct_z.max()) - 0.45) <= 0.03   # cone protrusion
+    # knife-edge lip at ~70-75% of body diameter (lip ring outer r ~0.245)
+    lip = md.vertices[(md.vertices[:, 2] >= duct_z.max() - 0.01)
+                      & ~blk & (np.linalg.norm(md.vertices[:, 0:2],
+                                               axis=1) > 0.05)]
+    r_lip = np.linalg.norm(lip[:, 0:2], axis=1)
+    assert 0.23 <= r_lip.max() <= 0.26
+
+
+def test_oniks_wings():
+    """Signatures 3/4/9: huge-root clipped-delta wings on the rear half with a
+    1.7 m deployed span, small in-line tail rudders, and a folded state lying
+    flat against the body."""
+    md = build_oniks()
+    wing = _color_mask(md, "oniks_wing")
+    assert wing.any()
+    r = np.linalg.norm(md.vertices[wing, 0:2], axis=1)
+    assert abs(r.max() - 0.85) <= 0.02               # deployed span 1.70 m
+    # the wide wing tips live on the rear half of the body
+    tips = md.vertices[wing & (np.linalg.norm(md.vertices[:, 0:2],
+                                              axis=1) >= 0.84)]
+    assert tips[:, 2].max() <= -1.0 and tips[:, 2].min() >= -2.9
+    # small in-line rudders at the extreme tail, span well under the wings'
+    rud = md.vertices[wing & (md.vertices[:, 2] < -3.5)]
+    assert len(rud)
+    assert np.linalg.norm(rud[:, 0:2], axis=1).max() <= 0.66
+    # folded: every surface hugs the body (in-tube look)
+    folded = build_oniks(wings_folded=True)
+    fw = _color_mask(folded, "oniks_wing")
+    rf = np.linalg.norm(folded.vertices[fw, 0:2], axis=1)
+    assert rf.max() <= 0.55
+
+
+def test_oniks_nose_cap_part():
+    """The jettisoned SUO cap: 1.35 m cone, base at its local origin."""
+    md = build_oniks_nose_cap()
+    z = md.vertices[:, 2]
+    assert abs(z.min()) <= 0.01
+    assert abs((z.max() - z.min()) - 1.35) <= 0.02
     r = np.linalg.norm(md.vertices[:, 0:2], axis=1)
-    assert abs(r.max() - 0.30) <= 0.01
+    assert r.max() <= 0.36
+
+
+def test_oniks_booster_retired():
+    """Task OM2: no external booster model — the real booster hides inside
+    the ramjet duct; separation is a slug out the nozzle (game/sandbox.py)."""
+    assert not hasattr(oniks_model, "build_oniks_booster")
 
 
 def test_tel_fits_box_when_elevated():

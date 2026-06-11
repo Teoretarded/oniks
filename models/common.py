@@ -23,6 +23,13 @@ PALETTE = dict(
     concrete=(0.58, 0.57, 0.54), radar_white=(0.85, 0.86, 0.84), tank_white=(0.80, 0.79, 0.75),
     s300_green=(0.30, 0.34, 0.26), tube_grey=(0.42, 0.44, 0.42),
     aircraft_grey=(0.58, 0.62, 0.68), aircraft_dark=(0.30, 0.33, 0.38),
+    # Task OM2 reference builds (oniks_reference.md / s300_reference.md):
+    # gull-grey/grey-green Oniks skin, body-toned wings a shade darker, the
+    # DEEP BLACK intake annulus, the red tail cap accent; 5P85 tube clamp
+    # rings and khaki canvas mouth covers.
+    oniks_body=(0.70, 0.72, 0.67), oniks_wing=(0.63, 0.65, 0.60),
+    intake_black=(0.04, 0.04, 0.05), tail_red=(0.55, 0.11, 0.09),
+    tube_ring=(0.34, 0.37, 0.33), canvas_khaki=(0.47, 0.42, 0.30),
 )
 
 

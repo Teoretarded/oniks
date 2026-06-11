@@ -37,7 +37,7 @@ import numpy as np
 from engine import math3d
 from engine.camera import Camera
 from engine.mesh import Mesh
-from engine.meshdata import MeshBuilder, make_box, make_cylinder, make_lathe
+from engine.meshdata import make_box, make_cylinder
 from engine.particles import Effects, ParticleRenderer
 from engine.text import TextRenderer
 from game.cameras import CameraRig
@@ -48,7 +48,7 @@ from game.tactical_map import TacticalMap
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
 from models.common import PALETTE, rot_x, rot_y, rot_z
-from models.oniks import build_oniks
+from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_missile, build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
 from models.structures import (build_fuel_depot, build_harbor,
@@ -68,9 +68,14 @@ from world.world import (LAUNCH_ELEV_DEG, SAM_TEL_POS, WorldState,
 
 # --- Tuning constants ---------------------------------------------------------
 
-MISSILE_HALF_LEN = 4.45        # m, Oniks origin -> tail (models.oniks _TAIL_Z)
+MISSILE_HALF_LEN = 4.30        # m, Oniks origin -> tail (models.oniks _TAIL_Z)
 RAMJET_PHASES = (PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL)
 LAUNCH_TRAIL_PHASES = (PH_RIDEOUT, PH_PITCHOVER)   # cream-column ribbon feed
+# Oniks model variants through the launch (Task OM2): folded wings in the
+# tube and the first instants, then capped-deployed until the SUO cap is
+# shot off at the PITCHOVER -> BOOST seam, then the bare round.
+CAP_ON_PHASES = (PH_EJECT, PH_RIDEOUT, PH_PITCHOVER)
+WING_DEPLOY_AFTER_EXIT = 0.2   # s after muzzle clear: surfaces snap to X
 
 # Sustainer exhaust: a small, very short-lived additive jet right at the
 # nozzle (the boost plume's big puffs read as a fireball chain at Mach 2
@@ -99,7 +104,9 @@ CAP_DROP_KICK = 3.5            # m/s downward: the cap sinks below the path
 CAP_DRAG = 0.9                 # 1/s exponential decay (light cone, draggy)
 CAP_TUMBLE_RATE = 7.0          # rad/s
 CAP_LIFE = 8.0                 # s before despawn
-CAP_NOSE_AHEAD = 4.6           # m, missile origin -> spawn point at the nose
+CAP_NOSE_AHEAD = 3.25          # m, missile origin -> the cap-base joint
+#                                (models.oniks _CAP_BASE_Z: the part spawns
+#                                exactly where the attached cap sat)
 # booster slug — ram-ejected out the nozzle at burnout, brief.
 SLUG_BACK_KICK = 45.0          # m/s backward ejection relative to the missile
 SLUG_DRAG = 1.4                # 1/s (blunt slug into a Mach-2 stream)
@@ -241,23 +248,19 @@ class SandboxState(GameState):
     # ------------------------------------------------------------ GL meshes
 
     @staticmethod
-    def _cap_meshdata():
-        """Jettisoned Oniks nose cap: a dark 1.35 m cone (the SUO fairing —
-        reads as the 'small dark angular chunk' of the launch footage)."""
-        b = MeshBuilder()
-        b.add_mesh(make_lathe([(0.0, 0.0), (0.0, 0.345), (1.35, 0.0)], 20,
-                              PALETTE["radome"]))
-        return b.build()
-
-    @staticmethod
     def _slug_meshdata():
         """Spent booster slug: a small dark cylinder ram-ejected at burnout."""
         return make_cylinder(0.17, 0.9, 14, PALETTE["exhaust_ring"],
                              axis="z", cap_ends=True)
 
     def _build_meshes(self) -> None:
+        # Oniks launch variants (Task OM2): folded+capped in the tube,
+        # capped through ride-out/pitch-over, bare for the rest of flight.
         self._mesh_oniks = Mesh(build_oniks())
-        self._mesh_cap = Mesh(self._cap_meshdata())
+        self._mesh_oniks_capped = Mesh(build_oniks(nose_cap=True))
+        self._mesh_oniks_folded = Mesh(build_oniks(nose_cap=True,
+                                                   wings_folded=True))
+        self._mesh_cap = Mesh(build_oniks_nose_cap())
         self._mesh_slug = Mesh(self._slug_meshdata())
         self._mesh_cover = Mesh(make_box((0.6, 0.09, 0.6),
                                          PALETTE["exhaust_ring"]))
@@ -613,7 +616,8 @@ class SandboxState(GameState):
 
     def dispose(self) -> None:
         """Free this session's GL objects (called when SANDBOX restarts)."""
-        meshes = ([self._mesh_oniks, self._mesh_cap, self._mesh_slug,
+        meshes = ([self._mesh_oniks, self._mesh_oniks_capped,
+                   self._mesh_oniks_folded, self._mesh_cap, self._mesh_slug,
                    self._mesh_cover, self._mesh_sam_pad, self._mesh_s300_tel,
                    self._mesh_s300_missile]
                   + list(self._aircraft_meshes.values())
@@ -693,8 +697,16 @@ class SandboxState(GameState):
         for m in self.world.missiles:
             v = _vhat(m)
             rot = math3d.rotation_from_forward(v)
-            mesh = (self._mesh_s300_missile if isinstance(m, SamMissile)
-                    else self._mesh_oniks)
+            if isinstance(m, SamMissile):
+                mesh = self._mesh_s300_missile
+            elif m.phase in CAP_ON_PHASES:
+                # launch variants: folded surfaces snap to X shortly after
+                # muzzle clear; the SUO cap stays on until PITCHOVER ends
+                deploy_t = m.weapon.eject_time + WING_DEPLOY_AFTER_EXIT
+                mesh = (self._mesh_oniks_folded if m.t < deploy_t
+                        else self._mesh_oniks_capped)
+            else:
+                mesh = self._mesh_oniks
             self.renderer.draw_mesh(mesh, m.pos, rot)
         for mesh, p in self._parts:     # tumbling caps / slugs / covers
             self.renderer.draw_mesh(mesh, p.pos, p.rot)
