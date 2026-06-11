@@ -140,9 +140,10 @@ def _scene_cruise(s) -> None:
 
 
 def _scene_hud(s) -> None:
-    """Task 19 HUD review: chase cam in terminal homing, seeker locked on a
-    tanker ~2.5 km out — flight telemetry block, camera/controls hint line
-    and the target bracket with range text all visible at once."""
+    """HUD review (Task 19, re-gated by Task UI): chase cam in terminal
+    homing, seeker locked on a tanker ~2.5 km out — telemetry block with
+    the new panel chrome, the bottom-right F1 CONTROLS / CAM micro-labels
+    (hint bar gone) and the target bracket with range text."""
     tanker = next(sh for sh in s.world.ships
                   if sh.ship_type == "tanker" and sh.pos[2] < 60_000.0)
     lead = tanker.pos + tanker.velocity() * 60.0      # rough launch lead
@@ -322,6 +323,70 @@ def _scene_aircraft_patrol(s) -> None:
     _aim(s, acp + right * 255.0 + fwd * 135.0 + _UP * 45.0, acp)
 
 
+# --- Task UI: menu / settings / pause / F1-overlay visual gates ---------------
+# Critiqued against the ui_reference.md wireframes (§2.1 main, §2.2 pause,
+# §3.1 settings + rebind row states, §4.1 HUD affordances).
+
+def _scene_menu_main(s) -> None:
+    """Title screen: corner-ticked O N I K S panel, SANDBOX selected."""
+    s.app.sandbox = None                # flat BG0 field, no stale backdrop
+    s.app.states.switch(s.app.menu)
+
+
+def _scene_menu_pause(s) -> None:
+    """ESC over a live launch: PAUSED panel + sim clock over the frozen
+    frame dimmed 65%, MAIN MENU row at rest."""
+    s.target_point = np.array([0.0, 0.0, 120_000.0])
+    m = s.request_launch()
+    assert m is not None
+    _fly(s, 4.0)
+    base = np.array(BASE_POS)
+    _aim(s, base + (52.0, 24.0, -48.0), base + (m.pos - base) * 0.55)
+    s.rig.update(0.0, m)                # apply the free cam to the camera
+    s.app.sandbox = s                   # the pause backdrop + clock source
+    s.app.open_pause()
+
+
+def _scene_menu_pause_confirm(s) -> None:
+    """Pause with MAIN MENU armed: the DANGER double-ENTER confirm row."""
+    _scene_menu_pause(s)
+    pause = s.app.pause_menu
+    pause.sel = pause.items.index("MAIN MENU")
+    pause.confirm_armed = True
+
+
+def _scene_menu_settings(s) -> None:
+    """Settings idle: grouped two-column list, LAUNCH WEAPON focused."""
+    s.app.sandbox = None                # no stale backdrop to stream
+    s.app.open_settings(s.app.menu)
+
+
+def _scene_menu_settings_capture(s) -> None:
+    """Rebind listening state: TACTICAL MAP cell shows [ PRESS KEY ] with
+    the breathing amber fill (frozen at peak alpha for the still)."""
+    s.app.open_settings(s.app.menu)
+    st = s.app.settings
+    st.focus = st.focusables.index("map")
+    st._activate("map")
+    st._pulse_t = 0.125                 # sin peak: cell fill at 0.20 alpha
+
+
+def _scene_menu_settings_conflict(s) -> None:
+    """Conflict state: C captured for TACTICAL MAP while CAMERA MODE holds
+    it — DANGER sub-row offering ENTER SWAP / ESC CANCEL."""
+    s.app.open_settings(s.app.menu)
+    st = s.app.settings
+    st.focus = st.focusables.index("map")
+    st._activate("map")
+    st._capture(pygame.K_c)
+
+
+def _scene_hud_f1(s) -> None:
+    """The F1 controls overlay over the terminal-homing HUD scene."""
+    _scene_hud(s)
+    s.controls_overlay = True
+
+
 # --- Task OM2: model close-ups (visual gate vs the reference photos) ----------
 # A single Oniks round on stands over the quay pad, shot from the reference
 # photo angles (yakhont_armia2018 front-quarter, oniks_sketch profile,
@@ -459,6 +524,14 @@ SCENES = {
     "oniks_launch_t4": _scene_oniks_launch_t4,
     # HUD overlay review (Task 19): the only scene rendered with the HUD on.
     "hud": _scene_hud,
+    # Task UI: menu / settings / pause / F1 overlay (visual gate)
+    "menu_main": _scene_menu_main,
+    "menu_pause": _scene_menu_pause,
+    "menu_pause_confirm": _scene_menu_pause_confirm,
+    "menu_settings": _scene_menu_settings,
+    "menu_settings_capture": _scene_menu_settings_capture,
+    "menu_settings_conflict": _scene_menu_settings_conflict,
+    "hud_f1": _scene_hud_f1,
     # Tactical map review (Task 20): map open over a dimmed overview.
     "map": _scene_map,
     # S-300 expansion scenes (Task S3): new models in situ.
@@ -483,6 +556,9 @@ SCENES = {
 # their own draws, so they get a FRESH sandbox (membership in this dict)
 # plus the usual wave-phase steps.
 SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0,
+               "menu_main": 0, "menu_pause": 0, "menu_pause_confirm": 0,
+               "menu_settings": 0, "menu_settings_capture": 0,
+               "menu_settings_conflict": 0, "hud_f1": 0,
                "oniks_launch_t1": 0, "oniks_launch_t2": 0,
                "oniks_launch_t3": 0, "oniks_launch_t4": 0,
                "s300_site": 0, "s300_launch": 0, "s300_launch_t1": 0,
@@ -594,17 +670,22 @@ def shoot(app: App, name: str) -> str:
         # launcher is armed and the sky is empty regardless of scene order.
         from game.sandbox import SandboxState
         app.states.switch(SandboxState(app))
-    # Only the dedicated "hud" scene renders the overlay: the scenery and
+    # Only the dedicated HUD scenes render the overlay: the scenery and
     # model scenes are reviewed for the 3D image itself.
-    app.state.hud_visible = name == "hud"
+    app.state.hud_visible = name in ("hud", "hud_f1")
     SCENES[name](app.state)
     for _ in range(SCENE_STEPS.get(name, SIM_STEPS)):
         app.state.sim_step(PHYS_DT)
     # Terrain LOD0/LOD1 meshes stream in over frames (budgeted builds);
     # draw until the build queue drains so the still shows full detail.
+    # Menu/pause states have no terrain of their own; the pause backdrop
+    # streams through app.sandbox.render_frozen, so poll that one instead.
+    terrain = getattr(app.state, "terrain", None)
+    if terrain is None and app.sandbox is not None:
+        terrain = app.sandbox.terrain
     for _ in range(MAX_WARMUP_FRAMES):
         _render_frame(app, name)
-        if not app.state.terrain._jobs:
+        if terrain is None or not terrain._jobs:
             break
     _render_frame(app, name)
     surf = app.window.read_pixels_to_surface()
