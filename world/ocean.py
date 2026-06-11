@@ -84,19 +84,23 @@ out vec3 v_nrm; out vec3 v_view_vec; out float v_flogz;
 void main(){
     vec2 wxz = a_pos.xz + u_world_origin;   // true world xz -> waves don't swim
     float ww = a_col.r;                      // wave weight
-    // 3 directional sines: dir, spatial freq (rad/m), amplitude (m), speed (m/s)
-    vec2  d0 = vec2( 0.78,  0.62), d1 = vec2(-0.45, 0.89), d2 = vec2(0.95, -0.31);
-    float f0 = 6.2831853/22.0,     f1 = 6.2831853/59.0,    f2 = 6.2831853/13.0;
-    float a0 = 0.35,               a1 = 0.55,              a2 = 0.18;
-    float s0 = 4.0,                s1 = 6.5,               s2 = 3.1;
+    // 4 directional sines: dir, spatial freq (rad/m), amplitude (m), speed (m/s).
+    // d3 (S5 glint pass) heads down the golden angle (2.39996 rad) with a 37 m
+    // wavelength — irrational-ish vs the others, so the four phases never
+    // re-align into the repeating interference lattice three waves made.
+    vec2  d0 = vec2( 0.78,  0.62), d1 = vec2(-0.45, 0.89), d2 = vec2(0.95, -0.31), d3 = vec2(0.675, -0.737);
+    float f0 = 6.2831853/22.0,     f1 = 6.2831853/59.0,    f2 = 6.2831853/13.0,    f3 = 6.2831853/37.0;
+    float a0 = 0.35,               a1 = 0.55,              a2 = 0.18,              a3 = 0.26;
+    float s0 = 4.0,                s1 = 6.5,               s2 = 3.1,               s3 = 4.7;
     float p0 = dot(d0, wxz)*f0 + u_time*s0*f0;
     float p1 = dot(d1, wxz)*f1 + u_time*s1*f1;
     float p2 = dot(d2, wxz)*f2 + u_time*s2*f2;
-    float y = ww * (a0*sin(p0) + a1*sin(p1) + a2*sin(p2));
-    float c0 = a0*f0*cos(p0), c1 = a1*f1*cos(p1), c2 = a2*f2*cos(p2);
-    v_nrm = normalize(vec3(-ww*(c0*d0.x + c1*d1.x + c2*d2.x),
+    float p3 = dot(d3, wxz)*f3 + u_time*s3*f3;
+    float y = ww * (a0*sin(p0) + a1*sin(p1) + a2*sin(p2) + a3*sin(p3));
+    float c0 = a0*f0*cos(p0), c1 = a1*f1*cos(p1), c2 = a2*f2*cos(p2), c3 = a3*f3*cos(p3);
+    v_nrm = normalize(vec3(-ww*(c0*d0.x + c1*d1.x + c2*d2.x + c3*d3.x),
                            1.0,
-                           -ww*(c0*d0.y + c1*d1.y + c2*d2.y)));
+                           -ww*(c0*d0.y + c1*d1.y + c2*d2.y + c3*d3.y)));
     vec4 world_rel = u_model * vec4(a_pos.x, y, a_pos.z, 1.0);  // camera-relative
     v_view_vec = world_rel.xyz;
     gl_Position = u_proj * u_view_rot * world_rel;
@@ -122,7 +126,14 @@ void main(){
     vec3 col = mix(vec3(0.045, 0.14, 0.21), u_haze_color,
                    pow(1.0 - max(dot(n, v), 0.0), 5.0));      // deep water + fresnel
     vec3 hv = normalize(v + u_sun_dir);
-    col += u_sun_color * pow(max(dot(n, hv), 0.0), 600.0) * 1.2;  // sun glint
+    // Sun glint, faded with distance (S5 glint pass): a sharp pow(600)
+    // everywhere turned the periodically-sampled mid-distance waves into a
+    // repeating dot lattice. Far water gets a broader, dimmer highlight
+    // (unresolved micro-glints), near water keeps crisp sparkle.
+    float gt = clamp(length(v_view_vec) / 9000.0, 0.0, 1.0);
+    float spow = mix(600.0, 140.0, gt);
+    float sint = mix(1.2, 0.30, gt);
+    col += u_sun_color * pow(max(dot(n, hv), 0.0), spow) * sint;
     frag = vec4(apply_haze(col, v_view_vec, u_cam_alt), 1.0);
 }
 """
