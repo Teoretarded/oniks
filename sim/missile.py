@@ -97,7 +97,18 @@ DESCENT_KP = 0.08          # 1/s^2
 DESCENT_KD = 0.6           # 1/s (zeta ~ 1.06 with kp 0.08)
 DESCENT_RAMP_RATE = 220.0  # m/s target-altitude ramp
 DESCENT_MAX_SINK = 260.0   # m/s hard vertical-speed clamp
-DESCENT_GLIDE_DEG = 9.0    # nominal glide slope used to size descent_range
+
+# Task RTG profile accuracy (oniks_reference.md §3: brief seeker fix at
+# 50-75 km, then below the radio horizon at skim height): the descent start
+# is timed so the missile is AT skim altitude SKIM_CAPTURE_RANGE out —
+# descent_range = capture range + the ground covered while the altitude
+# ramp runs down + the PD's ramp-following lag (steady-state error
+# kd/kp * ramp_rate, closed out at the slow pole) at an assumed ground
+# speed, replacing the old geometry-only glide-slope rule.
+SKIM_CAPTURE_RANGE = 60_000.0   # m, tunable 50-75 km (plan-fixed center)
+DESCENT_RUN_SPEED = 660.0       # m/s assumed ground speed during the letdown
+DESCENT_SETTLE_T = 25.0         # s of PD lag closing onto the skim hold
+#                                 (tuned: full-cruise capture measures ~60 km)
 
 # Terminal phase starts when below this multiple of skim altitude.
 TERMINAL_ALT_FACTOR = 4.0
@@ -112,6 +123,9 @@ CLOSE_HILO_FACTOR = 1.25
 # Inside this range the seeker (or the unguided aim point) gets full 3D PN —
 # the final dive out of the sea-skim onto the hull/aim point.
 FINAL_PN_RANGE = 800.0     # m
+
+# In-flight route edits (Task RTG) share the tactical map's planning cap.
+MAX_ROUTE_WAYPOINTS = 8
 
 # Terminal skim altitude is held above the LOCAL surface (sea or terrain),
 # sampled here-and-ahead so the along-track slope feeds the PD's damping term
@@ -131,15 +145,32 @@ THRUST_SCALE = 4.0e5       # N per Mach of error at KP_THRUST = 1
 # scale = min(1, (speed/STALL_SPEED)^2). A fuel-starved missile sinks.
 STALL_SPEED = 200.0        # m/s
 
+# Terminal evasive weave (Task RTG, oniks_reference.md "erratic terminal
+# maneuvers"): lateral S-curve jinks across the last 12 km, full amplitude
+# between WEAVE_FULL_RANGE and the ramp-in band, tapered to ZERO by 1.5 km
+# so the final run is clean. The jink is applied as a kinematic cross-track
+# OVERLAY on top of the homing core (stripped before each integration step,
+# re-applied after): the displacement profile is exact and deterministic,
+# the g-limited guidance never fights it, and the hit is untouched — the
+# rudder-driven jink authority is modeled, not re-derived from the 11 g
+# airframe clamp (a 200 m / 4 s weave is ~5x that limit; cinematic spec).
+WEAVE_RANGE = 12_000.0       # m range-to-aim at which the jinks start
+WEAVE_RAMP_IN = 1_500.0      # m of range over which the amplitude ramps in
+WEAVE_FULL_RANGE = 4_500.0   # m: full amplitude until here ...
+WEAVE_END_RANGE = 1_500.0    # m: ... then tapered to zero by here
+WEAVE_AMP = 200.0            # m cross-track amplitude (plan: 150-250)
+WEAVE_OMEGA = 2.0 * math.pi / 4.0   # rad/s (plan: ~4 s period)
+WEAVE_PHASE_STEP = 2.399963229728653   # rad per salvo ordinal (golden angle)
+
 _UP = np.array([0.0, 1.0, 0.0])
 
 
 def _descent_range(weapon, cruise_alt):
-    """Range-to-go at which the hi profile starts down: nominal glide slope
-    from cruise_alt plus a margin to get level before terminal."""
-    return ((cruise_alt - weapon.skim_alt)
-            / np.tan(np.radians(DESCENT_GLIDE_DEG))
-            + weapon.terminal_range * 0.4)
+    """Range-to-go at which the hi profile starts down, timed so the skim
+    is captured at SKIM_CAPTURE_RANGE (Task RTG seeker-fix window)."""
+    ramp_s = (cruise_alt - weapon.skim_alt) / DESCENT_RAMP_RATE
+    return (SKIM_CAPTURE_RANGE
+            + (ramp_s + DESCENT_SETTLE_T) * DESCENT_RUN_SPEED)
 
 
 def _rotate_toward(vhat, target_dir, max_angle):
@@ -167,10 +198,12 @@ class Missile:
     target_point: np(3,) float64 sea-level aim point from the map.
     waypoints: tuple of (x, z) flown before the final target point.
     target_ship: Ship or None — the seeker refines onto a ship at terminal.
+    salvo: launch ordinal (Task RTG) — seeds the terminal weave phase so a
+        salvo does not jink in formation; deterministic per ordinal.
     """
 
     def __init__(self, weapon, pos_f64, heading, profile, target_point,
-                 waypoints=(), target_ship=None):
+                 waypoints=(), target_ship=None, salvo=0):
         assert profile in ("hi-lo", "lo-lo")
         self.weapon = weapon
         self.pos = np.asarray(pos_f64, dtype=np.float64).copy()
@@ -189,11 +222,27 @@ class Missile:
         self.locked_ship = None
         self.alive = True
         self.impact_pos = None
-        # Commanded cruise altitude and the range-to-go at which the hi
-        # profile starts down. A hi-lo shot whose route is shorter than the
-        # descent envelope scales its cruise altitude down (quadratically with
-        # route length) and recomputes the descent range to match, so close
-        # targets are hit directly instead of overshot from 14 km (Task 22b).
+        self._plan_vertical_profile()
+        self._descent_alt0 = 0.0
+        self._descent_elapsed = 0.0
+        self._boost_t0 = 0.0     # t at cap jettison / high-thrust ignition
+        # Terminal weave overlay state (Task RTG): the currently applied
+        # cross-track position/velocity offsets, the weave clock and the
+        # per-salvo phase seed.
+        self.weave_phi = (int(salvo) * WEAVE_PHASE_STEP) % (2.0 * math.pi)
+        self._weave_t = 0.0
+        self._weave_x = self._weave_z = 0.0
+        self._weave_vx = self._weave_vz = 0.0
+
+    def _plan_vertical_profile(self):
+        """Commanded cruise altitude + the range-to-go at which the hi
+        profile starts down, from the CURRENT position over the remaining
+        route. A hi-lo leg shorter than the descent envelope scales its
+        cruise altitude down (quadratically with route length) and
+        recomputes the descent range to match, so close targets are hit
+        directly instead of overshot from 14 km (Task 22b; reused by
+        Task RTG retargeting)."""
+        weapon = self.weapon
         self.cruise_alt = weapon.cruise_alt_hi
         self.descent_range = _descent_range(weapon, self.cruise_alt)
         if self.hi:
@@ -206,9 +255,6 @@ class Missile:
                                       weapon.cruise_alt_hi
                                       * (d_route / envelope) ** 2)
                 self.descent_range = _descent_range(weapon, self.cruise_alt)
-        self._descent_alt0 = 0.0
-        self._descent_elapsed = 0.0
-        self._boost_t0 = 0.0     # t at cap jettison / high-thrust ignition
 
     @property
     def mass(self):
@@ -218,6 +264,57 @@ class Missile:
     def phase_label(self) -> str:
         """HUD phase text (duck-typed across Missile and SamMissile)."""
         return PHASE_LABELS.get(self.phase, "---")
+
+    # --- mid-flight retargeting (Task RTG) -------------------------------------
+
+    @property
+    def retargetable(self) -> bool:
+        """True while the route can still be redirected: the guided
+        CLIMB/CRUISE/DESCENT phases, before the terminal seeker is locked.
+        The launch cinematic and the terminal run are committed."""
+        return (self.phase in (PH_CLIMB, PH_CRUISE, PH_DESCENT)
+                and self.locked_ship is None)
+
+    def retarget(self, new_target, new_waypoints=()):
+        """Redirect to ``new_target`` (3,) via optional (x, z) waypoints:
+        rebuilds the route from the CURRENT position, re-plans the vertical
+        profile (close-range cruise rescale included) and — when the new leg
+        is long enough to leave the descent envelope — re-enters CLIMB from
+        DESCENT. Returns False (state untouched) once committed."""
+        if not self.retargetable:
+            return False
+        self.target_point = np.asarray(new_target, dtype=np.float64).copy()
+        self.target_ship = None
+        self.route = [(float(x), float(z)) for (x, z) in new_waypoints]
+        self.route.append((float(self.target_point[0]),
+                           float(self.target_point[2])))
+        self._plan_vertical_profile()
+        if self.phase == PH_DESCENT:
+            if self._dist_to_target() > self.descent_range:
+                self.phase = PH_CLIMB           # long new leg: climb back out
+            else:                               # still inside the envelope:
+                self._descent_alt0 = float(self.pos[1])   # re-base the ramp
+                self._descent_elapsed = 0.0
+        return True
+
+    def append_waypoint(self, xz) -> bool:
+        """In-flight route edit (map RMB with this round selected): insert
+        an (x, z) waypoint just before the final target point. Refused when
+        committed or at the MAX_ROUTE_WAYPOINTS cap. The vertical profile is
+        deliberately NOT re-planned — a waypoint click must never trigger a
+        surprise re-climb."""
+        if not self.retargetable or len(self.route) - 1 >= MAX_ROUTE_WAYPOINTS:
+            return False
+        self.route.insert(len(self.route) - 1, (float(xz[0]), float(xz[1])))
+        return True
+
+    def clear_route_waypoints(self) -> bool:
+        """Drop the remaining waypoints (map X with this round selected),
+        keeping the final target point."""
+        if not self.retargetable or len(self.route) <= 1:
+            return False
+        del self.route[:-1]
+        return True
 
     # --- helpers --------------------------------------------------------------
 
@@ -374,6 +471,17 @@ class Missile:
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
 
+        # Strip the terminal weave overlay (Task RTG): the integration below
+        # always runs on the clean homing core; the overlay is re-applied at
+        # the bottom of the step from the fresh range/clock.
+        if self._weave_x != 0.0 or self._weave_z != 0.0:
+            self.pos[0] -= self._weave_x
+            self.pos[2] -= self._weave_z
+            self.vel[0] -= self._weave_vx
+            self.vel[2] -= self._weave_vz
+            self._weave_x = self._weave_z = 0.0
+            self._weave_vx = self._weave_vz = 0.0
+
         alt = float(self.pos[1])
         vx, vy, vz = self.vel.tolist()         # plain floats: scalar-fast math
         speed = math.sqrt(vx * vx + vy * vy + vz * vz)
@@ -493,11 +601,46 @@ class Missile:
         # Above the world's strict terrain ceiling no surface can be hit, so
         # the heightfield query is skipped (Task 22 perf: saves the query for
         # the whole climb/cruise of a hi profile).
-        if py > TERRAIN_MAX_HEIGHT:
+        if py <= TERRAIN_MAX_HEIGHT:
+            surface = max(float(world.terrain_height_at(px, pz)), 0.0)
+            if py <= surface:
+                self.pos[1] = surface
+                self.impact_pos = self.pos.copy()
+                self.phase = PH_DEAD
+                self.alive = False
+                return
+
+        # --- terminal weave overlay (Task RTG) ---
+        if self.phase == PH_TERMINAL:
+            self._apply_weave(dt, vx, vz)
+
+    def _apply_weave(self, dt, vx, vz):
+        """Re-apply the evasive S-curve as a cross-track overlay on the core
+        state: amplitude ramps in below WEAVE_RANGE, holds WEAVE_AMP, tapers
+        to zero by WEAVE_END_RANGE so the final run is straight. Pure scalar
+        math (one sin/cos per terminal step — Task 22 hot-loop style)."""
+        self._weave_t += dt
+        tgt = self.locked_ship.pos if self.locked_ship is not None \
+            else self.target_point
+        d = math.hypot(float(tgt[0]) - self.pos[0],
+                       float(tgt[2]) - self.pos[2])
+        if d >= WEAVE_RANGE or d <= WEAVE_END_RANGE:
             return
-        surface = max(float(world.terrain_height_at(px, pz)), 0.0)
-        if py <= surface:
-            self.pos[1] = surface
-            self.impact_pos = self.pos.copy()
-            self.phase = PH_DEAD
-            self.alive = False
+        hsp = math.hypot(vx, vz)
+        if hsp < 1e-9:
+            return
+        amp = WEAVE_AMP * min((WEAVE_RANGE - d) / WEAVE_RAMP_IN,
+                              (d - WEAVE_END_RANGE)
+                              / (WEAVE_FULL_RANGE - WEAVE_END_RANGE), 1.0)
+        ph = WEAVE_OMEGA * self._weave_t + self.weave_phi
+        y = amp * math.sin(ph)
+        ydot = amp * WEAVE_OMEGA * math.cos(ph)
+        pxh, pzh = vz / hsp, -vx / hsp         # horizontal right-hand perp
+        self._weave_x = pxh * y
+        self._weave_z = pzh * y
+        self._weave_vx = pxh * ydot
+        self._weave_vz = pzh * ydot
+        self.pos[0] += self._weave_x
+        self.pos[2] += self._weave_z
+        self.vel[0] += self._weave_vx
+        self.vel[2] += self._weave_vz

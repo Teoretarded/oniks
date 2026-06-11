@@ -14,7 +14,7 @@ import numpy as np
 from game.tactical_map import (MAX_WAYPOINTS, PICK_RADIUS_PX, ZOOM_MAX_MPP,
                                ZOOM_MIN_MPP, MapView, add_waypoint,
                                air_alt_text, clear_waypoints, contact_symbol,
-                               pick_contact)
+                               pick_contact, pick_missile)
 from sim.contacts import ContactBoard
 
 W, H = 1600, 900
@@ -150,6 +150,30 @@ def test_air_symbol_selection_and_altitude_text():
     assert air_alt_text(6_500.0) == "6.5k"
     assert air_alt_text(4_000.0) == "4.0k"
     assert air_alt_text(12_340.0) == "12.3k"
+
+
+# ------------------------------------------------------- missile pick (RTG)
+
+class _FakeMissile:
+    def __init__(self, x, z, alive=True):
+        self.pos = np.array([x, 100.0, z])
+        self.alive = alive
+
+
+def test_pick_missile_nearest_within_14px_else_none():
+    """Task RTG: LMB on an own-missile diamond selects it — same 14 px pick
+    radius as contacts; dead rounds are not pickable. (Pick PRIORITY over
+    contacts is structural: TacticalMap._click_target checks missiles first.)"""
+    v = view(center=(0.0, 200_000.0), mpp=400.0)
+    a = _FakeMissile(10_000.0, 205_000.0)
+    b = _FakeMissile(10_000.0 + 12.0 * 400.0, 205_000.0)   # 12 px east of a
+    dead = _FakeMissile(10_000.0, 205_000.0, alive=False)
+    missiles = [dead, a, b]
+    pa = v.world_to_screen((10_000.0, 205_000.0))
+    assert pick_missile(v, missiles, (pa[0] + 5.0, pa[1])) is a
+    assert pick_missile(v, missiles, (pa[0] + 8.0, pa[1])) is b   # nearer b
+    assert pick_missile(v, missiles, (pa[0], pa[1] + 15.0)) is None
+    assert pick_missile(v, [dead], (pa[0], pa[1])) is None        # dead: never
 
 
 # -------------------------------------------------- waypoint append/clear

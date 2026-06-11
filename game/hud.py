@@ -131,6 +131,12 @@ class HUD:
         self._camera_line(sandbox, w, h)
         self.text.flush(w, h)
 
+    def draw_flight_block(self, sandbox, m) -> None:
+        """Queue (no flush) the flight telemetry block for ``m``: the
+        tactical map calls this for the LMB-selected round (Task RTG) so its
+        telemetry shows in the same HUD flight block while the map is open."""
+        self._flight_block(sandbox, m)
+
     # ---------------------------------------------------------------- blocks
 
     def _block(self, header: str, rows) -> None:

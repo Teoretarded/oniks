@@ -21,6 +21,7 @@ import pygame
 
 from engine.text import BODY_SIZE, HEADER_SIZE
 from sim.arsenal import ONIKS, S300, S300_TEL
+from sim.sam import SamMissile
 from world.generation import (BASE_POS, LANES, SAM_SITE_POS, SITES,
                               terrain_height, terrain_height_scalar)
 
@@ -89,8 +90,11 @@ TARGET_CROSS_PX = 7.0
 TRAIL_DOT_PX = 3.0
 HINT_MARGIN = 10               # px from the bottom edge (matches the HUD)
 
-MAP_HINT = ("LMB target  RMB waypoint  X clear  SPACE launch  TAB platform  "
-            "WHEEL zoom  MMB/arrows pan  M close")
+MAP_HINT = ("LMB target/missile  RMB waypoint  X clear  SPACE launch  "
+            "TAB platform  WHEEL zoom  MMB/arrows pan  M close")
+
+# Task RTG: refusal flash when a selected round can no longer be redirected.
+COMMITTED_HINT = "COMMITTED"
 
 # --- Terrain colorize ramps (uint8 RGB endpoints) ------------------------------
 
@@ -220,6 +224,22 @@ def pick_contact(view: MapView, board, sim_time: float, mouse_px,
     return best
 
 
+def pick_missile(view: MapView, missiles, mouse_px):
+    """The live own missile whose diamond is nearest to ``mouse_px`` within
+    PICK_RADIUS_PX, else None (Task RTG selection). Pick PRIORITY over
+    contacts is structural: ``TacticalMap._click_target`` tries missiles
+    before the contact/coordinate flow."""
+    best, best_d = None, PICK_RADIUS_PX
+    for m in missiles:
+        if not getattr(m, "alive", True):
+            continue
+        sx, sy = view.world_to_screen((m.pos[0], m.pos[2]))
+        d = float(np.hypot(sx - float(mouse_px[0]), sy - float(mouse_px[1])))
+        if d <= best_d:
+            best, best_d = m, d
+    return best
+
+
 def contact_symbol(track) -> str:
     """'air' (diamond + altitude tag) or 'surface' (course triangle)."""
     return "air" if track.get("is_air") else "surface"
@@ -293,6 +313,7 @@ class TacticalMap:
         self.text = sandbox.text
         self.view: MapView | None = None     # sized at first draw
         self.selected_contact = None         # ship_id the target tracks
+        self.selected_missile = None         # own round LMB-selected (RTG)
         self._panning = False
         self._trails: dict[int, list] = {}   # id(missile) -> [(x, z), ...]
 
@@ -328,6 +349,10 @@ class TacticalMap:
             if key not in live:
                 del self._trails[key]
 
+        if (self.selected_missile is not None
+                and not self.selected_missile.alive):
+            self.selected_missile = None     # splashed/expired: deselect
+
         if self.selected_contact is not None:
             track = world.contacts.tracks.get(self.selected_contact)
             if track is not None:
@@ -362,9 +387,7 @@ class TacticalMap:
                 self._panning = True
                 return True
             if ev.button == 3:
-                if add_waypoint(self.sandbox.waypoints,
-                                self.view.screen_to_world(ev.pos)):
-                    self.sandbox.app.audio.ui_click()
+                self._rmb_waypoint(self.view.screen_to_world(ev.pos))
                 return True
             if ev.button in (4, 5):          # legacy wheel: MOUSEWHEEL handles
                 return True
@@ -375,17 +398,57 @@ class TacticalMap:
             self.view.pan_px(-ev.rel[0], -ev.rel[1])
             return True
         if ev.type == pygame.KEYDOWN and ev.key == pygame.K_x:
-            clear_waypoints(self.sandbox.waypoints)
-            self.sandbox.app.audio.ui_click()
+            self._clear_waypoints()
             return True
         return False
 
+    def _rmb_waypoint(self, wp) -> None:
+        """RMB: append to the selected round's remaining route (Task RTG),
+        else to the launch plan. A committed round flashes COMMITTED; a full
+        route refuses silently (matches the plan-chain behavior)."""
+        m = self.selected_missile
+        if m is not None:
+            if isinstance(m, SamMissile):
+                return                       # trackless: nothing to append to
+            if m.append_waypoint(wp):
+                self.sandbox.app.audio.ui_click()
+            elif not m.retargetable:
+                self.sandbox.show_hint(COMMITTED_HINT)
+        elif add_waypoint(self.sandbox.waypoints, wp):
+            self.sandbox.app.audio.ui_click()
+
+    def _clear_waypoints(self) -> None:
+        """X: clear the selected round's remaining waypoints (Task RTG),
+        else the launch plan's."""
+        m = self.selected_missile
+        if m is not None:
+            if not isinstance(m, SamMissile) and m.clear_route_waypoints():
+                self.sandbox.app.audio.ui_click()
+            return
+        clear_waypoints(self.sandbox.waypoints)
+        self.sandbox.app.audio.ui_click()
+
     def _click_target(self, pos) -> None:
-        """LMB, routed by the active platform (Task S4): the S-300 picks air
-        contacts only (a miss clears the selection); the Bastion picks
-        surface contacts, falling back to a plain coordinate target."""
+        """LMB: own missiles take pick priority (Task RTG) — first click
+        selects/deselects a round; with a round selected the next click
+        redirects it. Otherwise the launch-planning flow, routed by the
+        active platform (Task S4): the S-300 picks air contacts only (a miss
+        clears the selection); the Bastion picks surface contacts, falling
+        back to a plain coordinate target."""
         sandbox = self.sandbox
         world = sandbox.world
+        m = pick_missile(self.view, world.missiles, pos)
+        if m is not None:
+            if m is self.selected_missile:
+                self.selected_missile = None     # toggle off: back to planning
+            else:
+                self.selected_missile = m
+                sandbox.followed = m             # HUD flight block + camera
+                sandbox.rig.retarget()
+            return
+        if self.selected_missile is not None:
+            self._retarget_selected(pos)
+            return
         air = sandbox.active_platform == "s300"
         sid = pick_contact(self.view, world.contacts, world.sim_time, pos,
                            air_only=air)
@@ -399,6 +462,32 @@ class TacticalMap:
         else:
             sandbox.target_point = ground_aim_point(
                 self.view.screen_to_world(pos))
+
+    def _retarget_selected(self, pos) -> None:
+        """LMB with a round selected: redirect it mid-flight (Task RTG).
+        The Oniks takes a surface contact or a plain map point; the SAM takes
+        an air contact (an empty-sky click does nothing). A committed round
+        refuses and flashes COMMITTED on the map + HUD hint line."""
+        sandbox = self.sandbox
+        world = sandbox.world
+        m = self.selected_missile
+        if isinstance(m, SamMissile):
+            sid = pick_contact(self.view, world.contacts, world.sim_time,
+                               pos, air_only=True)
+            if sid is None:
+                return
+            if not world.retarget_sam(m, sid):
+                sandbox.show_hint(COMMITTED_HINT)
+            return
+        sid = pick_contact(self.view, world.contacts, world.sim_time, pos,
+                           air_only=False)
+        if sid is not None:
+            est = world.contacts.estimated_pos(sid, world.sim_time)
+            aim = np.array([est[0], 0.0, est[2]])
+        else:
+            aim = ground_aim_point(self.view.screen_to_world(pos))
+        if not m.retarget(aim):
+            sandbox.show_hint(COMMITTED_HINT)
 
     def _selected_is_air(self) -> bool:
         track = self.sandbox.world.contacts.tracks.get(self.selected_contact)
@@ -439,6 +528,9 @@ class TacticalMap:
         self._contacts()
         self._missiles()
         self._chrome(w, h)
+        if self.selected_missile is not None:    # Task RTG: live telemetry
+            self.sandbox.hud.draw_flight_block(self.sandbox,
+                                               self.selected_missile)
         self.text.flush(w, h)
 
     # ------------------------------------------------------ terrain texture
@@ -681,6 +773,12 @@ class TacticalMap:
                 self.text.draw_lines([(sx, sy - d), (sx + d, sy), (sx, sy + d),
                                       (sx - d, sy), (sx, sy - d)],
                                      MISSILE_COL, 2.0)
+                if m is self.selected_missile:   # Task RTG highlight ring
+                    ang = np.linspace(0.0, 2.0 * np.pi, 17)
+                    self.text.draw_lines(
+                        list(zip(sx + SELECT_RING_PX * np.cos(ang),
+                                 sy + SELECT_RING_PX * np.sin(ang))),
+                        SELECT_COL, 1.5)
 
     # --------------------------------------------------------------- chrome
 
@@ -723,6 +821,14 @@ class TacticalMap:
         hx, hy = (w - hw) * 0.5, h - lh - HINT_MARGIN
         self.text.draw_rect(hx - 10, hy - 4, hw + 20, lh + 8, PANEL_RGBA)
         self.text.draw_text(hx, hy, MAP_HINT, HINT_COL)
+
+        # Transient flash (COMMITTED etc., Task RTG): the map mirrors the
+        # HUD's hint line, one row above the map hint bar.
+        if sandbox.hint_left > 0.0 and sandbox.hint_text:
+            fw = self.text.text_width(sandbox.hint_text)
+            fx, fy = (w - fw) * 0.5, hy - lh - 16.0
+            self.text.draw_rect(fx - 10, fy - 4, fw + 20, lh + 8, PANEL_RGBA)
+            self.text.draw_text(fx, fy, sandbox.hint_text, RELOAD_COL)
 
         mx, my = pygame.mouse.get_pos()
         wp = self.view.screen_to_world((mx, my))

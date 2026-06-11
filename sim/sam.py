@@ -154,6 +154,25 @@ class SamMissile:
         """HUD phase text (duck-typed across Missile and SamMissile)."""
         return PHASE_LABELS.get(self.phase, "---")
 
+    # --- mid-flight retargeting (Task RTG) ----------------------------------------
+
+    @property
+    def retargetable(self) -> bool:
+        """True while the shot can swap targets: BOOST/MIDCOURSE. The eject
+        hang is unguided and the terminal seeker is committed."""
+        return self.phase in (SPH_BOOST, SPH_MIDCOURSE)
+
+    def retarget(self, new_target, new_waypoints=(), contact_estimate_fn=None):
+        """Swap onto ``new_target`` (Aircraft) with a fresh contact-estimate
+        closure (WorldState.retarget_sam builds it). ``new_waypoints`` exists
+        for signature parity with Missile.retarget and is ignored — a SAM
+        flies trackless. Returns False (state untouched) when committed."""
+        if not self.retargetable:
+            return False
+        self.target = new_target
+        self.contact_estimate_fn = contact_estimate_fn
+        return True
+
     # --- guidance helpers -------------------------------------------------------
 
     def _target_state(self):

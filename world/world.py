@@ -93,6 +93,7 @@ class WorldState:
         self.reload_left = 0.0          # s until the launcher is ARMED again
         self.sam_reload_left = 0.0      # s until the next S-300 tube is ready
         self.sam_ammo = S300_TEL.ammo   # rounds left in the 4-tube block
+        self.oniks_fired = 0            # launch ordinal: seeds the weave phase
 
     @staticmethod
     def _spawn_ship(i: int, spawn: dict) -> Ship:
@@ -174,7 +175,9 @@ class WorldState:
         tp = np.asarray(target_point, dtype=np.float64)
         fx, fz = waypoints[0] if len(waypoints) else (tp[0], tp[2])
         heading = float(np.arctan2(fx - pos[0], fz - pos[2]))
-        m = Missile(ONIKS, pos, heading, profile, tp, waypoints=waypoints)
+        m = Missile(ONIKS, pos, heading, profile, tp, waypoints=waypoints,
+                    salvo=self.oniks_fired)
+        self.oniks_fired += 1
         self.missiles.append(m)
         self.reload_left = BASTION.reload_s
         return m
@@ -200,8 +203,18 @@ class WorldState:
             return None
         tube = S300_TEL.ammo - self.sam_ammo
         pos = SAM_TEL_POS + SAM_MOUTH_OFFSETS[tube]
+        m = SamMissile(S300, pos, target,
+                       contact_estimate_fn=self._contact_estimate(aircraft_id))
+        self.missiles.append(m)
+        self.sam_ammo -= 1
+        self.sam_reload_left = S300_TEL.reload_s
+        return m
 
+    def _contact_estimate(self, aircraft_id):
+        """A () -> (pos, vel) closure over the board's dead-reckoned track
+        for ``aircraft_id``, frozen at the last fix if the track drops."""
         board = self.contacts
+        track = board.tracks[aircraft_id]
         last = {"pos": board.estimated_pos(aircraft_id, self.sim_time),
                 "vel": track["vel"].copy()}
 
@@ -212,9 +225,19 @@ class WorldState:
                 last["vel"] = trk["vel"]
             return last["pos"], last["vel"]
 
-        m = SamMissile(S300, pos, target,
-                       contact_estimate_fn=contact_estimate)
-        self.missiles.append(m)
-        self.sam_ammo -= 1
-        self.sam_reload_left = S300_TEL.reload_s
-        return m
+        return contact_estimate
+
+    def retarget_sam(self, missile, aircraft_id) -> bool:
+        """Swap a flying SAM onto air contact ``aircraft_id`` (Task RTG):
+        new target aircraft + a fresh contact-estimate closure over the new
+        track. False when the track is not a live air contact or the round
+        is committed (terminal) — the missile is untouched."""
+        track = self.contacts.tracks.get(aircraft_id)
+        if track is None or not track.get("is_air"):
+            return False
+        target = next((a for a in self.aircraft
+                       if a.aircraft_id == aircraft_id), None)
+        if target is None:
+            return False
+        return missile.retarget(
+            target, contact_estimate_fn=self._contact_estimate(aircraft_id))
