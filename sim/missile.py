@@ -67,6 +67,14 @@ CLOSE_HILO_FACTOR = 1.25
 # the final dive out of the sea-skim onto the hull/aim point.
 FINAL_PN_RANGE = 800.0     # m
 
+# Terminal skim altitude is held above the LOCAL surface (sea or terrain),
+# sampled here-and-ahead so the along-track slope feeds the PD's damping term
+# (otherwise the kd term fights the climb and the missile flies a 12 m ASL
+# line into a rising coast ~2.5 km short of an inland target). Over open
+# water both samples are 0 and the maths is bit-identical to a plain
+# sea-level hold (Task 23 spec acceptance: land targets explode at the site).
+SKIM_LOOKAHEAD = 500.0     # m ahead along track for the slope sample
+
 # Speed controller: thrust = clip(KP_THRUST*(target_mach - mach)*THRUST_SCALE
 # + drag_feedforward, 0, max_thrust). The drag feedforward cancels steady-state
 # error, so KP_THRUST = 1.0 converges smoothly (first-order, tau ~ 2 s).
@@ -210,6 +218,22 @@ class Missile:
         if best is not None:
             self.locked_ship = best   # once locked, stays locked
 
+    def _skim_ref(self, alt, vs, world):
+        """(altitude, vertical speed) for the terminal skim hold, measured
+        against the local surface and its slope along track: returns
+        ``(alt - surface, vs - surface_rise_rate)`` so the PD holds skim_alt
+        AGL up a coastal slope. Exactly ``(alt, vs)`` over open water."""
+        px, pz = self.pos[0], self.pos[2]
+        s0 = max(float(world.terrain_height_at(px, pz)), 0.0)
+        vx, vz = self.vel[0], self.vel[2]
+        hspeed = math.hypot(vx, vz)
+        if hspeed < 1e-9:
+            return alt - s0, vs
+        scale = SKIM_LOOKAHEAD / hspeed
+        s1 = max(float(world.terrain_height_at(px + vx * scale,
+                                               pz + vz * scale)), 0.0)
+        return alt - s0, vs - (s1 - s0) / SKIM_LOOKAHEAD * hspeed
+
     def _guidance(self, alt, vs, speed, dt, world):
         """Commanded guidance accel (includes gravity compensation 'lift').
 
@@ -249,7 +273,8 @@ class Missile:
                     g[1] += GRAVITY
                 else:
                     g = pn_accel(self.pos, self.vel, tpos, tvel)
-                    g[1] = (altitude_hold_accel(alt, vs, w.skim_alt,
+                    ralt, rvs = self._skim_ref(alt, vs, world)
+                    g[1] = (altitude_hold_accel(ralt, rvs, w.skim_alt,
                                                 ALT_KP, ALT_KD, ALT_MAX_A)
                             + GRAVITY)
             elif self._dist_to_target() < FINAL_PN_RANGE:
@@ -258,7 +283,8 @@ class Missile:
                 g[1] += GRAVITY
             else:
                 g = steer_heading_accel(self.vel, self._route_heading())
-                g[1] += altitude_hold_accel(alt, vs, w.skim_alt,
+                ralt, rvs = self._skim_ref(alt, vs, world)
+                g[1] += altitude_hold_accel(ralt, rvs, w.skim_alt,
                                             ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         # No dynamic pressure -> no control authority (fuel-starved missiles sink).
         if speed < STALL_SPEED:

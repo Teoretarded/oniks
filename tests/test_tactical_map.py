@@ -128,3 +128,21 @@ def test_waypoint_append_and_clear_logic():
     clear_waypoints(wps)
     assert wps == []
     assert add_waypoint(wps, (9.0, 10.0)) is True     # usable again after clear
+
+
+# -------------------------------------------------- plain-coordinate aim
+
+def test_ground_aim_point_targets_the_local_surface():
+    """Task 23 spec acceptance: an LMB click on an elevated land site must
+    aim the terminal dive at the ground there, not at y=0 under it; over
+    water the aim point stays at sea level."""
+    from game.tactical_map import ground_aim_point
+    from world.generation import SITES, terrain_height_scalar
+
+    hx, hz = SITES[2]["pos"]                       # HARBOR KILO, on land
+    p = ground_aim_point((hx, hz))
+    assert p.dtype == np.float64 and p.shape == (3,)
+    assert p[1] == terrain_height_scalar(float(hx), float(hz)) > 0.0
+    assert (p[0], p[2]) == (hx, hz)
+    sea = ground_aim_point((0.0, 200_000.0))       # mid-ocean click
+    assert sea[1] == 0.0

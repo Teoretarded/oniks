@@ -108,3 +108,27 @@ def test_determinism():
     for _ in range(int(30 / DT)): a.update(DT, w)
     for _ in range(int(30 / DT)): b.update(DT, w)
     assert np.array_equal(a.pos, b.pos) and np.array_equal(a.vel, b.vel)
+
+class _CoastWorld:
+    """Open ocean ramping onto a 25 m/km coastal slope at z = 499 km
+    (mirrors the enemy coast in world.generation near HARBOR KILO)."""
+    ships = []
+    def terrain_height_at(self, x, z):
+        return (z - 499_000.0) * 0.025 if z > 499_000.0 else -50.0
+
+def test_lo_lo_land_strike_rides_the_coast_up_to_the_site():
+    """Task 23 spec acceptance ('land targets explode'): a shot at a site
+    3 km inland (terrain ~75 m up a 25 m/km slope) must ride its terminal
+    skim up the coast and impact at the site — not hold 12 m ASL into the
+    beach ~2.5 km short of it."""
+    target = np.array([0., 0., 502_000.])
+    m = Missile(ONIKS, np.array([0., 60., 452_000.]), heading=0.0,
+                profile="lo-lo", target_point=target)
+    w = _CoastWorld()
+    for _ in range(int(240 / DT)):
+        m.update(DT, w)
+        if not m.alive:
+            break
+    assert not m.alive and m.impact_pos is not None
+    assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 800.0
+    assert m.impact_pos[1] > 30.0           # up on the slope, not the beach

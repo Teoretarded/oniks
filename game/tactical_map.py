@@ -21,7 +21,8 @@ import pygame
 
 from engine.text import BODY_SIZE, HEADER_SIZE
 from sim.arsenal import ONIKS
-from world.generation import BASE_POS, LANES, SITES, terrain_height
+from world.generation import (BASE_POS, LANES, SITES, terrain_height,
+                              terrain_height_scalar)
 
 # --- Map texture extent (plan-fixed) ------------------------------------------
 
@@ -209,6 +210,15 @@ def pick_contact(view: MapView, board, sim_time: float, mouse_px):
     return best
 
 
+def ground_aim_point(xz) -> np.ndarray:
+    """Aim point (3,) float64 for a plain-coordinate map click: y at the
+    local surface, so the terminal dive on an elevated land site aims at
+    the ground there instead of at y = 0 underneath it (Task 23 spec
+    acceptance: land targets explode). Sea level over water."""
+    x, z = float(xz[0]), float(xz[1])
+    return np.array([x, max(terrain_height_scalar(x, z), 0.0), z])
+
+
 def add_waypoint(waypoints: list, xz) -> bool:
     """Append world (x, z) to the planned route; refuse when full."""
     if len(waypoints) >= MAX_WAYPOINTS:
@@ -355,8 +365,8 @@ class TacticalMap:
             est = world.contacts.estimated_pos(sid, world.sim_time)
             self.sandbox.target_point = np.array([est[0], 0.0, est[2]])
         else:
-            w = self.view.screen_to_world(pos)
-            self.sandbox.target_point = np.array([w[0], 0.0, w[1]])
+            self.sandbox.target_point = ground_aim_point(
+                self.view.screen_to_world(pos))
 
     def update(self, dt_real: float) -> None:
         """Arrow-key panning (held keys, real time)."""
