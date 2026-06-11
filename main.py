@@ -13,8 +13,12 @@ after the frame renders). ``time_scale`` is re-read from the state each
 frame (the sandbox forces 1x through the launch cinematic; the menu
 returns 0 so no sim time accumulates while it is up).
 
-State flow (Task 21): App starts at MenuState; SANDBOX starts a fresh
-world, ESC in the sandbox returns to the menu (sim frozen, RESUME appears),
+State flow (Task 21, reshaped by Task UI): App starts at MenuState
+(SANDBOX / SETTINGS / QUIT); ESC in the sandbox opens PauseState over the
+frozen frame (RESUME / SETTINGS / MAIN MENU — the latter discards the
+session after a confirm), SETTINGS opens from either menu and returns to
+whoever opened it. The rebindable action->key table (game/keybinds.py)
+loads at startup and persists to %APPDATA%\\ONIKS\\settings.json.
 QUIT or window close ends ``run`` via ``app.running``.
 """
 
@@ -32,7 +36,9 @@ AudioManager.pre_init()
 
 from engine.renderer import Renderer            # noqa: E402
 from engine.window import Window                # noqa: E402
-from game.states import MenuState, StateMachine  # noqa: E402
+from game.keybinds import Keybinds              # noqa: E402
+from game.states import (MenuState, PauseState, SettingsState,  # noqa: E402
+                         StateMachine)
 
 PHYS_DT = 1.0 / 120.0
 SCREENSHOT_DIR = "renders"
@@ -50,14 +56,25 @@ class App:
         self.frame_step = False             # N: one sim step while paused
         self.screenshot_requested = False   # F2: saved after render
         self.running = True                 # cleared by QUIT / menu QUIT
+        self.keybinds = Keybinds()          # persisted action->key table
         self.states = StateMachine()
         self.sandbox = None                 # live game session (RESUME target)
         self.menu = MenuState(self)
+        self.pause_menu = PauseState(self)
+        self.settings = SettingsState(self)
+        self._ui_text = None                # TextRenderer shared by menus
         self.states.switch(self.menu)
 
     @property
     def state(self):
         return self.states.current
+
+    def ui_text(self):
+        """The menu screens' shared TextRenderer (GL exists by enter())."""
+        if self._ui_text is None:
+            from engine.text import TextRenderer
+            self._ui_text = TextRenderer()
+        return self._ui_text
 
     # ------------------------------------------------------- state switching
 
@@ -70,8 +87,24 @@ class App:
         self.sandbox = SandboxState(self)
         self.states.switch(self.sandbox)
 
-    def open_menu(self) -> None:
-        """ESC in the sandbox: back to the menu (sandbox kept for RESUME)."""
+    def open_pause(self) -> None:
+        """ESC in the sandbox: pause menu over the frozen frame."""
+        self.states.switch(self.pause_menu)
+
+    def resume(self) -> None:
+        """Pause RESUME / ESC: back into the running session."""
+        self.states.switch(self.sandbox)
+
+    def open_settings(self, back_to) -> None:
+        """SETTINGS item (main menu or pause): ESC/BACK returns to opener."""
+        self.settings.back_to = back_to
+        self.states.switch(self.settings)
+
+    def quit_to_menu(self) -> None:
+        """Pause MAIN MENU (confirmed): discard the session, title screen."""
+        if self.sandbox is not None:
+            self.sandbox.dispose()
+            self.sandbox = None
         self.states.switch(self.menu)
 
     def run(self) -> None:

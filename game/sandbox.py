@@ -224,6 +224,7 @@ class SandboxState(GameState):
         self.text = TextRenderer()      # shared by the HUD and the map
         self.hud = HUD(self.text)
         self.hud_visible = True
+        self.controls_overlay = False   # F1: live binding-table overlay
 
         # Player intent (driven by the tactical map)
         self.profile = "hi-lo"
@@ -318,6 +319,12 @@ class SandboxState(GameState):
         """Flash a one-line HUD hint (invalid launch selection etc.)."""
         self.hint_text = text
         self.hint_left = seconds
+
+    def toggle_controls_overlay(self) -> None:
+        """F1 (reserved binding): the controls overlay generated live from
+        the binding table. An overlay, not a menu — the sim keeps running."""
+        self.controls_overlay = not self.controls_overlay
+        self.app.audio.ui_click()
 
     def _selected_air_track(self):
         """The selected contact's track if it is a live air track, else None."""
@@ -684,6 +691,20 @@ class SandboxState(GameState):
         audio.set_listener(self.camera.eye)      # gains follow the camera
         audio.update_loops(self._loop_sources())
         w, h = self.window.size()
+        self._draw_scene(w, h)
+        if self.map_open:
+            self.tactical_map.update(dt_real)   # arrow-key panning
+            self.tactical_map.draw(w, h)
+        elif self.hud_visible:
+            self.hud.draw(self, w, h)
+
+    def render_frozen(self) -> None:
+        """The 3D scene exactly as last framed — no input/rig/audio updates,
+        no HUD/map overlay. The pause menu draws this, then dims it."""
+        w, h = self.window.size()
+        self._draw_scene(w, h)
+
+    def _draw_scene(self, w: int, h: int) -> None:
         self.renderer.begin(self.camera, w / h)
         self.sky.draw(self.renderer)
         self.terrain.draw(self.renderer)
@@ -695,11 +716,6 @@ class SandboxState(GameState):
         self._draw_tel()
         self._draw_missiles()
         self.particles.draw(self.renderer, self.effects)
-        if self.map_open:
-            self.tactical_map.update(dt_real)   # arrow-key panning
-            self.tactical_map.draw(w, h)
-        elif self.hud_visible:
-            self.hud.draw(self, w, h)
 
     def _draw_ships(self) -> None:
         for ship in self.world.ships:

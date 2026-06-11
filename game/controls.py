@@ -1,20 +1,27 @@
-"""Key bindings (final, also in README):
+"""Sandbox input: every action routed through the rebindable Keybinds table.
 
-    ESC menu | M map | C camera | TAB platform (Bastion <-> S-300)
+Default bindings (rebind in SETTINGS; persisted to %APPDATA%\\ONIKS):
+
+    ESC pause menu | M map | C camera | TAB platform (Bastion <-> S-300)
     SPACE launch | 1/2 profile hi-lo/lo-lo
     P pause | N frame-step | - / = time accel down/up (1,2,4,8,16) | F2 screenshot
     [ / ] camera subject cycle (missiles -> active TEL -> selected contact)
+    F1 controls overlay (generated live from the binding table)
     free cam: WASD QE, mouse look (RMB drag), SHIFT fast, CTRL+SHIFT very fast
     orbit cam: RMB/LMB drag rotates around the subject, wheel zooms 8-600 m
     chase cam: wheel adjusts the follow distance 25-120 m
-    map (while open): LMB target, RMB waypoint, X clear waypoints,
-    wheel zoom at cursor, MMB drag / arrow keys pan
+    map (while open): LMB target, RMB waypoint, X (clear_waypoints binding)
+    clears waypoints, wheel zoom at cursor, MMB drag / arrow keys pan
+
+ESC and F1 are reserved (game/keybinds.py): ESC always reaches the pause
+menu and F1 always reaches the overlay, no matter what the player rebinds.
+Numpad -/+ alias onto the main-row time-accel keys via ``normalize_key``.
 
 While the map is open its interactions consume events first; everything it
 doesn't claim (SPACE, P, time accel, M itself...) falls through to the
 normal bindings. Time accel refuses to exceed 1x while a missile is in
-the launch cinematic — the requested rate is kept here and the sandbox auto-restores
-it once the launch reaches CLIMB/CRUISE.
+the launch cinematic — the requested rate is kept here and the sandbox auto-
+restores it once the launch reaches CLIMB/CRUISE.
 """
 
 from __future__ import annotations
@@ -27,11 +34,18 @@ from game.cameras import FREE_SPEEDS
 TIME_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 
-class FreeCamControls:
-    """Drives a FreeCam: right-drag mouse look events + per-frame key polls."""
+def _pressed(keys, key: int | None) -> bool:
+    """Held-state of a bindable key (False for an unbound action)."""
+    return bool(keys[key]) if key is not None else False
 
-    def __init__(self, freecam):
+
+class FreeCamControls:
+    """Drives a FreeCam: right-drag mouse look events + per-frame key polls
+    (movement keys resolved through the binding table every poll)."""
+
+    def __init__(self, freecam, keybinds):
         self.freecam = freecam
+        self.keybinds = keybinds
         self._looking = False
 
     def handle_event(self, ev) -> None:
@@ -62,9 +76,13 @@ class FreeCamControls:
             speed = FREE_SPEEDS[1]
         else:
             speed = FREE_SPEEDS[0]
-        fwd = keys[pygame.K_w] - keys[pygame.K_s]
-        strafe = keys[pygame.K_d] - keys[pygame.K_a]
-        lift = keys[pygame.K_e] - keys[pygame.K_q]
+        kf = self.keybinds.key_for
+        fwd = _pressed(keys, kf("freecam_fwd")) - _pressed(
+            keys, kf("freecam_back"))
+        strafe = _pressed(keys, kf("freecam_right")) - _pressed(
+            keys, kf("freecam_left"))
+        lift = _pressed(keys, kf("freecam_up")) - _pressed(
+            keys, kf("freecam_down"))
         if fwd or strafe or lift:
             self.freecam.move(dt_real, fwd, strafe, lift, speed)
 
@@ -78,7 +96,8 @@ class SandboxControls:
 
     def __init__(self, sandbox):
         self.sandbox = sandbox
-        self.free = FreeCamControls(sandbox.rig.freecam)
+        self.free = FreeCamControls(sandbox.rig.freecam,
+                                    sandbox.app.keybinds)
         self._scale_idx = 0
         self._orbit_drag = False        # RMB/LMB orbit drag live (Task CAM)
 
@@ -124,38 +143,42 @@ class SandboxControls:
         self._orbit_drag = False
 
     def _handle_key(self, key) -> None:
+        """Resolve the key through the binding table and dispatch."""
         sandbox = self.sandbox
         app = sandbox.app
-        if key == pygame.K_ESCAPE:
-            app.open_menu()                 # sim freezes; RESUME continues
-        elif key == pygame.K_m:
+        action = app.keybinds.action_for(key)
+        if action == "menu":                # reserved: always ESC
+            app.open_pause()                # sim freezes; RESUME continues
+        elif action == "map":
             sandbox.map_open = not sandbox.map_open
             app.audio.ui_click()
-        elif key == pygame.K_c:
+        elif action == "camera_mode":
             sandbox.rig.cycle_mode()
-        elif key == pygame.K_TAB:
+        elif action == "cycle_platform":
             sandbox.cycle_platform()
-        elif key == pygame.K_SPACE:
+        elif action == "launch":
             sandbox.request_launch()
-        elif key == pygame.K_1:
+        elif action == "profile_hi_lo":
             sandbox.profile = "hi-lo"
-        elif key == pygame.K_2:
+        elif action == "profile_lo_lo":
             sandbox.profile = "lo-lo"
-        elif key == pygame.K_p:
+        elif action == "pause":
             app.paused = not app.paused
-        elif key == pygame.K_n:
+        elif action == "frame_step":
             if app.paused:
                 app.frame_step = True       # exactly one 120 Hz step
-        elif key == pygame.K_LEFTBRACKET:
+        elif action == "subject_prev":
             sandbox.cycle_camera_subject(-1)
-        elif key == pygame.K_RIGHTBRACKET:
+        elif action == "subject_next":
             sandbox.cycle_camera_subject(+1)
-        elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        elif action == "time_down":
             self._scale_idx = max(0, self._scale_idx - 1)
-        elif key in (pygame.K_EQUALS, pygame.K_KP_PLUS):
+        elif action == "time_up":
             self._scale_idx = min(len(TIME_SCALES) - 1, self._scale_idx + 1)
-        elif key == pygame.K_F2:
+        elif action == "screenshot":
             app.screenshot_requested = True
+        elif action == "controls_overlay":  # reserved: always F1
+            sandbox.toggle_controls_overlay()
 
     def update(self, dt_real: float) -> None:
         """Per-frame held-key poll (free-cam flight only, real time)."""

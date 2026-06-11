@@ -23,9 +23,11 @@ import pygame
 # --- Atlas tuning -------------------------------------------------------------
 
 FONT_NAME = "consolas"
+SMALL_SIZE = 14                # pt, footer/hints/micro-labels (Task UI)
 BODY_SIZE = 18                 # pt, plan-fixed body font (bold)
 HEADER_SIZE = 28               # pt, plan-fixed header font (bold)
-SIZES = (BODY_SIZE, HEADER_SIZE)
+TITLE_SIZE = 56                # pt, menu game title (Task UI)
+SIZES = (SMALL_SIZE, BODY_SIZE, HEADER_SIZE, TITLE_SIZE)
 ASCII_FIRST, ASCII_LAST = 32, 126   # baked glyph range (95 glyphs)
 _GLYPH_COUNT = ASCII_LAST - ASCII_FIRST + 1
 

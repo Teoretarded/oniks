@@ -397,7 +397,9 @@ class TacticalMap:
         if ev.type == pygame.MOUSEMOTION and self._panning:
             self.view.pan_px(-ev.rel[0], -ev.rel[1])
             return True
-        if ev.type == pygame.KEYDOWN and ev.key == pygame.K_x:
+        if (ev.type == pygame.KEYDOWN
+                and self.sandbox.app.keybinds.matches("clear_waypoints",
+                                                      ev.key)):
             self._clear_waypoints()
             return True
         return False

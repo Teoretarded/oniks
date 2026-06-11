@@ -3,7 +3,8 @@
 import numpy as np
 
 from engine.text import (ASCII_FIRST, ASCII_LAST, ATLAS_WIDTH, BODY_SIZE,
-                         HEADER_SIZE, WHITE_BLOCK, bake_atlas)
+                         HEADER_SIZE, SIZES, SMALL_SIZE, TITLE_SIZE,
+                         WHITE_BLOCK, bake_atlas)
 
 GLYPH_COUNT = ASCII_LAST - ASCII_FIRST + 1
 
@@ -14,7 +15,8 @@ def test_bake_atlas_layout_and_metrics():
     assert pixels.shape[1] == ATLAS_WIDTH
     # Solid white block at (0, 0) for untextured fills/lines.
     assert (pixels[:WHITE_BLOCK, :WHITE_BLOCK] == 255).all()
-    for size in (BODY_SIZE, HEADER_SIZE):
+    assert set(SIZES) == {SMALL_SIZE, BODY_SIZE, HEADER_SIZE, TITLE_SIZE}
+    for size in SIZES:
         g = glyphs[size]
         assert len(g.adv) == GLYPH_COUNT
         assert (g.adv > 0).all()        # every glyph advances the pen
@@ -23,8 +25,9 @@ def test_bake_atlas_layout_and_metrics():
         assert (g.u0 >= 0).all() and (g.u1 <= 1).all()
         assert (g.u1 >= g.u0).all() and (g.v1 > g.v0).all()
         assert (g.v0 >= 0).all() and (g.v1 <= 1).all()
-    # The header font is actually larger than the body font.
-    assert glyphs[HEADER_SIZE].line_h > glyphs[BODY_SIZE].line_h
+    # The four bakes really are four distinct scales.
+    assert (glyphs[SMALL_SIZE].line_h < glyphs[BODY_SIZE].line_h
+            < glyphs[HEADER_SIZE].line_h < glyphs[TITLE_SIZE].line_h)
 
 
 def test_bake_atlas_glyphs_have_coverage():
