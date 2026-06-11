@@ -35,6 +35,28 @@ def test_height_continuity():
     h = G.terrain_height(x, z)
     assert np.abs(np.diff(h)).max() < 30.0   # no cliffs from hashing artifacts at 50m sampling
 
+
+def test_home_coast_cliff_band():
+    """S5 terrain pass: the shoreline rises into a real cliff band — ~45 m
+    gained within 600 m inland of the waterline (locked: ~45 m over ~300 m
+    after a short foreshore), everywhere along the home coast."""
+    for x in (-150_000.0, -60_000.0, 0.0, 40_000.0, 120_000.0, 250_000.0):
+        zs = np.arange(3_000.0, -1_200.0, -10.0)        # north -> south
+        h = G.terrain_height(np.full_like(zs, x), zs)
+        zw = zs[np.nonzero(h > 0.0)[0][0]]              # first land point
+        rise = (G.terrain_height_scalar(x, zw - 600.0)
+                - G.terrain_height_scalar(x, zw))
+        assert rise > 38.0, f"no cliff band at x={x}: rise {rise:.1f} m"
+
+
+def test_cliff_band_height_continuity():
+    """The cliff band must stay comfortably under the 30 m anti-cliff step
+    bound at 50 m sampling (the rise is ~45 m spread over ~300 m)."""
+    for x in (-150_000.0, 0.0, 120_000.0):
+        zs = np.arange(-2_000.0, 3_000.0, 50.0)
+        h = G.terrain_height(np.full_like(zs, x), zs)
+        assert np.abs(np.diff(h)).max() < 20.0
+
 def test_terrain_never_exceeds_max_height_bound():
     """TERRAIN_MAX_HEIGHT is a strict upper bound (missiles above it skip
     ground-impact queries — Task 22 perf): sample the world densely plus
@@ -61,7 +83,10 @@ def test_scalar_fast_path_bit_identical():
     for x, z in [(0.0, -600.0), (0.0, 1_000.0), (0.0, 2_500.0),
                  (0.0, 14_500.0), (0.0, 14_499.9), (0.0, 150_000.0),
                  (0.0, 485_500.0), (0.0, 499_000.0), (0.0, 530_000.0),
-                 (12_345.6, 200_000.0)]:
+                 (12_345.6, 200_000.0),
+                 # cliff-band crossings (S5): foreshore, mid-rise, cliff top
+                 (0.0, 300.0), (0.0, 0.0), (0.0, -150.0), (0.0, -450.0),
+                 (40_000.0, 200.0), (40_000.0, -300.0), (0.0, 501_500.0)]:
         xs.append(x); zs.append(z)
     # Island center / shoreline / skirt / just-outside for every island.
     for cx, cz, r, _peak in G.ISLANDS:

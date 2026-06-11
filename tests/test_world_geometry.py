@@ -22,6 +22,19 @@ def test_feature_mesh_island():
     assert md.vertices[:, 1].max() > 100.0       # island peak present
     assert md.vertices[:, 1].min() >= -4.01      # clamped
 
+def test_terrain_color_mottling_and_brightening():
+    """S5 terrain look: vertex colors carry noise-driven grass/scrub
+    mottling, blended slope-rock exposure and height-based brightening —
+    far more shades than the old 4 flat bands, all finite and in [0, 1]."""
+    md = build_feature_mesh((-58_000.0, -18_000.0, 75_000.0, 115_000.0), 300.0)
+    cols = md.vertices[:, 6:9]
+    assert np.isfinite(cols).all()
+    assert cols.min() >= 0.0 and cols.max() <= 1.0
+    land = md.vertices[:, 1] > 8.0               # off the sand band
+    uniq = np.unique(np.round(cols[land].astype(np.float64), 4), axis=0)
+    assert len(uniq) > 200                       # old banding: exactly 4
+
+
 def test_catmull_rom_weights_shape_and_partition_of_unity():
     n, f = 7, 5
     w = _catmull_rom_weights(n, f)

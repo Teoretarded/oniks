@@ -39,7 +39,7 @@ import time
 import numpy as np
 
 from engine.meshdata import MeshData, make_grid
-from world.generation import ISLANDS, terrain_height
+from world.generation import ISLANDS, SEED, fbm, terrain_height
 
 FEATURES = [  # (name, x0, x1, z0, z1) bounding rects
     ("home", -340_000.0, 340_000.0, -40_000.0, 12_000.0),
@@ -62,11 +62,46 @@ _BUILD_BUDGET_S = 0.004   # per-frame build budget; sized so at most ONE ~5 ms
 _SAMPLE_ROWS = 4          # heightfield rows sampled per build step (~5 ms)
 _BAND_ROWS = 64           # fine-grid rows meshed per build step (~2.5 ms)
 
-# Vertex colors by height/slope
+# Vertex colors (S5 terrain look pass): noise-mottled grass/scrub base,
+# slope-blended rock exposure, shoreline sand band, height brightening.
 _SAND = (0.62, 0.56, 0.42)
-_GRASS = (0.35, 0.40, 0.26)
+_GRASS = (0.32, 0.38, 0.23)     # lush low grass (mottle low end)
+_SCRUB = (0.45, 0.42, 0.26)     # dry scrub patches (mottle high end)
 _ROCK = (0.46, 0.42, 0.38)
 _HIGH_ROCK = (0.52, 0.50, 0.48)
+_MOTTLE_CELL = 1_800.0          # medium-frequency patch wavelength (m)
+_MOTTLE_SEED = SEED + 9
+
+
+def _colorize(xs, zs, h, slope, h_ref: float) -> np.ndarray:
+    """(len(zs), len(xs), 3) float32 vertex colors. A pure elementwise
+    function of world position + local height/slope, so abutting tiles get
+    bit-identical colors at shared vertices (seam test) regardless of tile
+    rect. ``h_ref`` is the feature-wide peak height (keeps the high-rock
+    band and brightening from seaming between tiles)."""
+    grass, scrub = np.array(_GRASS), np.array(_SCRUB)
+    rock, high_rock, sand = (np.array(_ROCK), np.array(_HIGH_ROCK),
+                             np.array(_SAND))
+    # noise-driven grass/scrub mottling, contrast-stretched around fbm's mean
+    m = fbm(xs[None, :], zs[:, None], _MOTTLE_CELL, 3, _MOTTLE_SEED)
+    m = np.clip((m - 0.34) / 0.32, 0.0, 1.0)[..., None]
+    colors = grass + (scrub - grass) * m
+    # slope-driven rock exposure: blends in from 0.09, fully rock by 0.24
+    # (the coastal cliff band tops out at slope ~0.23 -> a rock face, while
+    # rolling inland noise at ~0.04 and island shoulders stay vegetated)
+    t = np.clip((slope - 0.09) / 0.15, 0.0, 1.0)[..., None]
+    colors += (rock - colors) * t
+    # high-altitude rock cap, blended over the feature's top fifth only
+    # (lower start values grey out whole coastal plateaus — the pre-S5 band
+    # began at 0.6 * h_ref and washed the SAM-site hilltop concrete-grey)
+    c = np.clip((h - 0.80 * h_ref) / (0.15 * h_ref), 0.0, 1.0)[..., None]
+    colors += (high_rock - colors) * c
+    # shoreline sand band fading out over h in [3, 7] m
+    s = np.clip((h - 3.0) / 4.0, 0.0, 1.0)[..., None]
+    colors = sand + (colors - sand) * s
+    # subtle height-based brightening so relief reads from altitude
+    colors *= (0.88 + 0.20 * np.clip(h / max(h_ref, 1.0), 0.0, 1.0))[..., None]
+    return colors.astype(np.float32)
 
 
 def _grid_coords(rect, cell: float, margin: int = 0):
@@ -147,11 +182,8 @@ def _mesh_steps(xs, zs, heights, h_ref: float, margin: int, center):
     yield None
     hi = h[si, sj]
     slope = np.hypot(dhdx, dhdz)
-    colors = np.empty(hi.shape + (3,), dtype=np.float32)
-    colors[:] = _GRASS
-    colors[hi < 6.0] = _SAND
-    colors[slope > 0.5] = _ROCK
-    colors[hi > 0.6 * float(h_ref)] = _HIGH_ROCK
+    yield None
+    colors = _colorize(xs[sj], zs[si], hi, slope, float(h_ref))
     yield None
     yield from _grid_mesh_steps(xs[sj], zs[si], hi, colors, dhdx, dhdz, center)
 
@@ -169,12 +201,7 @@ def _mesh_from_heights(xs, zs, heights, h_ref=None, margin: int = 0,
     dhdz, dhdx = np.gradient(h, zs, xs)
     slope = np.hypot(dhdx, dhdz)
     hmax = float(h.max()) if h_ref is None else float(h_ref)
-    colors = np.empty(h.shape + (3,), dtype=np.float32)
-    colors[:] = _GRASS
-    colors[h < 6.0] = _SAND
-    colors[slope > 0.5] = _ROCK
-    colors[h > 0.6 * hmax] = _HIGH_ROCK
-    return make_grid(xs, zs, h, colors)
+    return make_grid(xs, zs, h, _colorize(xs, zs, h, slope, hmax))
 
 
 def build_feature_mesh(rect, cell: float, h_ref=None) -> MeshData | None:

@@ -51,8 +51,9 @@ CANISTER_MOUTH_OFFSET = np.array([
 # --- S-300 battery (Task S4) ----------------------------------------------------
 
 # The 5P85 TEL stands on a concrete pad at the SAM site; the pad deck tops
-# the local terrain (110.9-111.4 m there) so the wheels never sink.
-SAM_PAD_TOP = 111.5
+# the local terrain (156.0-156.3 m there since the S5 cliff band raised the
+# coastal shelf) so the wheels never sink.
+SAM_PAD_TOP = 156.5
 SAM_TEL_POS = np.array([SAM_SITE_POS[0], SAM_PAD_TOP, SAM_SITE_POS[2]])
 
 # Tube mouths of the ERECTED (90 deg) 2x2 block, relative to the TEL origin:

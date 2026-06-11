@@ -22,8 +22,9 @@ ENEMY_COAST_Z = 500_000.0     # note: beyond WORLD_HALF in z; drawable band z in
 
 # Strict upper bound on terrain_height anywhere (Task 22 perf): the tallest
 # island peak is 430 m scaled by (0.4 + 0.6 * fbm) with fbm < 1, and the
-# continents top out under 145 m — so no terrain ever reaches this. Flyers
-# above it can skip ground-impact queries entirely (sim/missile.py).
+# continents top out under 145 + 45 m (noise ramp + coastal cliff band) — so
+# no terrain ever reaches this. Flyers above it can skip ground-impact
+# queries entirely (sim/missile.py).
 TERRAIN_MAX_HEIGHT = 430.0
 
 
@@ -84,13 +85,24 @@ _COAST_RAMP = 4_000.0         # land rises to full height over this distance fro
 _SHELF_RAMP = -3.0            # continents extend underwater to -3x full height (continental shelf)
 _ISLAND_SHORE_SLOPE = 400.0   # m of drop per island-radius outside the shoreline
 
+# S5 terrain pass — coastal cliff band: past a short low foreshore the land
+# steps up _CLIFF_H over _CLIFF_RUN of horizontal (locked: ~45 m over ~300 m),
+# so both continents meet the sea with a real bluff instead of a 2 % ramp.
+# Max added slope = 1.5 * 45 / 300 = 0.225 -> ~11 m per 50 m sample, far
+# inside the 30 m anti-cliff continuity bound.
+_CLIFF_FOOT = 150.0           # foreshore width before the rise starts (m)
+_CLIFF_RUN = 300.0            # horizontal run of the rise (m)
+_CLIFF_H = 45.0               # height gained across the band (m)
+
 
 def _continent(x, z, signed_dist, height_seed):
-    """Continent contribution: ramps from 0 at the coast up to 55-145 m inland,
-    and continues smoothly below 0 offshore (continental shelf) so the max() with
-    the ocean floor never produces a cliff. `signed_dist` > 0 on the land side."""
+    """Continent contribution: a cliff band lifts the coast by _CLIFF_H just
+    inland of the waterline, on top of a ramp to 55-145 m further in; offshore
+    it continues smoothly below 0 (continental shelf) so the max() with the
+    ocean floor never produces a cliff. `signed_dist` > 0 on the land side."""
     r = np.clip(signed_dist / _COAST_RAMP, _SHELF_RAMP, 1.0)
-    return r * (55.0 + 90.0 * fbm(x, z, 8_000.0, 4, height_seed))
+    cliff = _CLIFF_H * _smoothstep01((signed_dist - _CLIFF_FOOT) / _CLIFF_RUN)
+    return r * (55.0 + 90.0 * fbm(x, z, 8_000.0, 4, height_seed)) + cliff
 
 
 def terrain_height(x, z):
@@ -138,7 +150,8 @@ def is_land(x, z):
 #   - runs the identical float64 arithmetic without array machinery, and
 #   - skips work that provably cannot change the final max():
 #     * a continent whose shelf ramp is fully clamped (r == -3) contributes
-#       at most -165 m, always below the ocean floor's worst case of -140 m;
+#       at most -165 m (the cliff band term is exactly 0 that far offshore),
+#       always below the ocean floor's worst case of -140 m;
 #     * an island's fbm matters only strictly inside its shoreline (outside,
 #       the skirt term m * slope needs no noise; at m == 0 the lift is 0);
 #     * the ocean floor (max -60 m) is masked whenever h already >= -60 m.
@@ -187,7 +200,10 @@ def _continent_s(x: float, z: float, signed_dist: float,
                  height_seed: int) -> float:
     r = signed_dist / _COAST_RAMP
     r = min(max(r, _SHELF_RAMP), 1.0)            # == np.clip order
-    return r * (55.0 + 90.0 * _fbm_s(x, z, 8_000.0, 4, height_seed))
+    t = (signed_dist - _CLIFF_FOOT) / _CLIFF_RUN
+    t = min(max(t, 0.0), 1.0)                    # == _smoothstep01's clip
+    cliff = _CLIFF_H * (t * t * (3.0 - 2.0 * t))
+    return r * (55.0 + 90.0 * _fbm_s(x, z, 8_000.0, 4, height_seed)) + cliff
 
 
 # Conservative skip bounds: a coast wiggles by at most _COAST_WIGGLE and the
@@ -253,7 +269,8 @@ BASE_POS = (_BASE_X, float(terrain_height(np.array([_BASE_X]), np.array([_BASE_Z
 
 # S-300 battery site (friendly, NOT a target): home-coast land far east of the
 # base. The plan's nominal (85_000, terrain, -3_500) was verified dry
-# (terrain_height ~ 111 m > 5 m), so the constant is frozen at the nominal.
+# (terrain_height ~ 156 m > 5 m since the S5 cliff band; ~111 m before), so
+# the constant is frozen at the nominal.
 _SAM_X, _SAM_Z = 85_000.0, -3_500.0
 SAM_SITE_POS = (_SAM_X, float(terrain_height(np.array([_SAM_X]), np.array([_SAM_Z]))[0]), _SAM_Z)
 
