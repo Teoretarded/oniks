@@ -10,7 +10,7 @@
 While the map is open its interactions consume events first; everything it
 doesn't claim (SPACE, P, time accel, M itself...) falls through to the
 normal bindings. Time accel refuses to exceed 1x while a missile is in
-EJECT/BOOST — the requested rate is kept here and the sandbox auto-restores
+the launch cinematic — the requested rate is kept here and the sandbox auto-restores
 it once the launch reaches CLIMB/CRUISE.
 """
 
@@ -70,7 +70,7 @@ class SandboxControls:
     """Full game bindings for SandboxState + free-cam passthrough.
 
     Owns the requested time-accel rate (TIME_SCALES index); the sandbox
-    clamps it to 1x while a launch is in EJECT/BOOST.
+    clamps it to 1x while a launch cinematic is playing.
     """
 
     def __init__(self, sandbox):

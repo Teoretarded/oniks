@@ -10,7 +10,7 @@ time instead of spiraling; rendering runs once per frame with real dt.
 App flags driven by game/controls.py: ``paused`` (P), ``frame_step`` (N:
 exactly one sim step while paused), ``screenshot_requested`` (F2, saved
 after the frame renders). ``time_scale`` is re-read from the state each
-frame (the sandbox forces 1x while a launch is in EJECT/BOOST; the menu
+frame (the sandbox forces 1x through the launch cinematic; the menu
 returns 0 so no sim time accumulates while it is up).
 
 State flow (Task 21): App starts at MenuState; SANDBOX starts a fresh

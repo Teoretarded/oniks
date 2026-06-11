@@ -234,7 +234,7 @@ class HUD:
         eff = sandbox.effective_time_scale()
         txt = f"x{eff:g}"
         if eff != sandbox.controls.requested_scale:
-            txt += " (launch)"      # accel locked to 1x during EJECT/BOOST
+            txt += " (launch)"      # accel locked to 1x through the cinematic
         return txt
 
     # ------------------------------------------------------------- hint line

@@ -360,7 +360,8 @@ class SandboxState(GameState):
                 COVER_DRAG, COVER_TUMBLE_RATE * (1.0 + 0.2 * i), COVER_LIFE)))
 
     def effective_time_scale(self) -> float:
-        """Requested accel, forced to 1x while a launch is in EJECT/BOOST."""
+        """Requested accel, forced to 1x through the launch cinematic
+        (IGNITION/RIDE-OUT/PITCH-OVER/BOOST)."""
         if launch_realtime_lock(self.world.missiles):
             return 1.0
         return self.controls.requested_scale

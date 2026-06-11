@@ -89,8 +89,10 @@ _BELL_R = 0.26
 
 
 def build_oniks_booster() -> MeshData:
-    """2.0 m solid booster (r 0.30) + nozzle bell; drawn attached behind the
-    missile tail during EJECT/BOOST (front face at local z = +1.0)."""
+    """2.0 m solid booster (r 0.30) + nozzle bell. Task LC's hybrid hot
+    launch retired it from the flight visuals (the booster lives inside the
+    ramjet duct; burnout ejects a small slug instead) — still shown on the
+    models showcase pad until Task OM2 rebuilds the lineup."""
     b = MeshBuilder()
     b.add_mesh(make_cylinder(_BST_R, _BST_LEN, SEG, PALETTE["booster"],
                              axis="z", cap_ends=True))
