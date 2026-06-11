@@ -1,9 +1,11 @@
 """SamMissile: S-300 interceptor phase machine + point-mass integration
 (pure numpy/math, GL-free).
 
-Flight: cold catapult eject (vertical, gravity only) -> solid boost, pure
-vertical for its first second then a speed-scaled tilt toward the predicted
-intercept point -> post-burnout midcourse coast steering at a LOFTED
+Flight: cold catapult eject (vertical, gravity only — a true ballistic HANG
+decelerating to near-zero vertical speed 18-32 m up, ignition via the delay
+unit 1.5 s after tube exit; Task LC per s300_reference.md) -> solid boost,
+pure vertical for its first second then a speed-scaled tilt toward the
+predicted intercept point -> post-burnout midcourse coast steering at a LOFTED
 predicted-intercept aim (thin air up high is what stretches the coast to the
 ~150 km practical envelope) -> terminal proportional navigation inside
 20 km -> proximity fuse. Self-destructs on flight time or post-burnout speed

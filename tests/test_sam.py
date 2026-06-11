@@ -7,6 +7,8 @@ loft above 8 km on a long shot); e2e intercepts at 60 km (crossing, < 90 s),
 at 200 km; surface impact; midcourse-on-contact-estimate; determinism.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -62,7 +64,11 @@ def test_s300_definition_locked_numbers():
     assert S300.display_name == "S-300 48N6"
     assert S300.length == 7.5 and S300.diameter == 0.515
     assert S300.launch_mass == 1900.0 and S300.propellant_mass == 1020.0
-    assert S300.eject_speed == 30.0 and S300.eject_time == 0.6
+    # Task LC true cold launch: catapult to ~20 m apex, ignition via the
+    # delay unit 1.0-1.5 s after tube exit at near-zero vertical speed
+    # (s300_reference.md §1 timeline) — the hang pause is sacred.
+    assert S300.eject_speed == 18.0
+    assert 1.0 <= S300.eject_time <= 1.5
     assert S300.motor_thrust == 200_000.0 and S300.motor_time == 12.0
     # mdot = thrust / (240 * 9.81): the 12 s burn consumes the propellant load
     assert S300.isp == 240.0
@@ -95,19 +101,65 @@ def test_cold_launch_vertical_no_lateral_drift():
     ac = _crossing_patrol(60_000.0)
     m = _sam(ac)
     w = _World()
-    for _ in range(int(0.5 / DT)):
+    for _ in range(int(1.0 / DT)):
         m.update(DT, w)
-    assert m.phase == SPH_EJECT
+    assert m.phase == SPH_EJECT                  # still hanging, unlit
     assert m.pos[0] == LAUNCH_POS[0] and m.pos[2] == LAUNCH_POS[2]
     assert m.pos[1] > LAUNCH_POS[1]
     assert 0.0 < m.vel[1] < S300.eject_speed     # gravity only: decelerating
-    # ignition at 0.6 s; the first 1.0 s of boost stays pure vertical
-    for _ in range(int(0.9 / DT)):
+    # ignition at eject_time; the first 1.0 s of boost stays pure vertical
+    for _ in range(int(1.0 / DT)):
         m.update(DT, w)
     assert m.phase == SPH_BOOST
     assert m.pos[0] == LAUNCH_POS[0] and m.pos[2] == LAUNCH_POS[2]
     assert m.vel[0] == 0.0 and m.vel[2] == 0.0
     assert m.vel[1] > S300.eject_speed           # the motor is burning
+
+
+def test_eject_hang_apex_and_ignition_delay():
+    """Task LC cold-launch signature: catapult out, visibly decelerate to
+    near-zero vertical speed 18-32 m up, motor lights 1.0-1.5 s after exit."""
+    ac = _crossing_patrol(60_000.0)
+    mouth = np.array([0.0, 9.0, 0.0])            # erect tube mouth height
+    m = SamMissile(S300, mouth, ac)
+    w = _World()
+    apex = 0.0
+    vy_at_ignition = None
+    t_ignition = None
+    while m.phase == SPH_EJECT and m.t < 3.0:
+        vy_before = float(m.vel[1])
+        m.update(DT, w)
+        if m.phase == SPH_EJECT:
+            apex = max(apex, float(m.pos[1]))
+        else:
+            vy_at_ignition = vy_before
+            t_ignition = m.t
+    assert m.phase == SPH_BOOST                  # it did light
+    assert 18.0 <= apex <= 32.0                  # the hang happens up high
+    assert abs(vy_at_ignition) < 4.0             # near-zero at light-off
+    assert 1.0 <= t_ignition <= 1.55             # the pause is sacred
+
+
+def test_tipover_kinks_within_first_150m():
+    """Gas-vane tip-over: the column kinks 30 deg+ off vertical within
+    ~150 m of the ignition point (s300_reference.md signature #3)."""
+    ac = _crossing_patrol(60_000.0)
+    m = SamMissile(S300, np.array([0.0, 9.0, 0.0]), ac)
+    w = _World()
+    ignition_alt = None
+    while m.t < 8.0:
+        ac.update(DT)
+        m.update(DT, w)
+        if ignition_alt is None and m.phase == SPH_BOOST:
+            ignition_alt = float(m.pos[1])
+        speed = float(np.linalg.norm(m.vel))
+        if speed > 1e-6 and m.phase == SPH_BOOST:
+            tilt = math.degrees(math.acos(min(float(m.vel[1]) / speed, 1.0)))
+            if tilt >= 30.0:
+                break
+    assert ignition_alt is not None
+    assert tilt >= 30.0                          # the kink happened
+    assert float(m.pos[1]) - ignition_alt <= 150.0   # ... and happened LOW
 
 
 def test_boost_reaches_mach4_by_burnout_and_lofts_above_8km():

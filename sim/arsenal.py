@@ -62,7 +62,7 @@ class SamDef:
     launch_mass: float       # kg, total at launch
     propellant_mass: float   # kg, solid propellant
     eject_speed: float       # m/s, catapult cold-launch speed (vertical)
-    eject_time: float        # s, catapult phase duration
+    eject_time: float        # s, unlit ballistic hang before motor ignition
     motor_thrust: float      # N, solid motor
     motor_time: float        # s, nominal burn (= propellant_mass / mdot)
     isp: float               # s; mdot = motor_thrust / (isp * 9.81)
@@ -80,7 +80,10 @@ class SamDef:
 S300 = SamDef(
     weapon_id="s300", display_name="S-300 48N6",
     length=7.5, diameter=0.515, launch_mass=1900.0, propellant_mass=1020.0,
-    eject_speed=30.0, eject_time=0.6,
+    # Task LC true cold launch (s300_reference.md §1): catapult exit, pure
+    # ballistic hang to near-zero vertical speed ~20-25 m above ground,
+    # delay-unit ignition 1.5 s after tube exit. The pause is sacred.
+    eject_speed=18.0, eject_time=1.5,
     motor_thrust=200_000.0, motor_time=12.0, isp=240.0,
     ref_area=0.208,    # pi * (0.515/2)^2
     max_g=25.0, fuse_radius=25.0,

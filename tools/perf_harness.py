@@ -9,8 +9,9 @@ moved overhead and shot down (falling spiral + smoke/flame emission for
 the whole run); 6 missiles airborne — 2 hi cruise at 100/200 km
 downrange, 1 terminal at 8 km with a full trail ribbon, 2 S-300s in
 midcourse coast (full ribbons, honest out-of-envelope shots at the far
-patrols so they steer all 600 frames), and 1 mid-boost at t = +2 s
-launched through the real launch path (S6 re-gate scene).
+patrols so they steer all 600 frames), and 1 in mid high-thrust boost at
+t = +5 s launched through the real launch path (S6 re-gate scene; Task LC
+moved the violent plume beat to ~3-10 s).
 
 Each rendered frame advances the sim by 16 fixed 120 Hz substeps (time
 scale 8 at a 60 FPS render rate) and draws the sandbox scene in its
@@ -63,7 +64,8 @@ BUDGET_MS = 16.0              # avg frame budget (60 FPS)
 CAM_ALT = 400.0               # m above the base
 CAM_PITCH = -0.15             # slight down pitch: ocean + terrain + ships in view
 WARMUP_FRAMES = 1200          # cap on terrain LOD streaming warm-up
-SETUP_BOOST_S = 2.0           # sim time after launch -> missile mid-boost
+SETUP_BOOST_S = 5.0           # sim time after launch -> mid HIGH-THRUST boost
+                              # (Task LC: cap off ~3.1 s, Mach-2 burn after)
 
 # S6 expansion: the shot-down aircraft falls here (~11.5 km from the camera,
 # inside both the 60 km draw range and the 40 km smoke-emission range, and

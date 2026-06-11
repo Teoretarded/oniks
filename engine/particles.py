@@ -436,7 +436,10 @@ class Effects:
     # ------------------------------------------------------ spawn helpers
 
     def booster_plume(self, pos, direction, throttle, rng=None) -> None:
-        """Per-frame exhaust emission while thrusting (dir = missile fwd)."""
+        """Per-frame exhaust emission while thrusting (dir = missile fwd).
+        The brilliant torch + dense bright-white column of the S-300 boost
+        (s300_reference.md signature #9) — smoke long-lived so the column
+        is still standing on the TEL when the tip-over kink forms."""
         if throttle <= 0.0:
             return
         r = self.rng if rng is None else rng
@@ -447,9 +450,9 @@ class Effects:
         self.fire.emit(n_fire, pos, 0.7, back, 6.0, (0.12, 0.3),
                        (1.3, 3.6), ((1.0, 0.86, 0.45), (1.0, 0.35, 0.08)), r)
         n_smoke = max(1, int(round(PLUME_SMOKE_COUNT * throttle)))
-        self.smoke.emit(n_smoke, pos, 1.0, back * 0.45, 4.0, (1.2, 2.4),
-                        (1.6, 7.5),
-                        ((0.78, 0.76, 0.73), (0.50, 0.50, 0.53)), r)
+        self.smoke.emit(n_smoke, pos, 1.0, back * 0.45, 4.0, (2.5, 4.5),
+                        (2.0, 9.0),
+                        ((0.86, 0.85, 0.83), (0.58, 0.58, 0.61)), r)
 
     # ------------------------------------- Task LC launch-cinematic helpers
 

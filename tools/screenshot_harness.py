@@ -227,18 +227,52 @@ def _scene_s300_site(s) -> None:
     _aim(s, tel + (18.5, 4.4, 14.5), tel + (0.0, 4.7, -1.2))
 
 
-def _scene_s300_launch(s) -> None:
-    """t = +1.2 s after a cold launch through the REAL platform pipeline:
-    48N6 ~40 m up, eject puff at the tube mouth, first flame below it."""
+def _s300_launch_at(s, t_snap: float):
+    """Cold-launch an S-300 through the REAL platform pipeline and sim to
+    ``m.t == t_snap`` (Task LC: cover blow at 0, hang to ~1.5 s, ignition)."""
     _fly(s, 2.0)                                  # air tracks form
     s.cycle_platform()                            # bastion -> s300
     s.tactical_map.selected_contact = "air_patrol_00"
     m = s.request_launch()
     assert m is not None, "s300 launch refused (no air track?)"
-    _fly(s, 1.2)
+    _fly(s, t_snap + 2.0, until=lambda: m.t >= t_snap)
+    return m
+
+
+def _scene_s300_launch(s) -> None:
+    """t = +1.2 s: mid-hang over the tubes — kept as the legacy single-frame
+    launch scene (the LC time series s300_launch_t1-t3 is the visual gate)."""
+    m = _s300_launch_at(s, 1.2)
     tel = s._sam_tel_pos
-    # frame the TEL at the frame bottom and the missile + plume above it
+    # frame the TEL at the frame bottom and the coasting missile above it
     _aim(s, tel + (50.0, 38.0, 42.0), tel + (0.0, 32.0, 0.0))
+
+
+def _scene_s300_launch_t1(s) -> None:
+    """t=+1.35 s: the sacred pause — dark unlit dart hanging near apex
+    ~25 m up, eject puff drifting at the tube mouth, NO flame anywhere."""
+    m = _s300_launch_at(s, 1.35)
+    tel = s._sam_tel_pos
+    _aim(s, tel + (34.0, 22.0, 28.0), tel + (0.0, 16.0, 0.0))
+
+
+def _scene_s300_launch_t2(s) -> None:
+    """t=+1.62 s: IGNITION — spherical fireball wider than the missile
+    erupting around its base at the hang point, smoke donut expanding."""
+    m = _s300_launch_at(s, 1.62)
+    tel = s._sam_tel_pos
+    _aim(s, tel + (34.0, 22.0, 28.0), tel + (0.0, 16.0, 0.0))
+
+
+def _scene_s300_launch_t3(s) -> None:
+    """t=+4.0 s: the kinked column — vertical white column off the TEL
+    bending hard as the gas vanes slew the missile onto the intercept
+    bearing (UA_S-300_firing / Ukrainian_s-300_launch composition)."""
+    m = _s300_launch_at(s, 4.0)
+    tel = s._sam_tel_pos
+    # wide shot: TEL low in frame, the bent column dominating the sky
+    mid = tel + (m.pos - tel) * 0.55
+    _aim(s, tel + (300.0, 120.0, 250.0), mid)
 
 
 def _scene_s300_intercept(s) -> None:
@@ -357,6 +391,10 @@ SCENES = {
     # S-300 expansion scenes (Task S3): new models in situ.
     "s300_site": _scene_s300_site,
     "s300_launch": _scene_s300_launch,
+    # Task LC: S-300 cold-launch time series (visual gate)
+    "s300_launch_t1": _scene_s300_launch_t1,
+    "s300_launch_t2": _scene_s300_launch_t2,
+    "s300_launch_t3": _scene_s300_launch_t3,
     "s300_intercept": _scene_s300_intercept,
     "aircraft_patrol": _scene_aircraft_patrol,
 }
@@ -365,8 +403,9 @@ SCENES = {
 SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0,
                "oniks_launch_t1": 0, "oniks_launch_t2": 0,
                "oniks_launch_t3": 0, "oniks_launch_t4": 0,
-               "s300_site": 0, "s300_launch": 0, "s300_intercept": 0,
-               "aircraft_patrol": 0}
+               "s300_site": 0, "s300_launch": 0, "s300_launch_t1": 0,
+               "s300_launch_t2": 0, "s300_launch_t3": 0,
+               "s300_intercept": 0, "aircraft_patrol": 0}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")
