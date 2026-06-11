@@ -13,16 +13,13 @@ from __future__ import annotations
 import numpy as np
 
 from engine.text import BODY_SIZE, HEADER_SIZE
-from sim.arsenal import BASTION, ONIKS
-from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
-                         PH_TERMINAL)
+from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
 from sim.physics import mach
-from world.generation import BASE_POS
+from world.generation import BASE_POS, SAM_SITE_POS
 
-# Phase labels straight from the phase enum (plan-fixed strings).
-PHASE_LABELS = {PH_EJECT: "EJECT", PH_BOOST: "BOOST", PH_CLIMB: "CLIMB",
-                PH_CRUISE: "CRUISE", PH_DESCENT: "DESCENT",
-                PH_TERMINAL: "TERMINAL"}
+# Phase text comes from the missiles' duck-typed ``phase_label`` property
+# (Task S4): Missile and SamMissile phase enums reuse the same int values,
+# so the HUD never compares raw phase ints across classes.
 
 # --- Layout tuning -------------------------------------------------------------
 
@@ -52,7 +49,7 @@ BRACKET_CORNER_FRAC = 0.38  # corner leg length as a fraction of the half-size
 BRACKET_LINE_W = 2.0        # px stroke
 BRACKET_TEXT_GAP = 6.0      # px between the bracket and the range text
 
-CONTROLS_HINT = ("C cam  M map  SPACE launch  1/2 profile  "
+CONTROLS_HINT = ("TAB platform  C cam  M map  SPACE launch  1/2 profile  "
                  "P pause  N step  -/= time  F2 shot  ESC menu")
 
 
@@ -81,6 +78,31 @@ def _fmt_clock(t: float) -> str:
     return f"{hh}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
 
 
+def _missile_target_pos(m):
+    """Duck-typed aim point: locked ship (Oniks terminal) > target aircraft
+    (SamMissile) > planned target point."""
+    ship = getattr(m, "locked_ship", None)
+    if ship is not None:
+        return ship.pos
+    tgt = getattr(m, "target", None)
+    if tgt is not None:
+        return tgt.pos
+    return m.target_point
+
+
+def _bracket_target(m):
+    """The entity the corner bracket frames: the Oniks' locked ship, or the
+    SAM's target aircraft once the terminal seeker (truth) is tracking it."""
+    ship = getattr(m, "locked_ship", None)
+    if ship is not None:
+        return ship
+    tgt = getattr(m, "target", None)
+    if (tgt is not None and m.phase_label == "TERMINAL"
+            and getattr(tgt, "alive", False)):
+        return tgt
+    return None
+
+
 class HUD:
     """Draws the sandbox telemetry overlay through a shared TextRenderer."""
 
@@ -96,10 +118,12 @@ class HUD:
             m = None
         if m is not None:
             self._flight_block(sandbox, m)
-            if m.locked_ship is not None:
-                self._target_bracket(sandbox, m, w, h)
+            tgt = _bracket_target(m)
+            if tgt is not None:
+                self._target_bracket(sandbox, m, tgt, w, h)
         else:
             self._launcher_block(sandbox)
+        self._hint_flash(sandbox, w, h)
         self._camera_line(sandbox, w, h)
         self.text.flush(w, h)
 
@@ -120,28 +144,42 @@ class HUD:
             ty += LINE_H
 
     def _flight_block(self, sandbox, m) -> None:
-        """In-flight telemetry for the followed missile."""
+        """In-flight telemetry for the followed missile (Oniks or SAM)."""
         speed = float(np.linalg.norm(m.vel))
         alt = float(m.pos[1])
-        tgt = (m.locked_ship.pos if m.locked_ship is not None
-               else m.target_point)
+        tgt = _missile_target_pos(m)
         rng_km = float(np.hypot(tgt[0] - m.pos[0], tgt[2] - m.pos[2])) / 1e3
-        fuel_pct = 100.0 * m.fuel / m.weapon.fuel_mass
-        phase_col = TERMINAL_COL if m.phase == PH_TERMINAL else VALUE_COL
+        label = m.phase_label
+        phase_col = TERMINAL_COL if label == "TERMINAL" else VALUE_COL
         rows = [
-            ("PHASE", PHASE_LABELS.get(m.phase, "---"), phase_col),
+            ("PHASE", label, phase_col),
             ("MACH", f"{float(mach(speed, alt)):.2f}", VALUE_COL),
             ("ALT", f"{alt:,.0f} m", VALUE_COL),
             ("SPD", f"{speed:,.0f} m/s", VALUE_COL),
             ("RNG", f"{rng_km:,.1f} km", VALUE_COL),
-            ("FUEL", f"{fuel_pct:.0f}%", VALUE_COL),
+        ]
+        fuel = getattr(m, "fuel", None)
+        if fuel is not None:                # ramjet sustainer fuel
+            rows.append(("FUEL", f"{100.0 * fuel / m.weapon.fuel_mass:.0f}%",
+                         VALUE_COL))
+        else:                               # solid motor propellant (SAM)
+            rows.append(("PROP",
+                         f"{100.0 * m.propellant / m.weapon.propellant_mass:.0f}%",
+                         VALUE_COL))
+        rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(sandbox.world.sim_time), VALUE_COL),
         ]
         self._block(m.weapon.display_name.upper(), rows)
 
     def _launcher_block(self, sandbox) -> None:
-        """Launcher status while no followed missile is in flight."""
+        """Active platform's launcher status while nothing is followed."""
+        if sandbox.active_platform == "s300":
+            self._s300_block(sandbox)
+        else:
+            self._bastion_block(sandbox)
+
+    def _bastion_block(self, sandbox) -> None:
         world = sandbox.world
         if world.launcher_armed:
             status, col = "ARMED", ARMED_COL
@@ -154,19 +192,40 @@ class HUD:
             ("STATUS", status, col),
             ("WEAPON", ONIKS.display_name.upper(), VALUE_COL),
             ("PROFILE", sandbox.profile.upper(), VALUE_COL),
-            ("TARGET", self._target_summary(sandbox), VALUE_COL),
+            ("TARGET", self._target_summary(sandbox, BASE_POS), VALUE_COL),
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
         self._block(BASTION.display_name.upper(), rows)
 
+    def _s300_block(self, sandbox) -> None:
+        world = sandbox.world
+        if world.sam_ammo <= 0:
+            status, col = "EMPTY", RELOAD_COL
+        elif world.sam_launcher_armed:
+            status, col = "ARMED", ARMED_COL
+        else:
+            status = ("RELOADING "
+                      f"{int(np.ceil(world.sam_reload_left - 1e-9))} s")
+            col = RELOAD_COL
+        rows = [
+            ("STATUS", status, col),
+            ("WEAPON", S300.display_name.upper(), VALUE_COL),
+            ("AMMO", f"{world.sam_ammo}/{S300_TEL.ammo}", VALUE_COL),
+            ("TARGET", self._target_summary(sandbox, SAM_SITE_POS),
+             VALUE_COL),
+            ("TIME", self._scale_text(sandbox), VALUE_COL),
+            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
+        ]
+        self._block(S300_TEL.display_name.upper(), rows)
+
     @staticmethod
-    def _target_summary(sandbox) -> str:
+    def _target_summary(sandbox, origin) -> str:
         tp = sandbox.target_point
         if tp is None:
             return "none"
-        dx = float(tp[0]) - BASE_POS[0]
-        dz = float(tp[2]) - BASE_POS[2]
+        dx = float(tp[0]) - origin[0]
+        dz = float(tp[2]) - origin[2]
         brg = int(round(np.degrees(np.arctan2(dx, dz)))) % 360
         return f"BRG {brg:03d}  {np.hypot(dx, dz) / 1e3:.0f} km"
 
@@ -180,6 +239,18 @@ class HUD:
 
     # ------------------------------------------------------------- hint line
 
+    def _hint_flash(self, sandbox, w: int, h: int) -> None:
+        """Transient one-line hint (e.g. 'S-300: SELECT AIR TARGET') above
+        the camera/controls line, while sandbox.hint_left > 0."""
+        if sandbox.hint_left <= 0.0 or not sandbox.hint_text:
+            return
+        lh = self.text.line_height(BODY_SIZE)
+        tw = self.text.text_width(sandbox.hint_text)
+        x = (w - tw) * 0.5
+        y = h - 2.0 * (lh + HINT_MARGIN) - 12.0
+        self.text.draw_rect(x - 10, y - 4, tw + 20, lh + 8, PANEL_RGBA)
+        self.text.draw_text(x, y, sandbox.hint_text, RELOAD_COL)
+
     def _camera_line(self, sandbox, w: int, h: int) -> None:
         """Bottom-center: camera mode + controls hint."""
         line = f"CAM {sandbox.rig.mode.upper()}    {CONTROLS_HINT}"
@@ -192,11 +263,12 @@ class HUD:
 
     # -------------------------------------------------------- target bracket
 
-    def _target_bracket(self, sandbox, m, w: int, h: int) -> None:
-        """4 corner lines around the locked ship + missile range text."""
-        ship = m.locked_ship
-        center = (np.asarray(ship.pos, dtype=np.float64)
-                  + np.array([0.0, ship.height * 0.5, 0.0]))
+    def _target_bracket(self, sandbox, m, target, w: int, h: int) -> None:
+        """4 corner lines around the tracked target (ship hull or aircraft)
+        + missile range text. Sized by the target's largest extent."""
+        center = (np.asarray(target.pos, dtype=np.float64)
+                  + np.array([0.0, getattr(target, "height", 0.0) * 0.5,
+                              0.0]))
         pt = world_to_screen(sandbox, center, w, h)
         if pt is None:
             return
@@ -204,7 +276,8 @@ class HUD:
         dist = float(np.linalg.norm(center - sandbox.camera.eye))
         px_per_m = ((h * 0.5)
                     / (np.tan(sandbox.camera.fov_y * 0.5) * max(dist, 1.0)))
-        half = float(np.clip(ship.length * BRACKET_SIZE_FACTOR * px_per_m,
+        extent = max(target.length, getattr(target, "wingspan", 0.0))
+        half = float(np.clip(extent * BRACKET_SIZE_FACTOR * px_per_m,
                              BRACKET_MIN_PX, BRACKET_MAX_PX))
         if (x < -half or x > w + half or y < -half or y > h + half):
             return
@@ -215,7 +288,7 @@ class HUD:
                 self.text.draw_lines(
                     [(cx - sx * leg, cy), (cx, cy), (cx, cy - sy * leg)],
                     BRACKET_COL, BRACKET_LINE_W)
-        rng_m = float(np.linalg.norm(np.asarray(ship.pos, dtype=np.float64)
+        rng_m = float(np.linalg.norm(np.asarray(target.pos, dtype=np.float64)
                                      - m.pos))
         label = f"{rng_m / 1e3:.1f} km"
         self.text.draw_text(x - self.text.text_width(label) * 0.5,

@@ -5,11 +5,16 @@ particle renderer and the cinematic CameraRig. ``sim_step`` advances the
 world and turns sim happenings into effects (booster plume, exhaust trail,
 explosions / splashes / deck fires, the dropped booster's ballistic tumble);
 ``render`` draws the scene in the fixed order sky -> terrain -> ocean ->
-sites -> ships -> TEL -> missiles -> particles -> HUD/map overlay. The
-tactical map (M) replaces the HUD while open and drives the player intent
-fields (target_point / waypoints). Audio rides the same seams: launch /
-boom / splash one-shots fire where the effects do, and per-missile
-booster/cruise loops are reconciled every frame in ``render``.
+sites -> ships -> aircraft -> TELs -> missiles -> particles -> HUD/map
+overlay. The tactical map (M) replaces the HUD while open and drives the
+player intent fields (target_point / waypoints). Audio rides the same
+seams: launch / boom / splash one-shots fire where the effects do, and
+per-missile booster/cruise loops are reconciled every frame in ``render``.
+
+Task S4 adds the second platform: TAB toggles ``active_platform`` between
+the Bastion and the S-300 battery at the SAM site; SPACE routes by platform
+with target-type validation (Oniks: ship contact / surface point; S-300:
+air contact only — anything else flashes a one-line HUD hint).
 
 GL-touching module (imports world.sky etc.) — never imported by unit tests.
 """
@@ -23,6 +28,7 @@ import numpy as np
 from engine import math3d
 from engine.camera import Camera
 from engine.mesh import Mesh
+from engine.meshdata import make_box
 from engine.particles import Effects, ParticleRenderer
 from engine.text import TextRenderer
 from game.cameras import CameraRig
@@ -30,21 +36,26 @@ from game.controls import SandboxControls
 from game.hud import HUD
 from game.states import GameState
 from game.tactical_map import TacticalMap
+from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
-from models.common import rot_x, rot_y, rot_z
+from models.common import PALETTE, rot_x, rot_y, rot_z
 from models.oniks import build_oniks, build_oniks_booster
+from models.s300 import build_s300_missile, build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
 from models.structures import (build_fuel_depot, build_harbor,
                                build_radar_station)
+from sim.aircraft import AC_FALLING, AC_GONE
 from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
                          PH_TERMINAL)
 from sim.physics import GRAVITY
+from sim.sam import SPH_BOOST, SamMissile
 from sim.ships import ST_BURNING, ST_GONE, ST_SINKING
 from world.generation import BASE_POS
 from world.ocean import Ocean
 from world.sky import Sky
 from world.terrain import Terrain
-from world.world import LAUNCH_ELEV_DEG, WorldState, launch_realtime_lock
+from world.world import (LAUNCH_ELEV_DEG, SAM_TEL_POS, WorldState,
+                         launch_realtime_lock)
 
 # --- Tuning constants ---------------------------------------------------------
 
@@ -72,7 +83,10 @@ SHIP_FIRE_DECK_FRAC = 0.35     # fire sits this fraction of hull height up
 
 EXPLOSION_SCALE_SHIP = 1.6     # warhead against a hull (+ splash alongside)
 EXPLOSION_SCALE_GROUND = 1.3   # warhead into terrain
+EXPLOSION_SCALE_AIR = 1.2      # SAM proximity kill at altitude (no spray)
+EXPLOSION_SCALE_SELFD = 0.7    # SAM self-destruct pop
 SPLASH_SCALE = 1.4             # clean water impact
+
 SHIP_HIT_SPLASH_MAX_Y = 8.0    # hull hits below this height also splash
 
 LAUNCH_PUFF_COUNT = 22         # cold-launch gas puff at the canister mouth
@@ -82,6 +96,20 @@ BOOSTER_LOOP_GAIN = 1.0        # booster roar loop gain
 
 TEL_ERECT_TIME = 4.0           # s for the canisters to swing 0 <-> 88 deg
 TEL_ELEV_STEPS = 12            # prebaked TEL meshes across the elevation arc
+
+# --- S-300 battery + aircraft (Task S4) -----------------------------------------
+
+SAM_HALF_LEN = 3.75            # m, 48N6 mid-body origin -> tail (models.s300)
+SAM_PAD_SIZE = (22.0, 2.4, 19.0)   # concrete pad slab under the 5P85 TEL
+
+AIRCRAFT_DRAW_RANGE = 60_000.0     # m: a 30 m airframe is sub-pixel beyond
+AIRCRAFT_SMOKE_PERIOD = 1.0 / 30.0 # s (sim) between falling-smoke emissions
+AIRCRAFT_SMOKE_VIS_RANGE = 40_000.0  # emit the spiral's trail near the camera
+
+HINT_SECONDS = 2.5             # HUD flash time for invalid-launch hints
+HINT_S300_AIR = "S-300: SELECT AIR TARGET"
+HINT_S300_EMPTY = "S-300: BATTERY EMPTY"
+HINT_ONIKS_SURFACE = "ONIKS: SELECT SURFACE TARGET"
 
 _UP = np.array([0.0, 1.0, 0.0])
 
@@ -141,16 +169,20 @@ class SandboxState(GameState):
 
         # Player intent (driven by the tactical map)
         self.profile = "hi-lo"
-        self.target_point = None        # float64 (3,) sea-level aim point
+        self.target_point = None        # float64 (3,) aim point (alt for air)
         self.waypoints: list = []       # (x, z) flown before the target
         self.followed = None            # missile the cinematic cameras track
         self.map_open = False           # M toggles the tactical map
         self.tactical_map = TacticalMap(self)
+        self.active_platform = "bastion"   # TAB toggles bastion <-> s300
+        self.hint_text = ""             # transient HUD hint line
+        self.hint_left = 0.0            # real seconds the hint stays up
 
         # Effects bookkeeping
         self._trails: dict[int, object] = {}      # id(missile) -> TrailRibbon
         self._boosters: list[_FallingBooster] = []
         self._fire_acc: dict[str, float] = {}     # ship_id -> emission debt
+        self._ac_smoke_acc: dict[str, float] = {} # falling aircraft debt
         self._tel_frac = 1.0            # canister elevation 0..1 (armed = up)
 
         self._build_meshes()
@@ -175,16 +207,67 @@ class SandboxState(GameState):
                             for e in np.linspace(0.0, LAUNCH_ELEV_DEG,
                                                  TEL_ELEV_STEPS)]
         self._tel_pos = np.array(BASE_POS, dtype=np.float64)
+        # S-300 battery: pad slab + permanently erected 4-tube TEL + 48N6
+        self._mesh_sam_pad = Mesh(make_box(SAM_PAD_SIZE, PALETTE["concrete"],
+                                           offset=(0.0, -SAM_PAD_SIZE[1] * 0.5,
+                                                   0.0)))
+        self._mesh_s300_tel = Mesh(build_s300_tel(elevation_deg=90.0))
+        self._mesh_s300_missile = Mesh(build_s300_missile())
+        self._sam_tel_pos = SAM_TEL_POS.copy()
+        self._aircraft_meshes = {"patrol": Mesh(build_patrol_aircraft()),
+                                 "fast": Mesh(build_fast_aircraft())}
 
     # --------------------------------------------------------------- intent
 
+    def cycle_platform(self) -> str:
+        """TAB: toggle the active platform; the launcher cam re-anchors."""
+        self.active_platform = ("s300" if self.active_platform == "bastion"
+                                else "bastion")
+        anchor = (self._sam_tel_pos if self.active_platform == "s300"
+                  else self._tel_pos)
+        self.rig.set_launcher_pos(anchor)
+        self.app.audio.ui_click()
+        return self.active_platform
+
+    def show_hint(self, text: str, seconds: float = HINT_SECONDS) -> None:
+        """Flash a one-line HUD hint (invalid launch selection etc.)."""
+        self.hint_text = text
+        self.hint_left = seconds
+
+    def _selected_air_track(self):
+        """The selected contact's track if it is a live air track, else None."""
+        sid = self.tactical_map.selected_contact
+        track = self.world.contacts.tracks.get(sid) if sid is not None else None
+        return track if track is not None and track.get("is_air") else None
+
     def request_launch(self):
-        """SPACE: fire at the current target with the selected profile."""
+        """SPACE, routed by the active platform with target-type validation:
+        the Oniks takes ship contacts / surface points, the S-300 takes air
+        contacts only — anything else flashes a HUD hint and does not fire."""
+        if self.active_platform == "s300":
+            return self._request_sam_launch()
+        if self._selected_air_track() is not None:
+            self.show_hint(HINT_ONIKS_SURFACE)
+            return None
         if self.target_point is None:
             return None
         m = self.world.launch(self.profile, self.target_point,
                               tuple(self.waypoints))
         if m is not None:
+            self.followed = m
+            self._launch_puff(m.pos)
+            self.app.audio.play("launch", pos=m.pos)
+        return m
+
+    def _request_sam_launch(self):
+        if self._selected_air_track() is None:
+            self.show_hint(HINT_S300_AIR)
+            return None
+        if self.world.sam_ammo <= 0:
+            self.show_hint(HINT_S300_EMPTY)
+            return None
+        m = self.world.launch_sam(self.tactical_map.selected_contact)
+        if m is not None:                   # None while the tube reloads
             self.followed = m
             self._launch_puff(m.pos)
             self.app.audio.play("launch", pos=m.pos)
@@ -209,8 +292,9 @@ class SandboxState(GameState):
         live = {id(m) for m in world.missiles}
 
         self._missile_effects(world.missiles)
-        for m, phase in prev:       # booster separation: BOOST -> ramjet
-            if (phase in (PH_EJECT, PH_BOOST) and id(m) in live
+        for m, phase in prev:       # Oniks booster separation: BOOST -> ramjet
+            if (not isinstance(m, SamMissile)
+                    and phase in (PH_EJECT, PH_BOOST) and id(m) in live
                     and m.phase in RAMJET_PHASES):
                 v = _vhat(m)
                 self._boosters.append(_FallingBooster(
@@ -224,14 +308,21 @@ class SandboxState(GameState):
                 self.effects.explosion(pos, EXPLOSION_SCALE_SHIP,
                                        water=pos[1] < SHIP_HIT_SPLASH_MAX_Y)
                 self.app.audio.boom(pos)
-            elif kind == "splash":
+            elif kind in ("splash", "aircraft_splash"):
                 self.effects.splash(pos, scale=SPLASH_SCALE)
                 self.app.audio.play("splash", pos=pos)
-            else:                           # ground_hit
+            elif kind == "sam_kill":        # air burst: no water spray
+                self.effects.explosion(pos, EXPLOSION_SCALE_AIR)
+                self.app.audio.play("boom_far", pos=pos)
+            elif kind == "sam_self_destruct":
+                self.effects.explosion(pos, EXPLOSION_SCALE_SELFD)
+                self.app.audio.play("boom_far", pos=pos)
+            else:                           # ground_hit / aircraft_down
                 self.effects.explosion(pos, EXPLOSION_SCALE_GROUND)
                 self.app.audio.boom(pos)
 
         self._ship_fires(dt)
+        self._aircraft_smoke(dt)
         self._update_boosters(dt)
         self._update_tel(dt)
         self.effects.update(dt)
@@ -244,6 +335,13 @@ class SandboxState(GameState):
             if trail is None:
                 trail = self._trails[key] = self.effects.add_trail()
             v = _vhat(m)
+            if isinstance(m, SamMissile):
+                tail = m.pos - v * SAM_HALF_LEN
+                if m.phase >= SPH_BOOST:    # contrail through boost + coast
+                    trail.add_point(tail)
+                if m.phase == SPH_BOOST:
+                    self.effects.booster_plume(tail, v, 1.0)
+                continue
             tail = m.pos - v * MISSILE_HALF_LEN
             if m.phase == PH_BOOST:
                 trail.add_point(tail)
@@ -284,6 +382,33 @@ class SandboxState(GameState):
                 self.effects.ship_fire(deck)
             self._fire_acc[ship.ship_id] = acc
 
+    def _aircraft_smoke(self, dt: float) -> None:
+        """Black smoke + flame streaming behind a falling aircraft (the S1
+        kill ladder), emitted only near the camera like the deck fires."""
+        eye = self.camera.eye
+        for ac in self.world.aircraft:
+            if ac.state != AC_FALLING:
+                self._ac_smoke_acc.pop(ac.aircraft_id, None)
+                continue
+            p = ac.pos
+            dx = p[0] - eye[0]
+            dy = p[1] - eye[1]
+            dz = p[2] - eye[2]
+            if (math.sqrt(dx * dx + dy * dy + dz * dz)
+                    > AIRCRAFT_SMOKE_VIS_RANGE):
+                continue
+            acc = self._ac_smoke_acc.get(ac.aircraft_id, 0.0) + dt
+            rng = self.effects.rng
+            while acc >= AIRCRAFT_SMOKE_PERIOD:
+                acc -= AIRCRAFT_SMOKE_PERIOD
+                self.effects.smoke.emit(
+                    1, p, 1.5, (0.0, 2.0, 0.0), 2.5, (3.0, 7.0), (2.5, 14.0),
+                    ((0.10, 0.10, 0.10), (0.30, 0.30, 0.32)), rng)
+                self.effects.fire.emit(
+                    1, p, 1.0, (0.0, 1.0, 0.0), 2.0, (0.25, 0.6), (1.5, 3.5),
+                    ((1.0, 0.75, 0.30), (0.85, 0.22, 0.05)), rng)
+            self._ac_smoke_acc[ac.aircraft_id] = acc
+
     def _update_boosters(self, dt: float) -> None:
         for b in self._boosters:
             b.update(dt)
@@ -309,7 +434,10 @@ class SandboxState(GameState):
             return {}
         sources = {}
         for m in self.world.missiles:
-            if m.phase == PH_BOOST:
+            if isinstance(m, SamMissile):   # solid motor roar, silent coast
+                if m.phase == SPH_BOOST:
+                    sources[id(m)] = ("booster", m.pos, BOOSTER_LOOP_GAIN)
+            elif m.phase == PH_BOOST:
                 sources[id(m)] = ("booster", m.pos, BOOSTER_LOOP_GAIN)
             elif m.phase in RAMJET_PHASES and m.fuel > 0.0:
                 sources[id(m)] = ("cruise", m.pos, CRUISE_LOOP_GAIN)
@@ -324,7 +452,10 @@ class SandboxState(GameState):
 
     def dispose(self) -> None:
         """Free this session's GL objects (called when SANDBOX restarts)."""
-        meshes = ([self._mesh_oniks, self._mesh_booster]
+        meshes = ([self._mesh_oniks, self._mesh_booster,
+                   self._mesh_sam_pad, self._mesh_s300_tel,
+                   self._mesh_s300_missile]
+                  + list(self._aircraft_meshes.values())
                   + list(self._ship_meshes.values()) + self._tel_meshes
                   + [mesh for mesh, _ in self._site_draws])
         for mesh in meshes:
@@ -341,6 +472,8 @@ class SandboxState(GameState):
     def render(self, dt_real: float) -> None:
         self.controls.update(dt_real)            # free-cam flies in real time
         self.rig.update(dt_real, self.followed)
+        if self.hint_left > 0.0:
+            self.hint_left = max(0.0, self.hint_left - dt_real)
         audio = self.app.audio
         audio.set_listener(self.camera.eye)      # gains follow the camera
         audio.update_loops(self._loop_sources())
@@ -352,6 +485,7 @@ class SandboxState(GameState):
         for mesh, pos in self._site_draws:
             self.renderer.draw_mesh(mesh, pos)
         self._draw_ships()
+        self._draw_aircraft()
         self._draw_tel()
         self._draw_missiles()
         self.particles.draw(self.renderer, self.effects)
@@ -369,14 +503,38 @@ class SandboxState(GameState):
             self.renderer.draw_mesh(self._ship_meshes[ship.ship_type],
                                     ship.pos, rot)
 
+    def _draw_aircraft(self) -> None:
+        """Aircraft within visual range: yaw + the falling spiral's
+        pitch/roll (rot_x(a) noses DOWN for a > 0; rot_z(a) lifts the +X
+        right wing — hence both signs flipped)."""
+        eye = self.camera.eye
+        for ac in self.world.aircraft:
+            if ac.state == AC_GONE:
+                continue
+            p = ac.pos
+            dx = p[0] - eye[0]
+            dy = p[1] - eye[1]
+            dz = p[2] - eye[2]
+            if (dx * dx + dy * dy + dz * dz
+                    > AIRCRAFT_DRAW_RANGE * AIRCRAFT_DRAW_RANGE):
+                continue                        # sub-pixel: skip the draw
+            rot = rot_y(ac.heading) @ rot_x(-ac.pitch) @ rot_z(-ac.roll)
+            self.renderer.draw_mesh(self._aircraft_meshes[ac.aircraft_type],
+                                    p, rot)
+
     def _draw_tel(self) -> None:
         idx = int(round(self._tel_frac * (TEL_ELEV_STEPS - 1)))
         self.renderer.draw_mesh(self._tel_meshes[idx], self._tel_pos)
+        self.renderer.draw_mesh(self._mesh_sam_pad, self._sam_tel_pos)
+        self.renderer.draw_mesh(self._mesh_s300_tel, self._sam_tel_pos)
 
     def _draw_missiles(self) -> None:
         for m in self.world.missiles:
             v = _vhat(m)
             rot = math3d.rotation_from_forward(v)
+            if isinstance(m, SamMissile):
+                self.renderer.draw_mesh(self._mesh_s300_missile, m.pos, rot)
+                continue
             self.renderer.draw_mesh(self._mesh_oniks, m.pos, rot)
             if m.phase in (PH_EJECT, PH_BOOST):     # booster still attached
                 self.renderer.draw_mesh(self._mesh_booster,

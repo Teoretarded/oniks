@@ -1,15 +1,22 @@
 """WorldState wiring (Task 18): spawns, stepping, launch, events, realtime lock.
 
+Task S4 adds the S-300 battery: launch_sam (contact-estimate aiming, tube
+mouths, 8 s reload, 4-round ammo) and the SAM death events (sam_kill /
+sam_self_destruct classified apart from splash / ground_hit).
+
 GL-free: world.world imports only sim/world/models geometry modules.
 """
 
 import numpy as np
 
-from sim.arsenal import BASTION, ONIKS
+from sim.aircraft import AC_ALIVE, AC_FALLING
+from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
 from sim.missile import PH_BOOST, PH_CRUISE, PH_EJECT, PH_TERMINAL, Missile
+from sim.sam import SPH_EJECT, SPH_MIDCOURSE, SPH_TERMINAL, SamMissile
 from sim.ships import ST_BURNING
 from world import generation
-from world.world import CANISTER_MOUTH_OFFSET, WorldState, launch_realtime_lock
+from world.world import (CANISTER_MOUTH_OFFSET, SAM_MOUTH_OFFSETS,
+                         SAM_TEL_POS, WorldState, launch_realtime_lock)
 
 DT = 1.0 / 120.0
 FAR_NORTH = np.array([0.0, 0.0, 100_000.0])
@@ -135,6 +142,108 @@ def test_ship_hit_emits_event_and_burns_ship():
     assert hit
     assert ship.state == ST_BURNING                       # cargo hp 2 -> burning
     assert m not in ws.missiles
+
+
+# --- Task S4: S-300 battery wiring ---------------------------------------------
+
+def test_launch_sam_spawns_at_tube_mouth_with_contact_aim():
+    ws = WorldState()
+    ws.step(DT)                                   # first board update: tracks
+    m = ws.launch_sam("air_patrol_00")
+    assert m is not None and m in ws.missiles
+    assert np.allclose(m.pos, SAM_TEL_POS + SAM_MOUTH_OFFSETS[0])
+    assert m.phase == SPH_EJECT
+    assert m.phase_label == "EJECT"               # HUD duck-typed property
+    assert not ws.sam_launcher_armed              # 8 s tube-to-tube reload
+    assert ws.sam_ammo == S300_TEL.ammo - 1
+    # The missile aims at the CONTACT estimate, not the aircraft truth:
+    # nudge the track fix east and the estimate must follow the track.
+    trk = ws.contacts.tracks["air_patrol_00"]
+    trk["pos"] = trk["pos"] + np.array([500.0, 0.0, 0.0])
+    est_pos, est_vel = m.contact_estimate_fn()
+    board_est = ws.contacts.estimated_pos("air_patrol_00", ws.sim_time)
+    assert np.allclose(est_pos, board_est)
+    assert np.allclose(est_vel, trk["vel"])
+    assert not np.allclose(est_pos, ws.aircraft[0].pos)      # stale != truth
+    # Track drops mid-flight: the estimate falls back to the last fix.
+    del ws.contacts.tracks["air_patrol_00"]
+    fb_pos, fb_vel = m.contact_estimate_fn()
+    assert np.allclose(fb_pos, est_pos) and np.allclose(fb_vel, est_vel)
+
+
+def test_launch_sam_requires_a_live_air_track():
+    ws = WorldState()
+    assert ws.launch_sam("air_patrol_00") is None   # no tracks before step 1
+    ws.step(DT)
+    assert ws.launch_sam("cargo_00") is None        # surface track: refused
+    assert ws.launch_sam("bogus_id") is None
+    assert ws.sam_ammo == S300_TEL.ammo             # nothing was spent
+
+
+def test_launch_sam_reload_and_ammo_gate():
+    ws = WorldState()
+    ws.step(DT)
+    ids = ("air_patrol_00", "air_patrol_01", "air_patrol_02", "air_fast_03")
+    for tube, cid in enumerate(ids):
+        m = ws.launch_sam(cid)
+        assert m is not None
+        assert np.allclose(m.pos, SAM_TEL_POS + SAM_MOUTH_OFFSETS[tube])
+        assert ws.launch_sam(cid) is None           # reloading: gated
+        for _ in range(int(S300_TEL.reload_s / DT) + 2):
+            ws.step(DT)
+    assert ws.sam_ammo == 0
+    assert not ws.sam_launcher_armed                # empty battery stays cold
+    assert ws.launch_sam("air_patrol_00") is None
+
+
+def test_sam_fuse_kill_emits_sam_kill_event_and_drops_aircraft():
+    ws = WorldState()
+    ws.step(DT)
+    ac = ws.aircraft[0]
+    start = ac.pos + np.array([1_500.0, 200.0, -1_500.0])
+    m = SamMissile(S300, start, ac)
+    m.phase = SPH_TERMINAL                          # straight to terminal PN
+    aim = ac.pos + ac.velocity() * (2_200.0 / 800.0)
+    d = aim - start
+    m.vel = d / np.linalg.norm(d) * 800.0
+    ws.missiles.append(m)
+    killed = False
+    for _ in range(600):
+        ws.step(DT)
+        if any(ev[0] == "sam_kill" for ev in ws.events):
+            killed = True
+            break
+    assert killed
+    pos = next(ev[1] for ev in ws.events if ev[0] == "sam_kill")
+    assert pos[1] > 1_000.0                         # the kill is at altitude
+    assert ac.state == AC_FALLING
+    assert m not in ws.missiles                     # dead missiles pruned
+
+
+def test_sam_self_destruct_emits_event_not_ground_hit():
+    ws = WorldState()
+    ws.step(DT)
+    ac = ws.aircraft[2]                             # far patrol (z ~ 180+ km)
+    m = SamMissile(S300, np.array([0.0, 15_000.0, 0.0]), ac)
+    m.phase = SPH_MIDCOURSE
+    m.vel = np.array([0.0, 0.0, 600.0])
+    m.t = S300.self_destruct_t + 1.0                # flight clock expired
+    ws.missiles.append(m)
+    ws.step(DT)
+    kinds = [ev[0] for ev in ws.events]
+    assert "sam_self_destruct" in kinds
+    assert "ground_hit" not in kinds                # not misread as a strike
+    pos = next(ev[1] for ev in ws.events if ev[0] == "sam_self_destruct")
+    assert pos[1] > 10_000.0
+    assert ac.state == AC_ALIVE                     # honest miss
+
+
+def test_oniks_phase_label_duck_typing():
+    ws = WorldState()
+    m = ws.launch("hi-lo", FAR_NORTH)
+    assert m.phase_label == "EJECT"
+    m.phase = PH_TERMINAL
+    assert m.phase_label == "TERMINAL"
 
 
 def test_launch_realtime_lock_follows_phase():

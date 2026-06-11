@@ -22,6 +22,13 @@ from world.generation import TERRAIN_MAX_HEIGHT
 # --- Phase enum (locked convention) ------------------------------------------
 PH_EJECT, PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL, PH_DEAD = range(7)
 
+# HUD labels for the phase enum (Task S4: ``phase_label`` is the duck-typed
+# property shared with sim.sam.SamMissile — the HUD never reads raw phase
+# ints, whose values collide between the two enums).
+PHASE_LABELS = {PH_EJECT: "EJECT", PH_BOOST: "BOOST", PH_CLIMB: "CLIMB",
+                PH_CRUISE: "CRUISE", PH_DESCENT: "DESCENT",
+                PH_TERMINAL: "TERMINAL", PH_DEAD: "DEAD"}
+
 # --- Tuning constants (controller gains and shaping) --------------------------
 
 # Boost pitch-over: rotate the velocity direction toward the climb direction at
@@ -166,6 +173,11 @@ class Missile:
     @property
     def mass(self):
         return self.weapon.launch_mass - (self.weapon.fuel_mass - self.fuel)
+
+    @property
+    def phase_label(self) -> str:
+        """HUD phase text (duck-typed across Missile and SamMissile)."""
+        return PHASE_LABELS.get(self.phase, "---")
 
     # --- helpers --------------------------------------------------------------
 

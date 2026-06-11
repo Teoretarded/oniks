@@ -33,6 +33,13 @@ from world.generation import TERRAIN_MAX_HEIGHT
 # --- Phase enum (locked: Task S2) ---------------------------------------------
 SPH_EJECT, SPH_BOOST, SPH_MIDCOURSE, SPH_TERMINAL, SPH_DEAD = range(5)
 
+# HUD labels (Task S4: the duck-typed ``phase_label`` shared with
+# sim.missile.Missile — phase int VALUES collide between the two enums, so
+# consumers must never compare raw ints across classes).
+PHASE_LABELS = {SPH_EJECT: "EJECT", SPH_BOOST: "BOOST",
+                SPH_MIDCOURSE: "MIDCOURSE", SPH_TERMINAL: "TERMINAL",
+                SPH_DEAD: "DEAD"}
+
 # --- Tuning constants ----------------------------------------------------------
 
 # Boost: thrust runs pure vertical for this long after ignition before the
@@ -128,6 +135,10 @@ class SamMissile:
         self.propellant = sam_def.propellant_mass
         self.alive = True
         self.impact_pos = None
+        # Death-cause flags (Task S4): the world classifies the effects event
+        # from these — a fuse kill at 6.5 km must not read as a ground hit.
+        self.killed_target = False
+        self.self_destructed = False
         self._mdot = sam_def.motor_thrust / (sam_def.isp * GRAVITY)
         self._fuse_r2 = sam_def.fuse_radius * sam_def.fuse_radius
 
@@ -135,6 +146,11 @@ class SamMissile:
     def mass(self):
         return (self.weapon.launch_mass
                 - (self.weapon.propellant_mass - self.propellant))
+
+    @property
+    def phase_label(self) -> str:
+        """HUD phase text (duck-typed across Missile and SamMissile)."""
+        return PHASE_LABELS.get(self.phase, "---")
 
     # --- guidance helpers -------------------------------------------------------
 
@@ -245,6 +261,7 @@ class SamMissile:
         mz = float(tp[2]) - cz
         if mx * mx + my * my + mz * mz <= self._fuse_r2:
             self.target.kill()
+            self.killed_target = True
             self._die(np.array([cx, cy, cz]))
             return True
         return False
@@ -359,4 +376,5 @@ class SamMissile:
         if (self.t > w.self_destruct_t
                 or (self.phase >= SPH_MIDCOURSE
                     and speed < w.self_destruct_speed)):
+            self.self_destructed = True
             self._die(self.pos.copy())

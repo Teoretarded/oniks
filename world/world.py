@@ -10,6 +10,8 @@ numpy-only). The render/effects side lives in game/sandbox.py, which drains
     ("ground_hit", pos)       missile hit terrain (pos[1] > 0)
     ("aircraft_down", pos)    falling aircraft crashed on terrain (pos[1] > 0)
     ("aircraft_splash", pos)  falling aircraft hit the sea (pos[1] == 0)
+    ("sam_kill", pos)         SAM proximity fuse downed an aircraft (altitude)
+    ("sam_self_destruct", pos)  SAM timed/slowed out — air burst, no kill
 
 All positions float64, SI units, axes per LOCKED CONVENTIONS.
 """
@@ -19,14 +21,17 @@ from __future__ import annotations
 import numpy as np
 
 from models import bastion
+from models import s300 as s300_model
 from sim.aircraft import AC_FALLING, AC_GONE, Aircraft
-from sim.arsenal import BASTION, ONIKS
+from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
 from sim.contacts import ContactBoard
 from sim.damage import apply_missile_hits
 from sim.missile import PH_BOOST, PH_EJECT, Missile
+from sim.sam import SamMissile
 from sim.ships import Ship
-from world.generation import (AIRCRAFT_SPAWNS, BASE_POS, LANES, SEED,
-                              SHIP_SPAWNS, SITES, terrain_height_scalar)
+from world.generation import (AIRCRAFT_SPAWNS, BASE_POS, LANES,
+                              SAM_SITE_POS, SEED, SHIP_SPAWNS, SITES,
+                              terrain_height_scalar)
 
 # --- Launcher tuning ----------------------------------------------------------
 
@@ -42,6 +47,22 @@ CANISTER_MOUTH_OFFSET = np.array([
     bastion.PIVOT_Y + _MOUTH_RUN * np.sin(_ELEV),
     bastion.PIVOT_Z + _MOUTH_RUN * np.cos(_ELEV),
 ])
+
+# --- S-300 battery (Task S4) ----------------------------------------------------
+
+# The 5P85 TEL stands on a concrete pad at the SAM site; the pad deck tops
+# the local terrain (110.9-111.4 m there) so the wheels never sink.
+SAM_PAD_TOP = 111.5
+SAM_TEL_POS = np.array([SAM_SITE_POS[0], SAM_PAD_TOP, SAM_SITE_POS[2]])
+
+# Tube mouths of the ERECTED (90 deg) 2x2 block, relative to the TEL origin:
+# block space (sx*TUBE_X, dy, MOUTH_RUN) maps through rot_x(-90 deg) to
+# (sx*TUBE_X, MOUTH_RUN, -dy) about the pivot. Fired lower pair first.
+SAM_MOUTH_OFFSETS = tuple(
+    np.array([sx * s300_model.TUBE_X,
+              s300_model.PIVOT_Y + s300_model.MOUTH_RUN,
+              s300_model.PIVOT_Z - dy])
+    for dy in (0.0, s300_model.PAIR_DY) for sx in (1.0, -1.0))
 
 
 def launch_realtime_lock(missiles) -> bool:
@@ -67,6 +88,8 @@ class WorldState:
         self.sim_time = 0.0
         self.events: list[tuple[str, np.ndarray]] = []
         self.reload_left = 0.0          # s until the launcher is ARMED again
+        self.sam_reload_left = 0.0      # s until the next S-300 tube is ready
+        self.sam_ammo = S300_TEL.ammo   # rounds left in the 4-tube block
 
     @staticmethod
     def _spawn_ship(i: int, spawn: dict) -> Ship:
@@ -78,6 +101,10 @@ class WorldState:
     @property
     def launcher_armed(self) -> bool:
         return self.reload_left <= 0.0
+
+    @property
+    def sam_launcher_armed(self) -> bool:
+        return self.sam_reload_left <= 0.0 and self.sam_ammo > 0
 
     def terrain_height_at(self, x: float, z: float) -> float:
         """Scalar heightfield query (generation's bit-identical fast path)."""
@@ -91,6 +118,8 @@ class WorldState:
         self.sim_time += dt
         if self.reload_left > 0.0:
             self.reload_left = max(0.0, self.reload_left - dt)
+        if self.sam_reload_left > 0.0:
+            self.sam_reload_left = max(0.0, self.sam_reload_left - dt)
         for ship in self.ships:
             ship.update(dt)
         for ac in self.aircraft:
@@ -108,7 +137,16 @@ class WorldState:
         surface_dead = [m for m in flying if not m.alive]
         apply_missile_hits(self.missiles, self.ships, self.events)
         for m in surface_dead:
-            kind = "ground_hit" if m.impact_pos[1] > 1e-6 else "splash"
+            # SAM death causes first (a fuse kill / self-destruct happens at
+            # altitude and must not classify as a terrain strike).
+            if getattr(m, "killed_target", False):
+                kind = "sam_kill"
+            elif getattr(m, "self_destructed", False):
+                kind = "sam_self_destruct"
+            elif m.impact_pos[1] > 1e-6:
+                kind = "ground_hit"
+            else:
+                kind = "splash"
             self.events.append((kind, m.impact_pos.copy()))
         if any(not m.alive for m in self.missiles):
             self.missiles = [m for m in self.missiles if m.alive]
@@ -136,4 +174,44 @@ class WorldState:
         m = Missile(ONIKS, pos, heading, profile, tp, waypoints=waypoints)
         self.missiles.append(m)
         self.reload_left = BASTION.reload_s
+        return m
+
+    def launch_sam(self, aircraft_id):
+        """Fire an S-300 at the air contact ``aircraft_id`` (Task S4).
+
+        The shot is made on the CONTACT picture: boost/midcourse aim at the
+        board's dead-reckoned estimate (frozen at the last fix if the track
+        drops mid-flight); only the terminal seeker sees truth. Tubes fire
+        lower pair first; 8 s tube-to-tube reload; 4 rounds. Returns the
+        SamMissile, or None when cold/empty or the track is not a live air
+        contact.
+        """
+        if not self.sam_launcher_armed:
+            return None
+        track = self.contacts.tracks.get(aircraft_id)
+        if track is None or not track.get("is_air"):
+            return None
+        target = next((a for a in self.aircraft
+                       if a.aircraft_id == aircraft_id), None)
+        if target is None:
+            return None
+        tube = S300_TEL.ammo - self.sam_ammo
+        pos = SAM_TEL_POS + SAM_MOUTH_OFFSETS[tube]
+
+        board = self.contacts
+        last = {"pos": board.estimated_pos(aircraft_id, self.sim_time),
+                "vel": track["vel"].copy()}
+
+        def contact_estimate():
+            trk = board.tracks.get(aircraft_id)
+            if trk is not None:
+                last["pos"] = trk["pos"] + trk["vel"] * trk["age"]
+                last["vel"] = trk["vel"]
+            return last["pos"], last["vel"]
+
+        m = SamMissile(S300, pos, target,
+                       contact_estimate_fn=contact_estimate)
+        self.missiles.append(m)
+        self.sam_ammo -= 1
+        self.sam_reload_left = S300_TEL.reload_s
         return m

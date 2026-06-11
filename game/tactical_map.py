@@ -20,9 +20,9 @@ import numpy as np
 import pygame
 
 from engine.text import BODY_SIZE, HEADER_SIZE
-from sim.arsenal import ONIKS
-from world.generation import (BASE_POS, LANES, SITES, terrain_height,
-                              terrain_height_scalar)
+from sim.arsenal import ONIKS, S300, S300_TEL
+from world.generation import (BASE_POS, LANES, SAM_SITE_POS, SITES,
+                              terrain_height, terrain_height_scalar)
 
 # --- Map texture extent (plan-fixed) ------------------------------------------
 
@@ -57,8 +57,10 @@ MAP_ALPHA = 0.96                             # terrain texture opacity
 LANE_COL = (0.45, 0.60, 0.75, 0.38)          # dim shipping-lane polylines
 RING_COL = (0.45, 0.75, 0.55, 0.22)          # dim range rings
 RING_TEXT_COL = (0.55, 0.80, 0.62, 0.55)
+SAM_RING_COL = (1.00, 0.62, 0.30, 0.40)      # S-300 envelope (s300 active)
 SITE_COL = (1.00, 0.45, 0.35, 0.95)          # enemy land sites
-BASE_COL = (0.45, 1.00, 0.55, 0.95)          # player base star
+BASE_COL = (0.45, 1.00, 0.55, 0.95)          # player platform stars
+PLATFORM_DIM = 0.55                          # inactive platform star fade
 CONTACT_COL = (1.00, 0.78, 0.30)             # contact triangles (alpha by age)
 SELECT_COL = (1.00, 0.95, 0.55, 1.00)        # selected-contact ring
 MISSILE_COL = (0.55, 1.00, 0.70, 1.00)       # live missile diamonds
@@ -79,6 +81,7 @@ BASE_STAR_PX = 8.0             # base star spoke length
 CONTACT_NOSE_PX = 9.0          # contact triangle: nose ahead of the estimate
 CONTACT_BACK_PX = 5.0          # ... base behind it
 CONTACT_HALF_PX = 5.0          # ... base half-width
+AIR_DIAMOND_PX = 6.0           # air contact diamond half-size (Task S4)
 SELECT_RING_PX = 11.0
 MISSILE_DIAMOND_PX = 6.0
 WAYPOINT_PX = 4.0              # waypoint diamond half-size
@@ -86,7 +89,7 @@ TARGET_CROSS_PX = 7.0
 TRAIL_DOT_PX = 3.0
 HINT_MARGIN = 10               # px from the bottom edge (matches the HUD)
 
-MAP_HINT = ("LMB target  RMB waypoint  X clear  SPACE launch  "
+MAP_HINT = ("LMB target  RMB waypoint  X clear  SPACE launch  TAB platform  "
             "WHEEL zoom  MMB/arrows pan  M close")
 
 # --- Terrain colorize ramps (uint8 RGB endpoints) ------------------------------
@@ -197,17 +200,34 @@ class MapView:
 
 # ------------------------------------------------------------ pure helpers
 
-def pick_contact(view: MapView, board, sim_time: float, mouse_px):
-    """ship_id of the contact whose dead-reckoned position is nearest to
-    ``mouse_px`` within PICK_RADIUS_PX, else None."""
+def pick_contact(view: MapView, board, sim_time: float, mouse_px,
+                 air_only=None):
+    """contact_id of the track whose dead-reckoned position is nearest to
+    ``mouse_px`` within PICK_RADIUS_PX, else None.
+
+    air_only (Task S4 platform filter): True picks only air tracks (S-300
+    active), False only surface tracks (Bastion active), None all.
+    """
     best, best_d = None, PICK_RADIUS_PX
-    for sid in board.tracks:
+    for sid, track in board.tracks.items():
+        if air_only is not None and bool(track.get("is_air")) != air_only:
+            continue
         est = board.estimated_pos(sid, sim_time)
         sx, sy = view.world_to_screen((est[0], est[2]))
         d = float(np.hypot(sx - float(mouse_px[0]), sy - float(mouse_px[1])))
         if d <= best_d:
             best, best_d = sid, d
     return best
+
+
+def contact_symbol(track) -> str:
+    """'air' (diamond + altitude tag) or 'surface' (course triangle)."""
+    return "air" if track.get("is_air") else "surface"
+
+
+def air_alt_text(alt_m: float) -> str:
+    """The map's altitude tag next to an air diamond: 6500 -> '6.5k'."""
+    return f"{alt_m / 1000.0:.1f}k"
 
 
 def ground_aim_point(xz) -> np.ndarray:
@@ -309,13 +329,18 @@ class TacticalMap:
                 del self._trails[key]
 
         if self.selected_contact is not None:
-            if self.selected_contact in world.contacts.tracks:
+            track = world.contacts.tracks.get(self.selected_contact)
+            if track is not None:
                 est = world.contacts.estimated_pos(self.selected_contact,
                                                    world.sim_time)
-                self.sandbox.target_point = np.array([est[0], 0.0, est[2]])
+                # Air targets keep their dead-reckoned altitude (the S-300
+                # shot is made on the 3D contact estimate); surface targets
+                # stay the sea-level Oniks aim point.
+                y = float(est[1]) if track.get("is_air") else 0.0
+                self.sandbox.target_point = np.array([est[0], y, est[2]])
             else:
-                # Track dropped (ship sank / lost): the last estimate stays
-                # as a plain coordinate target.
+                # Track dropped (ship sank / aircraft lost): the last
+                # estimate stays as a plain coordinate target.
                 self.selected_contact = None
 
     # --------------------------------------------------------------- input
@@ -356,17 +381,28 @@ class TacticalMap:
         return False
 
     def _click_target(self, pos) -> None:
-        """LMB: contact within PICK_RADIUS_PX -> tracked target; otherwise a
-        plain coordinate target at the clicked point."""
-        world = self.sandbox.world
-        sid = pick_contact(self.view, world.contacts, world.sim_time, pos)
+        """LMB, routed by the active platform (Task S4): the S-300 picks air
+        contacts only (a miss clears the selection); the Bastion picks
+        surface contacts, falling back to a plain coordinate target."""
+        sandbox = self.sandbox
+        world = sandbox.world
+        air = sandbox.active_platform == "s300"
+        sid = pick_contact(self.view, world.contacts, world.sim_time, pos,
+                           air_only=air)
         self.selected_contact = sid
         if sid is not None:
             est = world.contacts.estimated_pos(sid, world.sim_time)
-            self.sandbox.target_point = np.array([est[0], 0.0, est[2]])
+            y = float(est[1]) if air else 0.0
+            sandbox.target_point = np.array([est[0], y, est[2]])
+        elif air:
+            sandbox.target_point = None     # empty sky: nothing to shoot
         else:
-            self.sandbox.target_point = ground_aim_point(
+            sandbox.target_point = ground_aim_point(
                 self.view.screen_to_world(pos))
+
+    def _selected_is_air(self) -> bool:
+        track = self.sandbox.world.contacts.tracks.get(self.selected_contact)
+        return track is not None and bool(track.get("is_air"))
 
     def update(self, dt_real: float) -> None:
         """Arrow-key panning (held keys, real time)."""
@@ -394,9 +430,10 @@ class TacticalMap:
         self.text.flush(w, h)
         self._draw_terrain_quad(w, h)
         self._rings()
+        self._sam_ring()
         self._lanes()
         self._sites()
-        self._base_star()
+        self._platform_stars()
         self._plan_chain()
         self._seeker_cone()
         self._contacts()
@@ -481,6 +518,20 @@ class TacticalMap:
                 self.text.draw_text(lx + 4, ly - 18, f"{i * 100} km",
                                     RING_TEXT_COL)
 
+    def _sam_ring(self) -> None:
+        """The S-300's 150 km guided envelope around the SAM site, shown
+        while the platform is active (Task S4: it teaches what's in range)."""
+        if self.sandbox.active_platform != "s300":
+            return
+        cx, cz = SAM_SITE_POS[0], SAM_SITE_POS[2]
+        ang = np.linspace(0.0, 2.0 * np.pi, RING_SEGMENTS + 1)
+        r = S300.max_range
+        self._poly_world(zip(cx + r * np.sin(ang), cz + r * np.cos(ang)),
+                         SAM_RING_COL, 1.5)
+        lx, ly = self.view.world_to_screen((cx, cz + r))
+        if self._on_screen(lx, ly):
+            self.text.draw_text(lx + 4, ly - 18, "S-300 150 km", SAM_RING_COL)
+
     def _lanes(self) -> None:
         for lane in LANES:
             self._poly_world(lane, LANE_COL, 1.5)
@@ -496,21 +547,36 @@ class TacticalMap:
                                   (sx - s, sy - s)], SITE_COL, 1.5)
             self.text.draw_text(sx + s + 4, sy - 9, site["name"], SITE_COL)
 
-    def _base_star(self) -> None:
-        sx, sy = self.view.world_to_screen((BASE_POS[0], BASE_POS[2]))
-        if not self._on_screen(sx, sy, pad=60.0):
-            return
-        r, d = BASE_STAR_PX, BASE_STAR_PX * 0.7071
-        for ax, ay, bx, by in ((-r, 0, r, 0), (0, -r, 0, r),
-                               (-d, -d, d, d), (-d, d, d, -d)):
-            self.text.draw_lines([(sx + ax, sy + ay), (sx + bx, sy + by)],
-                                 BASE_COL, 1.5)
-        self.text.draw_text(sx + r + 4, sy - 9, "BASE", BASE_COL)
+    def _platform_stars(self) -> None:
+        """Both friendly platforms (Task S4): the active one full strength,
+        the other dimmed."""
+        active = self.sandbox.active_platform
+        for xz, label, platform in (((BASE_POS[0], BASE_POS[2]),
+                                     "BASE", "bastion"),
+                                    ((SAM_SITE_POS[0], SAM_SITE_POS[2]),
+                                     "SAM SITE", "s300")):
+            sx, sy = self.view.world_to_screen(xz)
+            if not self._on_screen(sx, sy, pad=60.0):
+                continue
+            a = 1.0 if platform == active else PLATFORM_DIM
+            col = BASE_COL[:3] + (BASE_COL[3] * a,)
+            r, d = BASE_STAR_PX, BASE_STAR_PX * 0.7071
+            for ax, ay, bx, by in ((-r, 0, r, 0), (0, -r, 0, r),
+                                   (-d, -d, d, d), (-d, d, d, -d)):
+                self.text.draw_lines([(sx + ax, sy + ay), (sx + bx, sy + by)],
+                                     col, 1.5)
+            self.text.draw_text(sx + r + 4, sy - 9, label, col)
+
+    def _platform_origin(self) -> tuple:
+        """(x, z) of the active platform (route chain / bearing origin)."""
+        if self.sandbox.active_platform == "s300":
+            return (SAM_SITE_POS[0], SAM_SITE_POS[2])
+        return (BASE_POS[0], BASE_POS[2])
 
     def _plan_chain(self) -> None:
-        """Planned route: base -> waypoints -> target, with markers."""
+        """Planned route: active platform -> waypoints -> target, marked."""
         sandbox = self.sandbox
-        chain = [(BASE_POS[0], BASE_POS[2])] + list(sandbox.waypoints)
+        chain = [self._platform_origin()] + list(sandbox.waypoints)
         tp = sandbox.target_point
         if tp is not None:
             chain.append((float(tp[0]), float(tp[2])))
@@ -532,10 +598,11 @@ class TacticalMap:
 
     def _seeker_cone(self) -> None:
         """Seeker-basket preview: the acquisition wedge the missile sweeps
-        approaching the target point along the final route leg."""
+        approaching the target point along the final route leg. Oniks only —
+        an air target has no surface acquisition basket."""
         sandbox = self.sandbox
         tp = sandbox.target_point
-        if tp is None:
+        if tp is None or self._selected_is_air():
             return
         weapon = ONIKS
         tx, tz = float(tp[0]), float(tp[2])
@@ -556,8 +623,9 @@ class TacticalMap:
         self._poly_world(rim, SEEKER_COL, 1.0)
 
     def _contacts(self) -> None:
-        """Dead-reckoned contact triangles oriented by estimated course,
-        alpha-fading with track age; the selected contact gets a ring."""
+        """Dead-reckoned contacts, alpha-fading with track age: course
+        triangles for ships, diamonds + altitude tag for air (Task S4); the
+        selected contact gets a ring."""
         world = self.sandbox.world
         board = world.contacts
         for sid, track in board.tracks.items():
@@ -565,20 +633,28 @@ class TacticalMap:
             sx, sy = self.view.world_to_screen((est[0], est[2]))
             if not self._on_screen(sx, sy):
                 continue
-            vel = track["vel"]
-            course = (float(np.arctan2(vel[0], vel[2]))
-                      if float(np.hypot(vel[0], vel[2])) > 1e-6 else 0.0)
-            dx, dy = np.sin(course), -np.cos(course)    # screen heading
-            px, py = -dy, dx                            # screen perpendicular
             fade = min(1.0, track["age"] / CONTACT_FADE_S)
             alpha = 1.0 - (1.0 - CONTACT_MIN_ALPHA) * fade
-            nose = (sx + dx * CONTACT_NOSE_PX, sy + dy * CONTACT_NOSE_PX)
-            left = (sx - dx * CONTACT_BACK_PX + px * CONTACT_HALF_PX,
-                    sy - dy * CONTACT_BACK_PX + py * CONTACT_HALF_PX)
-            right = (sx - dx * CONTACT_BACK_PX - px * CONTACT_HALF_PX,
-                     sy - dy * CONTACT_BACK_PX - py * CONTACT_HALF_PX)
-            self.text.draw_lines([nose, left, right, nose],
-                                 CONTACT_COL + (alpha,), 1.5)
+            col = CONTACT_COL + (alpha,)
+            if contact_symbol(track) == "air":
+                d = AIR_DIAMOND_PX
+                self.text.draw_lines(
+                    [(sx, sy - d), (sx + d, sy), (sx, sy + d),
+                     (sx - d, sy), (sx, sy - d)], col, 1.5)
+                self.text.draw_text(sx + d + 3, sy - 9,
+                                    air_alt_text(float(est[1])), col)
+            else:
+                vel = track["vel"]
+                course = (float(np.arctan2(vel[0], vel[2]))
+                          if float(np.hypot(vel[0], vel[2])) > 1e-6 else 0.0)
+                dx, dy = np.sin(course), -np.cos(course)  # screen heading
+                px, py = -dy, dx                          # screen perp
+                nose = (sx + dx * CONTACT_NOSE_PX, sy + dy * CONTACT_NOSE_PX)
+                left = (sx - dx * CONTACT_BACK_PX + px * CONTACT_HALF_PX,
+                        sy - dy * CONTACT_BACK_PX + py * CONTACT_HALF_PX)
+                right = (sx - dx * CONTACT_BACK_PX - px * CONTACT_HALF_PX,
+                         sy - dy * CONTACT_BACK_PX - py * CONTACT_HALF_PX)
+                self.text.draw_lines([nose, left, right, nose], col, 1.5)
             if sid == self.selected_contact:
                 ang = np.linspace(0.0, 2.0 * np.pi, 17)
                 self.text.draw_lines(
@@ -596,8 +672,10 @@ class TacticalMap:
                 if self._on_screen(sx, sy, pad=2.0):
                     self.text.draw_rect(sx - t * 0.5, sy - t * 0.5, t, t,
                                         TRAIL_COL)
-            self._poly_world([(m.pos[0], m.pos[2])] + list(m.route),
-                             MISSILE_ROUTE_COL, 1.0)
+            route = list(getattr(m, "route", ()))       # SAMs fly trackless
+            if route:
+                self._poly_world([(m.pos[0], m.pos[2])] + route,
+                                 MISSILE_ROUTE_COL, 1.0)
             sx, sy = self.view.world_to_screen((m.pos[0], m.pos[2]))
             if self._on_screen(sx, sy):
                 self.text.draw_lines([(sx, sy - d), (sx + d, sy), (sx, sy + d),
@@ -616,13 +694,27 @@ class TacticalMap:
         self.text.draw_rect((w - tw) * 0.5 - 14, 8, tw + 28,
                             head_h + 30, PANEL_RGBA)
         self.text.draw_text((w - tw) * 0.5, 12, title, HEADER_COL, HEADER_SIZE)
-        if world.launcher_armed:
-            status, col = "ARMED", ARMED_COL
+        if sandbox.active_platform == "s300":
+            if world.sam_ammo <= 0:
+                status, col = "EMPTY", RELOAD_COL
+            elif world.sam_launcher_armed:
+                status, col = "ARMED", ARMED_COL
+            else:
+                status = ("RELOADING "
+                          f"{int(np.ceil(world.sam_reload_left - 1e-9))} s")
+                col = RELOAD_COL
+            line = (f"S-300 {status}   "
+                    f"AMMO {world.sam_ammo}/{S300_TEL.ammo}   "
+                    f"{self._target_text()}")
         else:
-            status = f"RELOADING {int(np.ceil(world.reload_left - 1e-9))} s"
-            col = RELOAD_COL
-        line = (f"{status}   {sandbox.profile.upper()}   "
-                f"WPT {len(sandbox.waypoints)}   {self._target_text()}")
+            if world.launcher_armed:
+                status, col = "ARMED", ARMED_COL
+            else:
+                status = ("RELOADING "
+                          f"{int(np.ceil(world.reload_left - 1e-9))} s")
+                col = RELOAD_COL
+            line = (f"{status}   {sandbox.profile.upper()}   "
+                    f"WPT {len(sandbox.waypoints)}   {self._target_text()}")
         lw = self.text.text_width(line)
         self.text.draw_text((w - lw) * 0.5, 16 + head_h, line, col)
 
@@ -647,8 +739,9 @@ class TacticalMap:
             return "TGT none"
         kind = ("TRK " + str(self.selected_contact).upper()
                 if self.selected_contact is not None else "TGT")
-        dx = float(tp[0]) - BASE_POS[0]
-        dz = float(tp[2]) - BASE_POS[2]
+        ox, oz = self._platform_origin()
+        dx = float(tp[0]) - ox
+        dz = float(tp[2]) - oz
         brg = int(round(np.degrees(np.arctan2(dx, dz)))) % 360
         return f"{kind} BRG {brg:03d} {np.hypot(dx, dz) / 1e3:.0f} km"
 

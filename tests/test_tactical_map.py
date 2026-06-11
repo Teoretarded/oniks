@@ -2,15 +2,19 @@
 
 Covers the pure MapView world<->screen mapping, zoom-at-cursor invariance,
 contact click-picking against a ContactBoard, and the waypoint append/clear
-helpers. The GL texture/draw side of game.tactical_map is never touched here
-(GL imports are deferred into TacticalMap.__init__, LOCKED test convention).
+helpers. Task S4 adds the air picture: the platform pick filter
+(air-only for the S-300, surface-only for the Bastion) and the air
+diamond/altitude-tag symbol helpers. The GL texture/draw side of
+game.tactical_map is never touched here (GL imports are deferred into
+TacticalMap.__init__, LOCKED test convention).
 """
 
 import numpy as np
 
 from game.tactical_map import (MAX_WAYPOINTS, PICK_RADIUS_PX, ZOOM_MAX_MPP,
                                ZOOM_MIN_MPP, MapView, add_waypoint,
-                               clear_waypoints, pick_contact)
+                               air_alt_text, clear_waypoints, contact_symbol,
+                               pick_contact)
 from sim.contacts import ContactBoard
 
 W, H = 1600, 900
@@ -111,6 +115,41 @@ def test_click_pick_uses_dead_reckoned_position():
     raw_px = v.world_to_screen((pos[0], pos[2]))
     assert pick_contact(v, brd, 123.0, est_px) == "drift"
     assert pick_contact(v, brd, 123.0, raw_px) is None   # 20 px off the estimate
+
+
+def test_pick_contact_platform_air_filter():
+    """Task S4: LMB picks air contacts when the S-300 is active (air_only
+    True), ships when the Bastion is (air_only False); default unfiltered."""
+    v = view(center=(0.0, 200_000.0), mpp=400.0)
+    ship_pos = (10_000.0, 0.0, 205_000.0)
+    air_pos = (10_000.0 + 5.0 * 400.0, 6_500.0, 205_000.0)   # 5 px east
+    brd = board({"tanker_01": (ship_pos, (0.0, 0.0, 0.0), 0.0),
+                 "air_patrol_00": (air_pos, (0.0, 0.0, 0.0), 0.0)})
+    brd.tracks["air_patrol_00"]["is_air"] = True
+    spx = v.world_to_screen((ship_pos[0], ship_pos[2]))
+    apx = v.world_to_screen((air_pos[0], air_pos[2]))
+    # unfiltered: nearest of any kind (back-compat with the v1 behavior)
+    assert pick_contact(v, brd, 0.0, spx) == "tanker_01"
+    # s300 active: clicking right on the ship still picks the diamond 5 px out
+    assert pick_contact(v, brd, 0.0, spx, air_only=True) == "air_patrol_00"
+    # bastion active: clicking right on the diamond still picks the ship
+    assert pick_contact(v, brd, 0.0, apx, air_only=False) == "tanker_01"
+    # air-only with no air contact within 14 px -> None (not the nearby ship)
+    far = (spx[0], spx[1] + 300.0)
+    assert pick_contact(v, brd, 0.0, far, air_only=True) is None
+    assert pick_contact(v, brd, 0.0, (apx[0], apx[1] + 300.0),
+                        air_only=False) is None
+
+
+def test_air_symbol_selection_and_altitude_text():
+    """Task S4: air tracks draw as diamonds with an altitude tag; ships keep
+    the course triangle (their tracks may predate the is_air key)."""
+    assert contact_symbol(dict(is_air=True)) == "air"
+    assert contact_symbol(dict(is_air=False)) == "surface"
+    assert contact_symbol(dict()) == "surface"
+    assert air_alt_text(6_500.0) == "6.5k"
+    assert air_alt_text(4_000.0) == "4.0k"
+    assert air_alt_text(12_340.0) == "12.3k"
 
 
 # -------------------------------------------------- waypoint append/clear

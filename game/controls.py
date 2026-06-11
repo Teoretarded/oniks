@@ -1,6 +1,7 @@
 """Key bindings (final, also in README):
 
-    ESC menu | M map | C camera | SPACE launch | 1/2 profile hi-lo/lo-lo
+    ESC menu | M map | C camera | TAB platform (Bastion <-> S-300)
+    SPACE launch | 1/2 profile hi-lo/lo-lo
     P pause | N frame-step | - / = time accel down/up (1,2,4,8,16) | F2 screenshot
     free cam: WASD QE, mouse look (RMB drag), SHIFT fast, CTRL+SHIFT very fast
     map (while open): LMB target, RMB waypoint, X clear waypoints,
@@ -108,6 +109,8 @@ class SandboxControls:
             app.audio.ui_click()
         elif key == pygame.K_c:
             sandbox.rig.cycle_mode()
+        elif key == pygame.K_TAB:
+            sandbox.cycle_platform()
         elif key == pygame.K_SPACE:
             sandbox.request_launch()
         elif key == pygame.K_1:

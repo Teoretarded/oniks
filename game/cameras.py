@@ -163,6 +163,18 @@ class CameraRig:
         self.set_mode(MODES[(MODES.index(self.mode) + 1) % len(MODES)])
         return self.mode
 
+    def set_launcher_pos(self, pos) -> None:
+        """Anchor the launcher view on the active platform's TEL (Task S4:
+        TAB platform switching). Starts a normal mode-blend so the camera
+        sweeps to the other site instead of teleporting."""
+        pos = np.asarray(pos, dtype=np.float64).copy()
+        if np.array_equal(pos, self._base):
+            return
+        self._base = pos
+        self._start_eye = self.camera.eye.copy()
+        self._start_fwd = self.camera.forward.copy()
+        self._blend_t = 0.0
+
     # --------------------------------------------------------------- update
 
     def update(self, dt: float, missile=None, target_pos=None) -> None:
@@ -261,6 +273,9 @@ class CameraRig:
         ship = getattr(m, "locked_ship", None)
         if ship is not None:
             return np.asarray(ship.pos, dtype=np.float64)
+        tgt = getattr(m, "target", None)        # SamMissile's aircraft
+        if tgt is not None:
+            return np.asarray(tgt.pos, dtype=np.float64)
         return getattr(m, "target_point", None)
 
     def _clamp(self, eye):

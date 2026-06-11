@@ -27,7 +27,8 @@ or double-click `run_game.bat`.
 | Key | Action |
 |---|---|
 | M | tactical map |
-| LMB / RMB (map) | set target / add waypoint |
+| TAB | switch platform (Bastion Oniks / S-300 battery) |
+| LMB / RMB (map) | set target / add waypoint (S-300: pick air contacts) |
 | X (map) | clear waypoints |
 | wheel / MMB-drag / arrows (map) | zoom at cursor / pan |
 | 1 / 2 | profile hi-lo / lo-lo |
