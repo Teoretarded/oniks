@@ -53,26 +53,29 @@ def apply_missile_hits(missiles, ships, effects_out):
     OBB math (Task 22 perf): a hit needs a segment point inside the hull
     box, which lies within ``ship.hit_reach`` of ``ship.pos``, and every
     segment point is within the step length of ``m.pos`` — so any pair
-    farther apart than the sum cannot possibly hit.
+    farther apart than the sum cannot possibly hit. Ship positions are
+    pulled into plain floats once per call (Task GATE perf: this runs per
+    120 Hz substep and the prefilter math dominates).
     """
+    hittable = [(ship,) + tuple(ship.pos.tolist()) + (ship.hit_reach,)
+                for ship in ships if ship.state in (ST_ALIVE, ST_BURNING)]
+    if not hittable:
+        return
     for m in missiles:
         if not m.alive:
             continue
-        mp = m.pos
-        mx, my, mz = mp[0], mp[1], mp[2]
-        pp = m.prev_pos
-        seg = math.sqrt((mx - pp[0]) ** 2 + (my - pp[1]) ** 2
-                        + (mz - pp[2]) ** 2)
-        for ship in ships:
-            if ship.state not in (ST_ALIVE, ST_BURNING):
-                continue                          # sinking/gone: no longer hittable
-            sp = ship.pos
-            dx = mx - sp[0]
-            dy = my - sp[1]
-            dz = mz - sp[2]
-            reach = ship.hit_reach + seg
+        mx, my, mz = m.pos.tolist()
+        ppx, ppy, ppz = m.prev_pos.tolist()
+        seg = math.sqrt((mx - ppx) ** 2 + (my - ppy) ** 2 + (mz - ppz) ** 2)
+        for ship, sx, sy, sz, hit_reach in hittable:
+            dx = mx - sx
+            dy = my - sy
+            dz = mz - sz
+            reach = hit_reach + seg
             if dx * dx + dy * dy + dz * dz > reach * reach:
                 continue                          # provably out of reach
+            if ship.state not in (ST_ALIVE, ST_BURNING):
+                continue                          # sunk by an earlier missile
             center, half, rot = ship.obb()
             if not segment_hits_obb(m.prev_pos, m.pos, center, half, rot):
                 continue

@@ -246,6 +246,43 @@ def terrain_height_scalar(x: float, z: float) -> float:
     return h
 
 
+# --- surface fast path (Task GATE perf) ----------------------------------------
+#
+# Sea-skim holds, missile/aircraft impact checks and falling debris all need
+# max(terrain_height, 0) — the world surface — at single points every 120 Hz
+# substep, and in this game they spend nearly all of that time over open
+# ocean where the answer is exactly 0. The bounds below are conservative:
+#   * the home continent contributes > 0 only at z < home_coast, and
+#     home_coast < _COAST_WIGGLE (fbm < 1 strictly);
+#   * the enemy continent contributes > 0 only at z > enemy_coast, and
+#     enemy_coast > ENEMY_COAST_Z - _COAST_WIGGLE;
+#   * the cliff band is 0 wherever those signed distances are <= 0;
+#   * an island lifts above 0 only strictly inside its shoreline radius
+#     (outside, the skirt term is <= 0);
+#   * the ocean floor is always < 0.
+# Inside the all-water region the clamp is exactly 0.0, so the early return
+# is bit-identical to max(terrain_height_scalar(x, z), 0.0) (tested).
+
+_ISLAND_R2 = tuple((cx, cz, float(radius) * float(radius))
+                   for (cx, cz, radius, _peak) in ISLANDS)
+
+
+def surface_height_scalar(x: float, z: float) -> float:
+    """max(terrain_height_scalar(x, z), 0.0) with an exact open-water 0."""
+    x = float(x)
+    z = float(z)
+    if _COAST_WIGGLE <= z <= ENEMY_COAST_Z - _COAST_WIGGLE:
+        for cx, cz, r2 in _ISLAND_R2:
+            dx = x - cx
+            dz = z - cz
+            if dx * dx + dz * dz < r2:
+                break                             # inside an island: full math
+        else:
+            return 0.0                            # provably open water
+    h = terrain_height_scalar(x, z)
+    return h if h > 0.0 else 0.0
+
+
 LANES = [  # 4 polylines (x, z) float64 crossing the ocean, dodging ISLANDS by >= 12 km
     # Lane 0: western route, home waters to enemy coast
     [(-220_000.0, 15_000.0), (-190_000.0, 150_000.0), (-210_000.0, 320_000.0), (-180_000.0, 480_000.0)],
@@ -260,7 +297,12 @@ LANES = [  # 4 polylines (x, z) float64 crossing the ocean, dodging ISLANDS by >
 SITES = [  # land targets: {id, kind, pos(x,z), name}
     {"id": "radar_alpha", "kind": "radar", "pos": (52_000 + 2_500, 140_000 - 3_000), "name": "RADAR STN ALPHA"},
     {"id": "depot_bravo", "kind": "depot", "pos": (140_000 - 4_000, 260_000 + 2_000), "name": "FUEL DEPOT BRAVO"},
-    {"id": "harbor_kilo", "kind": "harbor", "pos": (30_000, 502_000), "name": "HARBOR KILO"},
+    # Harbor KILO (Task GATE backlog): nudged seaward from (30_000, 502_000)
+    # — 114 m up the coastal hill — onto the low foreshore right behind the
+    # enemy waterline (z = 498_990 at this x; terrain here ~9.9 m, so the
+    # sites-on-land tests stay green). The waterline harbor MODEL is drawn
+    # at y = 0 just seaward of this marker (game/sandbox.py).
+    {"id": "harbor_kilo", "kind": "harbor", "pos": (30_000, 499_200), "name": "HARBOR KILO"},
 ]
 
 # Player base: on home land near the coast, on the cliff top.

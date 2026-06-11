@@ -24,18 +24,38 @@ or double-click `run_game.bat`.
 
 ## Controls
 
+Default bindings, generated from the action registry (`game/keybinds.py`).
+Every key below is rebindable in SETTINGS (persisted to
+`%APPDATA%\ONIKS\settings.json`) except the reserved ESC and F1; press F1
+in game for the live table.
+
 | Key | Action |
 |---|---|
+| **ENGAGEMENT** | |
+| SPACE | launch weapon |
+| TAB | cycle platform (Bastion Oniks / S-300 battery) |
 | M | tactical map |
-| TAB | switch platform (Bastion Oniks / S-300 battery) |
-| LMB / RMB (map) | set target / add waypoint (S-300: pick air contacts) |
-| X (map) | clear waypoints |
-| wheel / MMB-drag / arrows (map) | zoom at cursor / pan |
-| 1 / 2 | profile hi-lo / lo-lo |
-| SPACE | launch |
-| C | cycle camera (chase/orbit/target/launcher/free) |
-| WASD QE + RMB-drag | free camera (SHIFT fast, CTRL+SHIFT very fast) |
-| - / = | time accel down/up (1–16×, locked to 1× during launch) |
-| P / N | pause / frame-step |
+| 1 | profile hi-lo |
+| 2 | profile lo-lo |
+| X | clear waypoints (map open) |
+| **SIMULATION** | |
+| P | pause sim |
+| N | frame step (while paused) |
+| - | time scale down |
+| = | time scale up (1-16x, locked to 1x during a launch cinematic) |
+| **CAMERA** | |
+| C | camera mode (chase/orbit/target/launcher/free) |
+| [ | subject prev |
+| ] | subject next |
+| W / S | free cam fwd / back |
+| A / D | free cam left / right |
+| E / Q | free cam up / down (SHIFT fast, CTRL+SHIFT very fast) |
+| **SYSTEM** | |
 | F2 | screenshot to renders/ |
-| ESC | menu |
+| F1 | controls overlay *(reserved)* |
+| ESC | menu / back *(reserved)* |
+
+Mouse (fixed): map — LMB target or select a flying round, RMB waypoint,
+wheel zoom at cursor, MMB-drag / arrows pan; orbit cam — LMB/RMB drag
+rotates, wheel zooms; chase cam — wheel adjusts follow distance; free
+cam — RMB-drag mouse look.

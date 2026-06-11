@@ -31,7 +31,7 @@ from sim.sam import SamMissile
 from sim.ships import Ship
 from world.generation import (AIRCRAFT_SPAWNS, BASE_POS, LANES,
                               SAM_SITE_POS, SEED, SHIP_SPAWNS, SITES,
-                              terrain_height_scalar)
+                              surface_height_scalar, terrain_height_scalar)
 
 # --- Launcher tuning ----------------------------------------------------------
 
@@ -113,6 +113,12 @@ class WorldState:
     def terrain_height_at(self, x: float, z: float) -> float:
         """Scalar heightfield query (generation's bit-identical fast path)."""
         return terrain_height_scalar(x, z)
+
+    def surface_height_at(self, x: float, z: float) -> float:
+        """max(terrain_height_at, 0) — the impact/skim surface — through
+        generation's exact open-water early-out (Task GATE perf): per-substep
+        surface checks over the ocean skip the full noise stack."""
+        return surface_height_scalar(x, z)
 
     # ------------------------------------------------------------------ step
 
@@ -212,18 +218,24 @@ class WorldState:
 
     def _contact_estimate(self, aircraft_id):
         """A () -> (pos, vel) closure over the board's dead-reckoned track
-        for ``aircraft_id``, frozen at the last fix if the track drops."""
+        for ``aircraft_id``, frozen at the last fix if the track drops.
+        Returns plain-float 3-tuples (Task GATE perf: the SAM guidance reads
+        components per 120 Hz substep — no per-call array temporaries)."""
         board = self.contacts
-        track = board.tracks[aircraft_id]
-        last = {"pos": board.estimated_pos(aircraft_id, self.sim_time),
-                "vel": track["vel"].copy()}
+        est = board.estimated_pos(aircraft_id, self.sim_time)
+        vel = board.tracks[aircraft_id]["vel"]
+        last = [(float(est[0]), float(est[1]), float(est[2])),
+                (float(vel[0]), float(vel[1]), float(vel[2]))]
 
         def contact_estimate():
             trk = board.tracks.get(aircraft_id)
             if trk is not None:
-                last["pos"] = trk["pos"] + trk["vel"] * trk["age"]
-                last["vel"] = trk["vel"]
-            return last["pos"], last["vel"]
+                px, py, pz = trk["pos"].tolist()
+                vx, vy, vz = trk["vel"].tolist()
+                age = trk["age"]
+                last[0] = (px + vx * age, py + vy * age, pz + vz * age)
+                last[1] = (vx, vy, vz)
+            return last[0], last[1]
 
         return contact_estimate
 

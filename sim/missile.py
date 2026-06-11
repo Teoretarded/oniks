@@ -17,8 +17,8 @@ import math
 
 import numpy as np
 
-from sim.guidance import (altitude_hold_accel, pn_accel, steer_heading_accel,
-                          waypoint_reached)
+from sim.guidance import (STEER_GAIN, STEER_MAX_A, altitude_hold_accel,
+                          pn_accel, waypoint_reached)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar)
 from world.generation import TERRAIN_MAX_HEIGHT
@@ -163,6 +163,32 @@ WEAVE_OMEGA = 2.0 * math.pi / 4.0   # rad/s (plan: ~4 s period)
 WEAVE_PHASE_STEP = 2.399963229728653   # rad per salvo ordinal (golden angle)
 
 _UP = np.array([0.0, 1.0, 0.0])
+
+
+def _surface_at(world, x: float, z: float) -> float:
+    """Impact/skim surface max(terrain, 0) — through the world's fast
+    open-water path when it has one (Task GATE perf), with the plain
+    terrain query as the fallback for minimal world stubs."""
+    f = getattr(world, "surface_height_at", None)
+    if f is not None:
+        return f(x, z)
+    return max(float(world.terrain_height_at(x, z)), 0.0)
+
+
+def _steer_heading_scalar(vx: float, vz: float, desired_heading: float):
+    """guidance.steer_heading_accel on plain floats: returns the (x, z)
+    lateral-accel components (the y component is always 0). Identical
+    float ops in identical order — no per-substep array temporaries
+    (Task GATE perf)."""
+    horiz_speed = math.hypot(vx, vz)
+    if horiz_speed < 1e-9:
+        return 0.0, 0.0
+    heading = math.atan2(vx, vz)
+    err = (desired_heading - heading + math.pi) % (2.0 * math.pi) - math.pi
+    a_lat = STEER_GAIN * err * horiz_speed
+    a_lat = min(max(a_lat, -STEER_MAX_A), STEER_MAX_A)
+    s = a_lat / horiz_speed
+    return vz * s, -vx * s
 
 
 def _descent_range(weapon, cruise_alt):
@@ -340,17 +366,16 @@ class Missile:
         ce = np.cos(elev)
         return np.array([np.sin(hd) * ce, np.sin(elev), np.cos(hd) * ce])
 
-    def _sustainer_thrust(self, speed, alt, dt):
-        """Mach-hold thrust (PI-like: P + drag feedforward); burns ramjet fuel."""
+    def _sustainer_thrust(self, m_now, drag_ff, dt):
+        """Mach-hold thrust (PI-like: P + drag feedforward); burns ramjet
+        fuel. ``m_now``/``drag_ff`` are the caller's already-computed Mach
+        and drag (Task GATE perf: one atmosphere evaluation per step)."""
         if self.fuel <= 0.0:
             return 0.0
         w = self.weapon
         target_mach = (w.cruise_mach_hi
                        if self.hi and self.phase in (PH_CLIMB, PH_CRUISE)
                        else w.cruise_mach_lo)
-        m_now = mach_scalar(speed, alt)
-        cd = cd_from_mach_scalar(m_now)
-        drag_ff = drag_force_scalar(speed, alt, cd, w.ref_area)
         thrust = KP_THRUST * (target_mach - m_now) * THRUST_SCALE + drag_ff
         thrust = min(max(thrust, 0.0), w.max_thrust)
         self.fuel = max(0.0, self.fuel - thrust / (w.isp * GRAVITY) * dt)
@@ -361,15 +386,15 @@ class Missile:
         w = self.weapon
         cos_half = math.cos(math.radians(w.seeker_half_angle_deg))
         best, best_d = None, w.seeker_range
-        px, py, pz = self.pos[0], self.pos[1], self.pos[2]
-        vx, vy, vz = self.vel[0], self.vel[1], self.vel[2]
+        px, py, pz = self.pos.tolist()
+        vx, vy, vz = self.vel.tolist()
         for ship in world.ships:
             if not getattr(ship, "alive", True):
                 continue
             sp = ship.pos
-            rx = sp[0] - px
-            ry = sp[1] - py
-            rz = sp[2] - pz
+            rx = float(sp[0]) - px
+            ry = float(sp[1]) - py
+            rz = float(sp[2]) - pz
             d = math.sqrt(rx * rx + ry * ry + rz * rz)
             if d >= best_d or d < 1e-6:
                 continue
@@ -385,41 +410,41 @@ class Missile:
         against the local surface and its slope along track: returns
         ``(alt - surface, vs - surface_rise_rate)`` so the PD holds skim_alt
         AGL up a coastal slope. Exactly ``(alt, vs)`` over open water."""
-        px, pz = self.pos[0], self.pos[2]
-        s0 = max(float(world.terrain_height_at(px, pz)), 0.0)
-        vx, vz = self.vel[0], self.vel[2]
+        px, pz = float(self.pos[0]), float(self.pos[2])
+        s0 = _surface_at(world, px, pz)
+        vx, vz = float(self.vel[0]), float(self.vel[2])
         hspeed = math.hypot(vx, vz)
         if hspeed < 1e-9:
             return alt - s0, vs
         scale = SKIM_LOOKAHEAD / hspeed
-        s1 = max(float(world.terrain_height_at(px + vx * scale,
-                                               pz + vz * scale)), 0.0)
+        s1 = _surface_at(world, px + vx * scale, pz + vz * scale)
         return alt - s0, vs - (s1 - s0) / SKIM_LOOKAHEAD * hspeed
 
-    def _guidance(self, alt, vs, speed, dt, world):
-        """Commanded guidance accel (includes gravity compensation 'lift').
+    def _guidance(self, alt, vs, speed, vx, vz, dt, world):
+        """Commanded guidance accel components (gx, gy, gz) as plain floats,
+        gravity-compensation 'lift' included.
 
-        The vertical commands (altitude-hold PD + the gravity-cancel lift)
-        are added into component [1] of the freshly-allocated steer/PN
-        vector instead of via ``* _UP`` array temporaries (Task 22 perf —
-        this runs per missile per 120 Hz substep)."""
+        Steering/altitude-hold runs entirely on scalars (Task GATE perf:
+        this runs per missile per 120 Hz substep — the old per-step
+        steer/PN array allocations are gone); the rarely-hot PN branches
+        still call the shared ``pn_accel``."""
         w = self.weapon
         if self.phase == PH_CLIMB:
-            g = steer_heading_accel(self.vel, self._route_heading())
-            g[1] += altitude_hold_accel(alt, vs, self.cruise_alt,
-                                        ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
+            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+            gy = altitude_hold_accel(alt, vs, self.cruise_alt,
+                                     ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_CRUISE:
             target_alt = self.cruise_alt if self.hi else w.lo_alt
-            g = steer_heading_accel(self.vel, self._route_heading())
-            g[1] += altitude_hold_accel(alt, vs, target_alt,
-                                        ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
+            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+            gy = altitude_hold_accel(alt, vs, target_alt,
+                                     ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_DESCENT:
             self._descent_elapsed += dt
             ramp = self._descent_alt0 - DESCENT_RAMP_RATE * self._descent_elapsed
             target_alt = max(w.skim_alt, ramp)
-            g = steer_heading_accel(self.vel, self._route_heading())
-            g[1] += altitude_hold_accel(alt, vs, target_alt,
-                                        DESCENT_KP, DESCENT_KD, ALT_MAX_A) + GRAVITY
+            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+            gy = altitude_hold_accel(alt, vs, target_alt,
+                                     DESCENT_KP, DESCENT_KD, ALT_MAX_A) + GRAVITY
         else:   # PH_TERMINAL
             if self.locked_ship is None:
                 self._acquire_lock(world, speed)
@@ -430,33 +455,38 @@ class Missile:
                 dx = tpos[0] - self.pos[0]
                 dy = tpos[1] - self.pos[1]
                 dz = tpos[2] - self.pos[2]
+                gx, gy, gz = pn_accel(self.pos, self.vel, tpos, tvel).tolist()
                 if math.sqrt(dx * dx + dy * dy + dz * dz) < FINAL_PN_RANGE:
-                    g = pn_accel(self.pos, self.vel, tpos, tvel)
-                    g[1] += GRAVITY
+                    gy += GRAVITY
                 else:
-                    g = pn_accel(self.pos, self.vel, tpos, tvel)
                     ralt, rvs = self._skim_ref(alt, vs, world)
-                    g[1] = (altitude_hold_accel(ralt, rvs, w.skim_alt,
-                                                ALT_KP, ALT_KD, ALT_MAX_A)
-                            + GRAVITY)
+                    gy = (altitude_hold_accel(ralt, rvs, w.skim_alt,
+                                              ALT_KP, ALT_KD, ALT_MAX_A)
+                          + GRAVITY)
             elif self._dist_to_target() < FINAL_PN_RANGE:
-                g = pn_accel(self.pos, self.vel, self.target_point,
-                             np.zeros(3))
-                g[1] += GRAVITY
+                gx, gy, gz = pn_accel(self.pos, self.vel, self.target_point,
+                                      np.zeros(3)).tolist()
+                gy += GRAVITY
             else:
-                g = steer_heading_accel(self.vel, self._route_heading())
+                gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
                 ralt, rvs = self._skim_ref(alt, vs, world)
-                g[1] += altitude_hold_accel(ralt, rvs, w.skim_alt,
-                                            ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
+                gy = altitude_hold_accel(ralt, rvs, w.skim_alt,
+                                         ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         # No dynamic pressure -> no control authority (fuel-starved missiles sink).
         if speed < STALL_SPEED:
-            g *= (speed / STALL_SPEED) ** 2
+            k = (speed / STALL_SPEED) ** 2
+            gx *= k
+            gy *= k
+            gz *= k
         # G-limit the total commanded accel.
         gmax = w.max_g * GRAVITY
-        n2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2]
+        n2 = gx * gx + gy * gy + gz * gz
         if n2 > gmax * gmax:
-            g *= gmax / math.sqrt(n2)
-        return g
+            k = gmax / math.sqrt(n2)
+            gx *= k
+            gy *= k
+            gz *= k
+        return gx, gy, gz
 
     # --- main step --------------------------------------------------------------
 
@@ -568,12 +598,14 @@ class Missile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase in (PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL):
-            thrust = self._sustainer_thrust(speed, alt, dt)
-            g = self._guidance(alt, vy, speed, dt, world)
-            gx, gy, gz = g.tolist()
-            drag = drag_force_scalar(
-                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
-                w.ref_area)
+            # One atmosphere evaluation feeds both the Mach-hold thrust
+            # (drag feedforward) and the drag force (Task GATE perf: the
+            # old code computed the identical mach/cd/drag twice per step).
+            m_now = mach_scalar(speed, alt)
+            drag = drag_force_scalar(speed, alt, cd_from_mach_scalar(m_now),
+                                     w.ref_area)
+            thrust = self._sustainer_thrust(m_now, drag, dt)
+            gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
 
         # --- semi-implicit Euler + phase shaping clamps (scalar: Task 22) ---
         coef = (thrust - drag) / self.mass
@@ -602,7 +634,7 @@ class Missile:
         # the heightfield query is skipped (Task 22 perf: saves the query for
         # the whole climb/cruise of a hi profile).
         if py <= TERRAIN_MAX_HEIGHT:
-            surface = max(float(world.terrain_height_at(px, pz)), 0.0)
+            surface = _surface_at(world, px, pz)
             if py <= surface:
                 self.pos[1] = surface
                 self.impact_pos = self.pos.copy()

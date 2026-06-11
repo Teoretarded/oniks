@@ -149,6 +149,7 @@ class ParticlePool:
         self.col1 = np.zeros((n, 3), dtype=np.float32)
         self.alive = np.zeros(n, dtype=bool)
         self._hi = 0                            # 1 + highest live slot index
+        self._free_hint = 0                     # every slot below is alive
         self._quads = np.empty((n, 4, 10), dtype=np.float32)  # build buffer
 
     def emit(self, n, pos, pos_jitter, vel_mean, vel_jitter, life,
@@ -164,7 +165,16 @@ class ParticlePool:
         if int(n) == 1:                         # hot path: plume/fire feeds
             return self._emit_one(pos, pos_jitter, vel_mean, vel_jitter,
                                   life, size01, col01, rng)
-        free = np.flatnonzero(~self.alive)[:int(n)]
+        # Lowest free slots: dead slots inside the occupied prefix first,
+        # then fresh slots right after it — identical indices to a full
+        # ~alive scan (every slot >= _hi is free) without touching the
+        # untouched tail (Task GATE perf).
+        n = int(n)
+        free = np.flatnonzero(~self.alive[:self._hi])[:n]
+        short = min(n - len(free), self.cap - self._hi)
+        if short > 0:
+            free = np.concatenate(
+                [free, np.arange(self._hi, self._hi + short)])
         k = len(free)
         if k == 0:
             return free
@@ -196,17 +206,25 @@ class ParticlePool:
         same lowest-free-slot policy as the vector path."""
         alive = self.alive
         hi = self._hi
-        if hi:                                  # first dead slot in the prefix
-            i = int(np.argmin(alive[:hi]))      # argmin(bool): first False
+        hint = self._free_hint                  # slots below are all alive
+        if hi > hint:                           # first dead slot in the prefix
+            i = hint + int(np.argmin(alive[hint:hi]))
             if alive[i]:                        # prefix solid: append after it
                 if hi >= self.cap:
                     return np.empty(0, dtype=np.intp)
                 i = hi
         else:
-            i = 0
-        self.pos[i] = pos + rng.normal(0.0, pos_jitter, 3)
-        self.vel[i] = vel_mean + rng.normal(0.0, vel_jitter, 3)
-        lo, hi_life = _as_range(life)
+            i = hint if hint < self.cap else None
+            if i is None:
+                return np.empty(0, dtype=np.intp)
+        self._free_hint = i + 1
+        z = rng.standard_normal(6)              # same 6 draws, one rng call
+        self.pos[i] = pos + pos_jitter * z[:3]
+        self.vel[i] = vel_mean + vel_jitter * z[3:]
+        try:
+            lo, hi_life = life                  # (lo, hi) pair
+        except TypeError:
+            lo = hi_life = life                 # plain scalar
         lf = rng.uniform(lo, hi_life) if hi_life > lo else lo
         self.life[i] = lf
         self.max_life[i] = lf if lf > 1e-6 else 1e-6
@@ -230,6 +248,7 @@ class ParticlePool:
         vel = self.vel[:n]
         life -= np.float32(dt)
         np.logical_and(alive, life > 0.0, out=alive)
+        self._free_hint = 0          # deaths can open slots anywhere
         if drag:
             vel *= np.float32(np.exp(-drag * dt))
         acc = np.float32((buoyancy - gravity) * dt)
@@ -341,19 +360,23 @@ class TrailRibbon:
         end = self._start + self._count
         dt32 = np.float32(dt)
         if end <= TRAIL_MAX_POINTS:
-            seg = self._age[self._start:end]
-            seg += dt32
-            n_dead = int((seg > TRAIL_FADE_TIME).sum())
+            self._age[self._start:end] += dt32
         else:
-            seg_a = self._age[self._start:]
-            seg_b = self._age[:end - TRAIL_MAX_POINTS]
-            seg_a += dt32
-            seg_b += dt32
-            # Ages decrease oldest -> newest: the expired set is a prefix.
-            n_dead = int((seg_a > TRAIL_FADE_TIME).sum()
-                         + (seg_b > TRAIL_FADE_TIME).sum())
-        self._start = (self._start + n_dead) % TRAIL_MAX_POINTS
-        self._count -= n_dead
+            self._age[self._start:] += dt32
+            self._age[:end - TRAIL_MAX_POINTS] += dt32
+        # Ages decrease oldest -> newest, so the expired set is a prefix:
+        # walk it from the oldest point instead of reducing a bool array
+        # over the whole ribbon every substep (Task GATE perf — n_dead is
+        # almost always 0 or 1).
+        age = self._age
+        start = self._start
+        n_dead = 0
+        while (n_dead < self._count
+               and age[(start + n_dead) % TRAIL_MAX_POINTS] > TRAIL_FADE_TIME):
+            n_dead += 1
+        if n_dead:
+            self._start = (start + n_dead) % TRAIL_MAX_POINTS
+            self._count -= n_dead
 
     def points(self) -> np.ndarray:
         """(P,3) float64 stored points, oldest -> newest."""

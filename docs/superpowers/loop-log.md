@@ -53,12 +53,41 @@ physics works, game is optimized, models look good."
   scale cruise altitude to the available distance.
   — fixed in Task 22b (`fix: scale hi-lo cruise altitude to route length for close-range
   shots`).
-- [ ] Harbor site sits slightly inland; waterline-style harbor model looks odd up close
+- [x] Harbor site sits slightly inland; waterline-style harbor model looks odd up close
   (fine at gameplay distance). Candidate: nudge site seaward or add a shore apron.
+  — fixed in Task GATE (`feat: feel & polish complete`): HARBOR KILO nudged from
+  (30_000, 502_000) — 114 m up the coastal hill — to the foreshore at (30_000, 499_200)
+  (terrain ~9.9 m, sites tests green); the model is drawn at the waterline 260 m seaward
+  of the marker with a new shore apron slab in `build_harbor` joining the quay roots to
+  the beach. Verified in renders: quays stand in the shallows, land rises behind.
 
 ## Iterations
 
-- **2026-06-11 S6 perf re-gate (S-300 expansion complete).** Worst-case scene expanded with
+- **2026-06-11 Feel & Polish gate (Task GATE).** The package's sim_step regression
+  (measured 12.29 ms avg at babdef4, ~14.8 ms on the gate machine-state; was ~5.4 before
+  the package) was profiled per-substep and removed without behavior changes — suite +
+  intercept e2e tolerances all green throughout:
+  - per-substep particle feeds were the top cost: `_emit_one` now draws its 6 normals in
+    one rng call (same stream, same values), the cruise ramjet jet/haze feed moved from
+    every 120 Hz substep onto a `RAMJET_EMIT_PERIOD` accumulator (1/60 s, sizes/lives
+    bumped to keep the faint wake continuous — the sanctioned second-target tuning),
+    pool free-slot scans stay inside the occupied prefix, and trail expiry walks the
+    aged prefix instead of reducing a bool array per substep;
+  - terminal/sea-skim and impact surface queries got an exact open-water early-out
+    (`generation.surface_height_scalar`, bit-identical to `max(terrain_height_scalar, 0)`
+    — unit-tested) so skim holds over the ocean skip the full noise stack;
+  - `apply_missile_hits` prefilter, `Missile._guidance` steering, `_acquire_lock`,
+    `SamMissile.update` and `Ship.update` were scalarized (no per-substep numpy
+    temporaries); the duplicate mach/cd/drag evaluation per ramjet step was removed;
+    the SAM contact-estimate closure returns plain-float tuples.
+  Result: worst-case harness avg total **11.5/11.8/15.4 ms** vs the 16.0 budget — PASS
+  (sim_step back to ~5.3 ms, particles ~1.6 ms). Note: a background-loaded machine state
+  inflated every row ~25-30% in some runs (20-21 ms total with identical code); the
+  steady-state numbers above match the historical baselines. Full play-test scripted with
+  injected events (38/38: menu, rebind, launch cinematic at 1x from the orbit cam with
+  drag/zoom, mid-flight retarget + kill, S-300 hang-launch + aircraft kill, F1, pause,
+  resume, quit). All harness scenes re-rendered and critiqued against the reference
+  images one final time; harbor backlog item closed (see above).
   the 4 patrol aircraft (one shot down overhead: falling spiral + smoke/flame emission all
   600 frames) and 2 S-300s coasting in midcourse with full trail ribbons (honest
   out-of-envelope shots, steering every frame) on top of the v1 load (14 ships, 2 burning,

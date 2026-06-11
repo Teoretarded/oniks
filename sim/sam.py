@@ -28,6 +28,7 @@ import math
 import numpy as np
 
 from sim.guidance import pn_accel
+from sim.missile import _surface_at
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar)
 from world.generation import TERRAIN_MAX_HEIGHT
@@ -298,8 +299,8 @@ class SamMissile:
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
 
-        alt = float(self.pos[1])
-        vx, vy, vz = self.vel.tolist()         # plain floats: scalar-fast math
+        px0, alt, pz0 = self.pos.tolist()      # plain floats: scalar-fast math
+        vx, vy, vz = self.vel.tolist()
         speed = math.sqrt(vx * vx + vy * vy + vz * vz)
         if speed > 1e-9:
             inv = 1.0 / speed
@@ -314,9 +315,9 @@ class SamMissile:
             self.phase = SPH_MIDCOURSE
         if self.phase == SPH_MIDCOURSE:
             tp = self.target.pos               # seeker truth at handover
-            rx = float(tp[0]) - self.pos[0]
-            ry = float(tp[1]) - self.pos[1]
-            rz = float(tp[2]) - self.pos[2]
+            rx = float(tp[0]) - px0
+            ry = float(tp[1]) - alt
+            rz = float(tp[2]) - pz0
             if (rx * rx + ry * ry + rz * rz
                     < w.terminal_range * w.terminal_range):
                 self.phase = SPH_TERMINAL
@@ -327,8 +328,7 @@ class SamMissile:
         drag = 0.0
         if self.phase == SPH_BOOST:
             if self.t >= w.eject_time + BOOST_VERTICAL_TIME and speed > 1e-9:
-                dx, dy, dz = self._aim_direction(
-                    self.pos[0], alt, self.pos[2], vx, vy, vz)
+                dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
                 max_ang = w.max_g * GRAVITY / max(speed, 1.0) * dt
                 hx, hy, hz = _rotate_toward_scalar(hx, hy, hz,
                                                    dx, dy, dz, max_ang)
@@ -342,8 +342,7 @@ class SamMissile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase == SPH_MIDCOURSE:
-            dx, dy, dz = self._aim_direction(
-                self.pos[0], alt, self.pos[2], vx, vy, vz)
+            dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
             gx, gy, gz = self._steer_accel(hx, hy, hz, speed, dx, dy, dz)
             drag = drag_force_scalar(
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
@@ -373,9 +372,9 @@ class SamMissile:
         self.vel[0] = vx
         self.vel[1] = vy
         self.vel[2] = vz
-        px = self.pos[0] + vx * dt
-        py = self.pos[1] + vy * dt
-        pz = self.pos[2] + vz * dt
+        px = px0 + vx * dt
+        py = alt + vy * dt
+        pz = pz0 + vz * dt
         self.pos[0] = px
         self.pos[1] = py
         self.pos[2] = pz
@@ -386,7 +385,7 @@ class SamMissile:
 
         # --- surface impact (terrain query skipped above the world ceiling) ---
         if py <= TERRAIN_MAX_HEIGHT:
-            surface = max(float(world.terrain_height_at(px, pz)), 0.0)
+            surface = _surface_at(world, px, pz)
             if py <= surface:
                 self.pos[1] = surface
                 self._die(self.pos.copy())

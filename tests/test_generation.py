@@ -30,6 +30,25 @@ def test_sites_on_land():
         h = G.terrain_height(np.array([s["pos"][0]]), np.array([s["pos"][1]]))[0]
         assert h > 5.0
 
+def test_surface_height_scalar_matches_max_terrain():
+    """Task GATE perf: the surface query (terrain clamped to the waterline)
+    must be bit-identical to max(terrain_height_scalar, 0) everywhere —
+    across both coasts, island shorelines/interiors and deep ocean."""
+    rng = np.random.default_rng(7)
+    xs = rng.uniform(-350_000.0, 350_000.0, 400)
+    zs = rng.uniform(-40_000.0, 560_000.0, 400)
+    # Stratified probes at the tricky boundaries:
+    probes = [(0.0, 2_500.0), (0.0, 2_499.0), (0.0, 497_500.0),
+              (0.0, 497_501.0), (12_345.0, 150_000.0), (G.BASE_POS[0],
+              G.BASE_POS[2]), (30_000.0, 502_000.0)]
+    for cx, cz, r, _peak in G.ISLANDS:      # shoreline ring + center
+        probes += [(cx, cz), (cx + r, cz), (cx, cz - r),
+                   (cx + 0.7 * r, cz + 0.7 * r), (cx - 1.01 * r, cz)]
+    for x, z in list(zip(xs, zs)) + probes:
+        expect = max(G.terrain_height_scalar(float(x), float(z)), 0.0)
+        assert G.surface_height_scalar(float(x), float(z)) == expect
+
+
 def test_height_continuity():
     x = np.linspace(-50_000, 50_000, 2000); z = np.full(2000, 100_000.0)
     h = G.terrain_height(x, z)

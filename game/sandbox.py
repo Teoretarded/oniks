@@ -80,16 +80,22 @@ WING_DEPLOY_AFTER_EXIT = 0.2   # s after muzzle clear: surfaces snap to X
 
 # Sustainer exhaust: a small, very short-lived additive jet right at the
 # nozzle (the boost plume's big puffs read as a fireball chain at Mach 2
-# and blind the chase camera that flies through them).
-RAMJET_FIRE_LIFE = (0.05, 0.12)               # s
-RAMJET_FIRE_SIZE = (0.45, 1.0)                # m birth -> death
-RAMJET_FIRE_COLORS = ((0.95, 0.85, 0.65), (1.0, 0.45, 0.12))
+# and blind the chase camera that flies through them). Fed on a period
+# accumulator like the nose puffs/deck fires (Task GATE perf: a 120 Hz
+# per-substep feed for every cruising round was the top sim_step cost);
+# sizes/lives are bumped so the wake stays continuous at the wider spacing.
+RAMJET_EMIT_PERIOD = 1.0 / 60.0               # s (sim) between exhaust feeds
+RAMJET_FIRE_LIFE = (0.08, 0.16)               # s
+RAMJET_FIRE_SIZE = (0.55, 1.3)                # m birth -> death
+RAMJET_FIRE_COLORS = (np.array((0.95, 0.85, 0.65)),
+                      np.array((1.0, 0.45, 0.12)))
 RAMJET_EXHAUST_SPEED = 18.0                   # m/s backward puff ejection
 # Near-transparent ramjet wake: a faint short-lived haze (the thick launch
 # trail STOPS at burnout — oniks_launch_sequence.md §4.6).
-RAMJET_HAZE_LIFE = (0.4, 0.8)                 # s
-RAMJET_HAZE_SIZE = (0.5, 2.6)                 # m birth -> death
-RAMJET_HAZE_COLORS = ((0.82, 0.82, 0.84), (0.78, 0.78, 0.80))
+RAMJET_HAZE_LIFE = (0.5, 0.9)                 # s
+RAMJET_HAZE_SIZE = (0.7, 3.4)                 # m birth -> death
+RAMJET_HAZE_COLORS = (np.array((0.82, 0.82, 0.84)),
+                      np.array((0.78, 0.78, 0.80)))
 
 # Boost trail ribbon points are darker grey than the cream ride-out column.
 TRAIL_BOOST_COL = (0.38, 0.37, 0.36)
@@ -159,6 +165,11 @@ SAM_PAD_SIZE = (22.0, 2.4, 19.0)   # concrete pad slab under the 5P85 TEL
 AIRCRAFT_DRAW_RANGE = 60_000.0     # m: a 30 m airframe is sub-pixel beyond
 AIRCRAFT_SMOKE_PERIOD = 1.0 / 30.0 # s (sim) between falling-smoke emissions
 AIRCRAFT_SMOKE_VIS_RANGE = 40_000.0  # emit the spiral's trail near the camera
+
+# Harbor KILO is a waterline model on the ENEMY coast (land toward +z): the
+# mesh is drawn at y = 0 this far seaward (-z) of the foreshore site marker,
+# putting the quay fingers in the shallows and the shore apron on the beach.
+HARBOR_SEAWARD_OFFSET = -260.0
 
 HINT_SECONDS = 2.5             # HUD flash time for invalid-launch hints
 HINT_S300_AIR = "S-300: SELECT AIR TARGET"
@@ -245,6 +256,7 @@ class SandboxState(GameState):
         self._fire_acc: dict[str, float] = {}     # ship_id -> emission debt
         self._ac_smoke_acc: dict[str, float] = {} # falling aircraft debt
         self._puff_acc: dict[int, float] = {}     # nose pulse-jet debt
+        self._ramjet_acc: dict[int, float] = {}   # cruise exhaust feed debt
         self._tel_frac = 1.0            # canister elevation 0..1 (armed = up)
 
         self._build_meshes()
@@ -286,9 +298,17 @@ class SandboxState(GameState):
         self._site_draws = []
         for site in self.world.sites:
             x, z = site["pos"]
-            y = max(self.world.terrain_height_at(x, z), 0.0)
-            self._site_draws.append((Mesh(builders[site["kind"]]()),
-                                     np.array([x, y, z], dtype=np.float64)))
+            if site["kind"] == "harbor":
+                # Waterline model (Task GATE): the quays stand in the water
+                # seaward of the foreshore site marker (enemy coast: land is
+                # +z, sea is -z) with the model's shore apron joining the
+                # beach behind them.
+                pos = np.array([x, 0.0, z + HARBOR_SEAWARD_OFFSET],
+                               dtype=np.float64)
+            else:
+                y = max(self.world.terrain_height_at(x, z), 0.0)
+                pos = np.array([x, y, z], dtype=np.float64)
+            self._site_draws.append((Mesh(builders[site["kind"]]()), pos))
         self._tel_meshes = [Mesh(build_bastion_tel(elevation_deg=e))
                             for e in np.linspace(0.0, LAUNCH_ELEV_DEG,
                                                  TEL_ELEV_STEPS)]
@@ -445,6 +465,9 @@ class SandboxState(GameState):
             if key not in live:
                 self._trails.pop(key).finished = True
                 self._puff_acc.pop(key, None)
+        for key in list(self._ramjet_acc):  # drop dead rounds' feed debt
+            if key not in live:
+                del self._ramjet_acc[key]
 
         for kind, pos in world.drain_events():
             if kind == "ship_hit":
@@ -471,34 +494,56 @@ class SandboxState(GameState):
         self.effects.update(dt)
 
     def _missile_effects(self, missiles, dt: float) -> None:
-        """Exhaust trail feed + plume emission for every live missile."""
+        """Exhaust trail feed + plume emission for every live missile.
+
+        Runs per 120 Hz substep: positions/directions are plain-float
+        tuples (Task GATE perf — no numpy temporaries per missile per
+        substep; every consumer coerces with np.asarray as needed)."""
         fx = self.effects
         for m in missiles:
             key = id(m)
-            v = _vhat(m)
+            px, py, pz = m.pos.tolist()
+            vx, vy, vz = m.vel.tolist()
+            speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+            if speed > 1e-9:
+                inv = 1.0 / speed
+                hx, hy, hz = vx * inv, vy * inv, vz * inv
+            else:
+                hx, hy, hz = 0.0, 1.0, 0.0
             if isinstance(m, SamMissile):
-                tail = m.pos - v * SAM_HALF_LEN
                 if m.phase == SPH_BOOST:    # torch + trail END at burnout
+                    tail = (px - hx * SAM_HALF_LEN, py - hy * SAM_HALF_LEN,
+                            pz - hz * SAM_HALF_LEN)
                     self._trail_for(key).add_point(tail)
-                    fx.booster_plume(tail, v, 1.0)
+                    fx.booster_plume(tail, (hx, hy, hz), 1.0)
                 continue
-            tail = m.pos - v * MISSILE_HALF_LEN
+            tail = (px - hx * MISSILE_HALF_LEN, py - hy * MISSILE_HALF_LEN,
+                    pz - hz * MISSILE_HALF_LEN)
             if m.phase in LAUNCH_TRAIL_PHASES:      # the heavy cream column
                 self._trail_for(key).add_point(tail)
-                fx.rideout_plume(tail, v)
+                fx.rideout_plume(tail, (hx, hy, hz))
                 if m.phase == PH_PITCHOVER:
-                    self._nose_puffs(m, v, dt)
+                    self._nose_puffs(m, np.array((hx, hy, hz)), dt)
             elif m.phase == PH_BOOST:               # 4x bloom, grey trail
                 self._trail_for(key).add_point(tail, col=TRAIL_BOOST_COL)
-                fx.boost_plume(tail, v)
+                fx.boost_plume(tail, (hx, hy, hz))
             elif m.phase in RAMJET_PHASES and m.fuel > 0.0:
                 # Near-transparent ramjet: tiny jet + faint haze, NO ribbon.
+                # Period-fed (sim time), not per-substep — dt < period, so
+                # at most one emission per step and no catch-up clumping.
+                acc = self._ramjet_acc.get(key, RAMJET_EMIT_PERIOD) + dt
+                if acc < RAMJET_EMIT_PERIOD:
+                    self._ramjet_acc[key] = acc
+                    continue
+                self._ramjet_acc[key] = acc - RAMJET_EMIT_PERIOD
                 fx.fire.emit(
-                    1, tail, 0.3, -v * RAMJET_EXHAUST_SPEED, 2.0,
+                    1, tail, 0.3,
+                    (-hx * RAMJET_EXHAUST_SPEED, -hy * RAMJET_EXHAUST_SPEED,
+                     -hz * RAMJET_EXHAUST_SPEED), 2.0,
                     RAMJET_FIRE_LIFE, RAMJET_FIRE_SIZE,
                     RAMJET_FIRE_COLORS, fx.rng)
                 fx.smoke.emit(
-                    1, tail, 0.4, -v * 4.0, 1.0,
+                    1, tail, 0.4, (-hx * 4.0, -hy * 4.0, -hz * 4.0), 1.0,
                     RAMJET_HAZE_LIFE, RAMJET_HAZE_SIZE,
                     RAMJET_HAZE_COLORS, fx.rng)
 
@@ -583,10 +628,11 @@ class SandboxState(GameState):
             if math.sqrt(dx * dx + dy * dy + dz * dz) > SHIP_FIRE_VIS_RANGE:
                 continue
             acc = self._fire_acc.get(ship.ship_id, 0.0) + dt
-            deck = ship.pos + _UP * (ship.height * SHIP_FIRE_DECK_FRAC)
-            while acc >= SHIP_FIRE_PERIOD:
-                acc -= SHIP_FIRE_PERIOD
-                self.effects.ship_fire(deck)
+            if acc >= SHIP_FIRE_PERIOD:         # deck temp only when emitting
+                deck = ship.pos + _UP * (ship.height * SHIP_FIRE_DECK_FRAC)
+                while acc >= SHIP_FIRE_PERIOD:
+                    acc -= SHIP_FIRE_PERIOD
+                    self.effects.ship_fire(deck)
             self._fire_acc[ship.ship_id] = acc
 
     def _aircraft_smoke(self, dt: float) -> None:
@@ -621,8 +667,8 @@ class SandboxState(GameState):
             p.update(dt)
         self._parts = [
             (mesh, p) for mesh, p in self._parts
-            if not p.expired(max(self.world.terrain_height_at(
-                float(p.pos[0]), float(p.pos[2])), 0.0))]
+            if not p.expired(self.world.surface_height_at(
+                float(p.pos[0]), float(p.pos[2])))]
 
     def _update_tel(self, dt: float) -> None:
         """Swing the canisters up when armed, down while reloading."""

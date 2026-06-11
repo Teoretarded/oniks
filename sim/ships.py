@@ -106,10 +106,10 @@ class Ship:
         return np.array([np.sin(self.heading) * sp, 0.0,
                          np.cos(self.heading) * sp])
 
-    def _advance_waypoint(self):
+    def _advance_waypoint(self, px, pz):
         wx, wz = self._pts_xz[self._wp]
-        dx = wx - self.pos[0]
-        dz = wz - self.pos[2]
+        dx = wx - px
+        dz = wz - pz
         dist = math.hypot(dx, dz)
         behind = (dx * math.sin(self.heading)
                   + dz * math.cos(self.heading)) < 0.0
@@ -139,15 +139,17 @@ class Ship:
                 self.state = ST_SINKING
                 return
         speed = self.speed * (BURN_SPEED_FRAC if self.state == ST_BURNING else 1.0)
-        self._advance_waypoint()
+        px = float(self.pos[0])                # plain floats: scalar-fast math
+        pz = float(self.pos[2])
+        self._advance_waypoint(px, pz)
         wx, wz = self._pts_xz[self._wp]
-        bearing = math.atan2(wx - self.pos[0], wz - self.pos[2])
+        bearing = math.atan2(wx - px, wz - pz)
         err = (bearing - self.heading + math.pi) % (2.0 * math.pi) - math.pi
         limit = TURN_RATE * dt
         self.heading += min(max(err, -limit), limit)
         self.heading = (self.heading + math.pi) % (2.0 * math.pi) - math.pi
-        self.pos[0] += math.sin(self.heading) * speed * dt
-        self.pos[2] += math.cos(self.heading) * speed * dt
+        self.pos[0] = px + math.sin(self.heading) * speed * dt
+        self.pos[2] = pz + math.cos(self.heading) * speed * dt
 
     # --- hull box for hit tests ----------------------------------------------------
 

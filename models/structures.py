@@ -67,12 +67,18 @@ def build_fuel_depot() -> MeshData:
 
 def build_harbor() -> MeshData:
     """2 concrete finger quays (tops 2.5 m above water), 3 warehouses,
-    2 gantry cranes with booms over the basin between the quays."""
+    2 gantry cranes with booms over the basin between the quays, and a
+    shore apron at the +z end: a paved pad joining the quay roots to the
+    rising foreshore behind the port (Task GATE — the model is placed at
+    the waterline with land toward +z; the apron hides the beach seam)."""
     conc = PALETTE["concrete"]
     b = MeshBuilder()
     for xx in (-38.0, 38.0):
         b.add_mesh(make_box((24.0, 4.0, 170.0), conc, offset=(xx, 0.5, 0.0)))
     quay_top = 2.5
+    # shore apron: spans the full port width, top just above the quay decks,
+    # bottom below the waterline so the slab sits into the beach.
+    b.add_mesh(make_box((104.0, 3.4, 90.0), conc, offset=(0.0, 1.3, 105.0)))
     # warehouses: concrete walls, steel-blue roofs
     for xx, zz in ((-38.0, -50.0), (-38.0, 10.0), (38.0, -30.0)):
         b.add_mesh(make_box((16.0, 8.0, 44.0), conc,
