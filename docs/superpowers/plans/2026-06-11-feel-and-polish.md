@@ -191,8 +191,15 @@ Commits: `feat: keybind table with persistence and settings UI`, `feat: menu res
 
 - Harbor backlog item: nudge HARBOR site seaward / add a shore apron so the waterline model
   sits right; sites tests stay green.
-- Full suite green (target: all prior + all new); perf harness <= 16.0 ms (launch effects are
-  the risk — if over, particle emission constants tune down before anything else).
+- Full suite green (target: all prior + all new); perf harness <= 16.0 ms.
+  **MEASURED at babdef4 (after the RTG task):** TOTAL avg 20.86 ms / p95 34.96 — sim_step
+  12.29 avg (was ~5.4 before this package; the regression lives in the new LC launch phases,
+  RTG weave/skim-capture, and retarget bookkeeping in sim/missile.py + sim/sam.py — profile
+  per-substep cost there FIRST and remove per-step recomputation/allocations; behavior must
+  not change, the suite + intercept e2e tolerances are the guard), particles 2.90 avg
+  (launch smoke density — second target; tune emission constants only if still over after
+  the sim fix), terrain_ocean 3.03. The gate work is NOT optional and NOT satisfied by
+  tuning the harness.
 - All harness scenes re-rendered; READ all of them; reference-critique the launch sequences
   and Oniks model one final time.
 - Scripted full play-test: menu -> settings rebind -> sandbox -> Oniks launch (watch full
