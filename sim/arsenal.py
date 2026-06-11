@@ -15,10 +15,10 @@ class WeaponDef:
     diameter: float          # m
     launch_mass: float       # kg, total at launch
     fuel_mass: float         # kg, ramjet fuel (excludes booster)
-    eject_speed: float       # m/s, cold-launch ejection speed
-    eject_time: float        # s, duration of ejection phase
-    booster_thrust: float    # N, solid booster
-    booster_time: float      # s, booster burn duration
+    eject_speed: float       # m/s, tube-exit speed (hot ride-out, Task LC)
+    eject_time: float        # s, IGNITION beat: in-tube + muzzle-clear time
+    booster_thrust: float    # N, solid booster HIGH-thrust mode
+    booster_time: float      # s, high-thrust burn cap (burnout is at Mach 2)
     max_thrust: float        # N, ramjet max thrust
     isp: float               # s, ramjet specific impulse
     cruise_mach_hi: float    # cruise Mach on the hi-altitude profile
@@ -37,8 +37,8 @@ class WeaponDef:
 ONIKS = WeaponDef(
     weapon_id="oniks", display_name="P-800 Oniks",
     length=8.9, diameter=0.67, launch_mass=3000.0, fuel_mass=780.0,
-    eject_speed=30.0, eject_time=0.9,
-    booster_thrust=410_000.0, booster_time=3.2,
+    eject_speed=30.0, eject_time=0.35,
+    booster_thrust=300_000.0, booster_time=9.5,
     max_thrust=110_000.0, isp=1100.0,
     cruise_mach_hi=2.55, cruise_alt_hi=14_000.0, cruise_mach_lo=2.0, lo_alt=60.0,
     skim_alt=12.0, terminal_range=42_000.0,

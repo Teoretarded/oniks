@@ -1,6 +1,10 @@
 """Missile: phase machine + point-mass integration (pure numpy, GL-free).
 
-The Oniks flight: cold vertical ejection, solid-booster pitch-over, ramjet
+The Oniks flight (Task LC: hybrid hot launch per docs/research/
+oniks_launch_sequence.md): in-tube low-thrust ignition and tube exit at
+~30 m/s, a heavy low-thrust vertical RIDE-OUT, nose-cap pulse-jet PITCH-OVER
+toward the route bearing, cap jettison straight into the high-thrust BOOST
+(burnout at Mach 2, the booster slug is ram-ejected), then the ramjet
 climb/cruise (hi-lo or lo-lo profile), ramped descent to a sea-skim, active
 seeker terminal homing, splash/impact. All state float64; integration is
 semi-implicit Euler at the fixed physics step.
@@ -22,20 +26,55 @@ from world.generation import TERRAIN_MAX_HEIGHT
 # --- Phase enum (locked convention) ------------------------------------------
 PH_EJECT, PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL, PH_DEAD = range(7)
 
+# Task LC internal launch phases, appended AFTER the locked range so no
+# existing value shifts (no consumer orders Oniks phases with </>). PH_EJECT
+# now reads as the in-tube ignition + tube-exit beat ("IGNITION" on the HUD).
+PH_RIDEOUT, PH_PITCHOVER = 7, 8
+
+# Every phase of the launch cinematic: time accel locks to 1x through these
+# and the launch trail/plume effects key off membership (game/sandbox.py).
+LAUNCH_PHASES = (PH_EJECT, PH_RIDEOUT, PH_PITCHOVER, PH_BOOST)
+
 # HUD labels for the phase enum (Task S4: ``phase_label`` is the duck-typed
 # property shared with sim.sam.SamMissile — the HUD never reads raw phase
 # ints, whose values collide between the two enums).
-PHASE_LABELS = {PH_EJECT: "EJECT", PH_BOOST: "BOOST", PH_CLIMB: "CLIMB",
-                PH_CRUISE: "CRUISE", PH_DESCENT: "DESCENT",
-                PH_TERMINAL: "TERMINAL", PH_DEAD: "DEAD"}
+PHASE_LABELS = {PH_EJECT: "IGNITION", PH_RIDEOUT: "RIDE-OUT",
+                PH_PITCHOVER: "PITCH-OVER", PH_BOOST: "BOOST",
+                PH_CLIMB: "CLIMB", PH_CRUISE: "CRUISE",
+                PH_DESCENT: "DESCENT", PH_TERMINAL: "TERMINAL",
+                PH_DEAD: "DEAD"}
 
 # --- Tuning constants (controller gains and shaping) --------------------------
 
-# Boost pitch-over: rotate the velocity direction toward the climb direction at
-# up to this rate, targeting the given elevation per profile.
+# Task LC hot-launch timeline (normative: oniks_launch_sequence.md §3/§6).
+# Low-thrust mode burns from t = 0 (in-tube ignition): net accel ~+4 m/s^2
+# on top of the ~30 m/s exit — the "heavy ride" beat. The nose-cap pulse
+# jets start the tip-over at PITCH_START_T, the turn rate ramps up over
+# PITCH_RAMP_T to PITCH_RATE_MAX (ground-launch footage measures 90-120
+# deg/s; 62 reads heavy-but-agile from the chase cam), and the cap is shot
+# off the moment the velocity vector captures the climb-out direction
+# (~3.0-3.5 s) — high-thrust mode ignites the same instant.
+RIDEOUT_THRUST = 46_000.0            # N, booster low-thrust mode
+PITCH_START_T = 2.0                  # s after exit: pitch-initiate pulse
+PITCH_RATE_MAX = np.radians(70.0)    # rad/s peak velocity-vector rotation
+PITCH_RAMP_T = 0.8                   # s of rate ramp-in (pulse-jet spin-up)
+PITCH_DONE_COS = np.cos(np.radians(2.0))   # capture cone: cap-off trigger
+PITCH_MAX_T = 4.6                    # s hard cap on the tip-over
+BOOST_END_MACH = 2.0                 # high-thrust burnout -> slug ejection
+
+# Boost attitude hold: keep rotating the velocity direction onto the climb
+# direction at up to this rate, targeting the given elevation per profile.
+# The lo elevation is shallow on purpose: the real boost leg is the FLAT
+# streak of the footage, and the lo-lo profile must stay under ~900 m
+# through the full Mach-2 burn.
 BOOST_TILT_RATE = np.radians(40.0)   # rad/s of velocity-vector rotation
-BOOST_ELEV_HI = np.radians(38.0)     # hi-lo climb-out elevation
-BOOST_ELEV_LO = np.radians(25.0)     # lo-lo climb-out elevation
+BOOST_ELEV_HI = np.radians(38.0)     # hi-lo climb-out elevation (full cruise)
+BOOST_ELEV_LO = np.radians(12.0)     # lo-lo climb-out elevation (flat streak)
+# A hi-lo shot with a scaled-down cruise altitude (close target, Task 22b)
+# boosts shallow too — elevation blends LO -> HI as the commanded cruise
+# altitude approaches this reference (a 7 s Mach-2 burn at 38 deg would zoom
+# a 1 km-cruise shot to 3.5 km).
+BOOST_ELEV_REF_ALT = 8_000.0         # m of commanded cruise alt for full HI
 
 # Climb: hand over to cruise once this fraction of cruise altitude is reached;
 # the flight-path angle is clamped so the alt-hold's saturated "pull up"
@@ -169,6 +208,7 @@ class Missile:
                 self.descent_range = _descent_range(weapon, self.cruise_alt)
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
+        self._boost_t0 = 0.0     # t at cap jettison / high-thrust ignition
 
     @property
     def mass(self):
@@ -189,6 +229,19 @@ class Missile:
     def _route_heading(self):
         wx, wz = self.route[0]
         return math.atan2(wx - self.pos[0], wz - self.pos[2])
+
+    def _climb_dir(self) -> np.ndarray:
+        """Unit climb-out direction for pitch-over/boost: toward the first
+        route point, at the profile elevation (scaled down with the commanded
+        cruise altitude on close hi-lo shots)."""
+        if self.hi:
+            f = min(self.cruise_alt / BOOST_ELEV_REF_ALT, 1.0)
+            elev = BOOST_ELEV_LO + (BOOST_ELEV_HI - BOOST_ELEV_LO) * f
+        else:
+            elev = BOOST_ELEV_LO
+        hd = self._route_heading()
+        ce = np.cos(elev)
+        return np.array([np.sin(hd) * ce, np.sin(elev), np.cos(hd) * ce])
 
     def _sustainer_thrust(self, speed, alt, dt):
         """Mach-hold thrust (PI-like: P + drag feedforward); burns ramjet fuel."""
@@ -315,7 +368,9 @@ class Missile:
             return
         w = self.weapon
         if self.phase == PH_EJECT and self.t == 0.0:
-            self.vel = np.array([0.0, w.eject_speed, 0.0])   # cold launch: straight up
+            # Hot launch: low-thrust mode is already burning in the tube; the
+            # missile clears the muzzle at eject_speed, dead vertical.
+            self.vel = np.array([0.0, w.eject_speed, 0.0])
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
 
@@ -336,8 +391,14 @@ class Missile:
 
         # --- phase transitions ---
         if self.phase == PH_EJECT and self.t >= w.eject_time:
-            self.phase = PH_BOOST
-        if self.phase == PH_BOOST and self.t >= w.eject_time + w.booster_time:
+            self.phase = PH_RIDEOUT
+        if self.phase == PH_RIDEOUT and self.t >= PITCH_START_T:
+            self.phase = PH_PITCHOVER
+        # PITCHOVER -> BOOST happens in the forces section below (the cap-off
+        # trigger needs the freshly rotated velocity direction).
+        if self.phase == PH_BOOST and (
+                mach_scalar(speed, alt) >= BOOST_END_MACH
+                or self.t - self._boost_t0 >= w.booster_time):
             self.phase = PH_CLIMB if self.hi else PH_CRUISE
         if self.phase == PH_CLIMB and alt >= CLIMB_TO_CRUISE_FRAC * self.cruise_alt:
             self.phase = PH_CRUISE
@@ -354,14 +415,40 @@ class Missile:
         gx = gy = gz = 0.0                 # guidance accel components
         thrust = 0.0
         drag = 0.0
-        if self.phase == PH_BOOST:
-            # Pitch-over: rotate the velocity direction toward the climb-out
-            # direction (toward the first route point at the profile elevation).
-            elev = BOOST_ELEV_HI if self.hi else BOOST_ELEV_LO
-            hd = self._route_heading()
-            tilt_dir = np.array([np.sin(hd) * np.cos(elev), np.sin(elev),
-                                 np.cos(hd) * np.cos(elev)])
-            vhat = _rotate_toward(np.array([hx, hy, hz]), tilt_dir,
+        if self.phase in (PH_EJECT, PH_RIDEOUT):
+            # Low-thrust ride-out: thrust along the (vertical) velocity, net
+            # accel small but positive — the heavy, columnar climb.
+            thrust = RIDEOUT_THRUST
+            drag = drag_force_scalar(
+                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
+                w.ref_area)
+        elif self.phase == PH_PITCHOVER:
+            # Nose-cap pulse jets: rotate the velocity direction toward the
+            # climb-out direction at a ramping rate. The instant it captures
+            # (or the hard cap expires) the cap is shot off and the
+            # high-thrust mode lights — phase BOOST from this same step.
+            tilt_dir = self._climb_dir()
+            rate = PITCH_RATE_MAX * min(
+                (self.t - PITCH_START_T) / PITCH_RAMP_T, 1.0)
+            vhat = _rotate_toward(np.array([hx, hy, hz]), tilt_dir, rate * dt)
+            hx, hy, hz = vhat.tolist()
+            vx, vy, vz = hx * speed, hy * speed, hz * speed
+            self.vel[0] = vx
+            self.vel[1] = vy
+            self.vel[2] = vz
+            thrust = RIDEOUT_THRUST
+            drag = drag_force_scalar(
+                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
+                w.ref_area)
+            captured = (hx * tilt_dir[0] + hy * tilt_dir[1]
+                        + hz * tilt_dir[2]) >= PITCH_DONE_COS
+            if captured or self.t >= PITCH_MAX_T:
+                self.phase = PH_BOOST          # cap jettison + full grunt
+                self._boost_t0 = self.t
+        elif self.phase == PH_BOOST:
+            # High-thrust mode: hold the climb-out direction and burn hard
+            # until Mach 2 (the transition check at the top of update()).
+            vhat = _rotate_toward(np.array([hx, hy, hz]), self._climb_dir(),
                                   BOOST_TILT_RATE * dt)
             hx, hy, hz = vhat.tolist()
             vx, vy, vz = hx * speed, hy * speed, hz * speed
@@ -379,7 +466,6 @@ class Missile:
             drag = drag_force_scalar(
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
-        # PH_EJECT: gravity only — no thrust, no guidance, negligible drag.
 
         # --- semi-implicit Euler + phase shaping clamps (scalar: Task 22) ---
         coef = (thrust - drag) / self.mass

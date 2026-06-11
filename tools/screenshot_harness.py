@@ -61,14 +61,72 @@ def _fly(state, seconds: float, until=None) -> None:
 
 
 def _scene_launch(s) -> None:
-    """t = +2.0 s after launch: missile mid-boost over the raised TEL."""
+    """t = +2.0 s after launch: missile riding out over the raised TEL."""
     m = s.world.launch("hi-lo", np.array([0.0, 0.0, 120_000.0]))
     s.followed = m
     _fly(s, 2.0)
-    # frame the TEL (bottom) and the climbing missile + plume (top): aim 40%
-    # of the way up so the launcher stays inside the lower frame edge
+    # frame the TEL (bottom) and the climbing missile + plume (top): aim half
+    # way up so the launcher stays inside the lower frame edge
     base = np.array(BASE_POS)
-    _aim(s, (_BX + 62.0, _BY + 22.0, _BZ - 55.0), base + (m.pos - base) * 0.4)
+    _aim(s, (_BX + 62.0, _BY + 22.0, _BZ - 55.0), base + (m.pos - base) * 0.5)
+
+
+# --- Task LC: Oniks hot-launch time series (oniks_launch_sequence.md §6) ------
+
+def _oniks_launch_at(s, t_snap: float):
+    """Fire the Oniks at open water due north through the REAL launch path
+    (request_launch wires the muzzle blast + cover debris) and sim to
+    ``m.t == t_snap``."""
+    s.target_point = np.array([0.0, 0.0, 120_000.0])
+    m = s.request_launch()
+    assert m is not None, "oniks launch refused"
+    _fly(s, t_snap + 2.0, until=lambda: m.t >= t_snap)
+    return m
+
+
+def _scene_oniks_launch_t1(s) -> None:
+    """t=+1.3 s: the heavy ride-out — dense cream column standing on the TEL,
+    muzzle cloud still hanging, missile barely 40 m up (storyboard step 5)."""
+    m = _oniks_launch_at(s, 1.3)
+    base = np.array(BASE_POS)
+    _aim(s, base + (52.0, 24.0, -48.0), base + (m.pos - base) * 0.55)
+
+
+def _scene_oniks_launch_t2(s) -> None:
+    """t=+2.96 s: pitch-over — orange nose puffs while the tail burns, the
+    column kinking into the candy-cane (storyboard step 6). The snap lands
+    right after a pulse-jet event (cadence ~0.23 s from t=2.0)."""
+    m = _oniks_launch_at(s, 2.96)
+    _aim(s, m.pos + np.array([60.0, -6.0, -48.0]), m.pos)
+
+
+def _scene_oniks_launch_t3(s) -> None:
+    """t=+4.1 s: cap away — the black cone tumbling behind and below while
+    the missile pulls away on the freshly lit high-thrust plume (storyboard
+    step 7-8; seq_t4_cap_away frame)."""
+    m = _oniks_launch_at(s, 4.1)
+    cap = next((p for mesh, p in s._parts if mesh is s._mesh_cap), None)
+    mid = m.pos if cap is None else (m.pos + cap.pos) * 0.5
+    v = m.vel / max(np.linalg.norm(m.vel), 1e-9)
+    perp = np.cross(v, (0.0, 1.0, 0.0))
+    perp /= max(np.linalg.norm(perp), 1e-9)
+    if perp[0] < 0.0:
+        perp = -perp                    # abeam on the sun side
+    _aim(s, mid + perp * 90.0 + np.array([0.0, 8.0, 0.0]), mid)
+
+
+def _scene_oniks_launch_t4(s) -> None:
+    """t=+5.6 s: the streak — 4x plume bloom, dark grey boost trail over the
+    cream launch column, TEL smoke anchored below (storyboard step 9)."""
+    m = _oniks_launch_at(s, 5.6)
+    v = m.vel / max(np.linalg.norm(m.vel), 1e-9)
+    perp = np.cross(v, (0.0, 1.0, 0.0))
+    perp /= max(np.linalg.norm(perp), 1e-9)
+    if perp[0] < 0.0:
+        perp = -perp
+    # pull back along the trail so the whole candy-cane reads
+    _aim(s, m.pos + perp * 300.0 - v * 140.0 + np.array([0.0, 25.0, 0.0]),
+         m.pos - v * 180.0)
 
 
 def _scene_cruise(s) -> None:
@@ -287,6 +345,11 @@ SCENES = {
     "launch": _scene_launch,
     "cruise": _scene_cruise,
     "terminal": _scene_terminal,
+    # Task LC: Oniks hot-launch time series (visual gate)
+    "oniks_launch_t1": _scene_oniks_launch_t1,
+    "oniks_launch_t2": _scene_oniks_launch_t2,
+    "oniks_launch_t3": _scene_oniks_launch_t3,
+    "oniks_launch_t4": _scene_oniks_launch_t4,
     # HUD overlay review (Task 19): the only scene rendered with the HUD on.
     "hud": _scene_hud,
     # Tactical map review (Task 20): map open over a dimmed overview.
@@ -300,6 +363,8 @@ SCENES = {
 # Flight scenes advance the sim themselves to a precise moment, so shoot()
 # must not add its own wave-phase steps on top.
 SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0,
+               "oniks_launch_t1": 0, "oniks_launch_t2": 0,
+               "oniks_launch_t3": 0, "oniks_launch_t4": 0,
                "s300_site": 0, "s300_launch": 0, "s300_intercept": 0,
                "aircraft_patrol": 0}
 MODEL_SCENES = ("models_front", "models_side", "models_high",

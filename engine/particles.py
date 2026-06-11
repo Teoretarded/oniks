@@ -74,6 +74,43 @@ SPLASH_RING_SPEED = (14.0, 34.0)   # m/s horizontal radial speed range
 SPLASH_RISE = 22.0                 # m/s mean upward kick of the ring
 SPLASH_COLUMN_RISE = 30.0          # m/s upward speed of the central column
 
+# --- Task LC launch-cinematic effects (oniks_launch_sequence.md §4/§6) -------
+# Muzzle blast: pink-grey ПАД cloud punching up out of the canister + a
+# 1-beat orange fireball around the mouth; the wash engulfs the TEL.
+MUZZLE_FIRE_COUNT = 14
+MUZZLE_SMOKE_COUNT = 40
+MUZZLE_SMOKE_RISE = 9.0            # m/s upward punch of the cloud
+MUZZLE_SMOKE_COL = ((0.84, 0.72, 0.70), (0.58, 0.56, 0.58))   # pink-grey
+
+# Ride-out plume: short white-orange tail flame + DENSE cream-white column.
+# The smoke spawns a couple of meters below the flame so the brilliant core
+# stays visible between the body and the column (seq_t1_riseout frame).
+RIDEOUT_EXHAUST_SPEED = 38.0       # m/s backward ejection
+RIDEOUT_FIRE_SIZE = (1.2, 2.4)     # m — deliberately small (low thrust)
+RIDEOUT_SMOKE_DROP = 3.0           # m behind the flame root
+RIDEOUT_SMOKE_COL = ((0.94, 0.91, 0.85), (0.74, 0.73, 0.72))  # cream-white
+
+# High-thrust boost plume: blooms ~4x with a COMPACT white-yellow core (short
+# life — long-lived sprites smear into a fireball chain at speed), smoke
+# noticeably darker grey than the cream column (seq_t5_grey_trail_flat).
+BOOST_EXHAUST_SPEED = 75.0
+BOOST_FIRE_SIZE = (2.6, 7.0)       # m — the 4x bloom vs RIDEOUT_FIRE_SIZE
+BOOST_SMOKE_COL = ((0.35, 0.34, 0.33), (0.52, 0.52, 0.54))    # dark grey
+
+# Nose-cap pulse jets: conspicuous orange jets at the nose — in the footage
+# they read as a second flame on the airframe for a moment.
+NOSE_PUFF_SPEED = 13.0             # m/s sideways ejection
+NOSE_PUFF_SIZE = (1.6, 3.2)
+
+# Muzzle ground wash: radial smoke ring engulfing the TEL at t = 0.
+MUZZLE_WASH_COUNT = 16
+MUZZLE_WASH_SPEED = (5.0, 13.0)    # m/s horizontal radial expansion
+
+# S-300 ignition: spherical fireball wider than the missile + smoke donut.
+IGNITION_FIRE_COUNT = 26
+IGNITION_DONUT_COUNT = 22
+IGNITION_DONUT_SPEED = (7.0, 15.0)  # m/s horizontal radial expansion
+
 _UP = np.array([0.0, 1.0, 0.0])
 
 
@@ -255,6 +292,10 @@ class TrailRibbon:
     def __init__(self):
         self._pos = np.zeros((TRAIL_MAX_POINTS, 3), dtype=np.float64)
         self._age = np.zeros(TRAIL_MAX_POINTS, dtype=np.float32)
+        # Per-point birth color (Task LC: the boost leg feeds dark-grey
+        # points into the same ribbon as the cream ride-out column).
+        self._col = np.empty((TRAIL_MAX_POINTS, 3), dtype=np.float32)
+        self._col[:] = TRAIL_COL0
         self._start = 0          # ring index of the oldest point
         self._count = 0
         self.finished = False    # set by the owner; empty+finished -> prune
@@ -266,8 +307,10 @@ class TrailRibbon:
         """Ring indices ordered oldest -> newest."""
         return (self._start + np.arange(self._count)) % TRAIL_MAX_POINTS
 
-    def add_point(self, pos) -> bool:
-        """Store ``pos`` if it is >= TRAIL_POINT_SPACING from the last point."""
+    def add_point(self, pos, col=None) -> bool:
+        """Store ``pos`` if it is >= TRAIL_POINT_SPACING from the last point.
+        ``col``: optional (r, g, b) birth color for this point (defaults to
+        the cream TRAIL_COL0)."""
         p = np.asarray(pos, dtype=np.float64)
         if self._count:
             last = self._pos[(self._start + self._count - 1)
@@ -285,6 +328,7 @@ class TrailRibbon:
             w = (self._start + self._count) % TRAIL_MAX_POINTS
         self._pos[w] = p
         self._age[w] = 0.0
+        self._col[w] = TRAIL_COL0 if col is None else col
         self._count += 1
         return True
 
@@ -341,7 +385,8 @@ class TrailRibbon:
         frac = np.clip(ages / TRAIL_FADE_TIME, 0.0, 1.0)
         half = 0.5 * (TRAIL_WIDTH0 + (TRAIL_WIDTH1 - TRAIL_WIDTH0) * frac)
         alpha = TRAIL_ALPHA * (1.0 - frac)
-        col = TRAIL_COL0 + (TRAIL_COL1 - TRAIL_COL0) * frac[:, None]
+        col0 = self._col[idx]
+        col = col0 + (TRAIL_COL1 - col0) * frac[:, None]
 
         p = len(pts)
         out = np.empty((p, 2, 10), dtype=np.float32)
@@ -405,6 +450,90 @@ class Effects:
         self.smoke.emit(n_smoke, pos, 1.0, back * 0.45, 4.0, (1.2, 2.4),
                         (1.6, 7.5),
                         ((0.78, 0.76, 0.73), (0.50, 0.50, 0.53)), r)
+
+    # ------------------------------------- Task LC launch-cinematic helpers
+
+    def muzzle_blast(self, pos, rng=None, ground_y=None) -> None:
+        """t = 0 of the Oniks hot launch: orange fireball blooming around the
+        canister mouth, the pink-grey gas cloud punching up and out, and a
+        radial ground wash burying the TEL (brahmos_block3_parade frame).
+        ``ground_y``: world height the wash hugs (default: the mouth)."""
+        r = self.rng if rng is None else rng
+        self.fire.emit(MUZZLE_FIRE_COUNT, pos, 1.4, (0.0, 7.0, 0.0), 5.5,
+                       (0.3, 0.7), (3.0, 9.0),
+                       ((1.0, 0.80, 0.38), (0.92, 0.32, 0.06)), r)
+        self.smoke.emit(MUZZLE_SMOKE_COUNT, pos, 2.5,
+                        (0.0, MUZZLE_SMOKE_RISE, 0.0), 5.5, (2.5, 5.0),
+                        (3.5, 16.0), MUZZLE_SMOKE_COL, r)
+        wash_pos = np.asarray(pos, dtype=np.float64).copy()
+        if ground_y is not None:
+            wash_pos[1] = float(ground_y)
+        idx = self.smoke.emit(MUZZLE_WASH_COUNT, wash_pos, 1.5,
+                              (0.0, 1.5, 0.0), 1.0, (3.0, 6.0), (4.0, 18.0),
+                              MUZZLE_SMOKE_COL, r)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            speed = r.uniform(MUZZLE_WASH_SPEED[0], MUZZLE_WASH_SPEED[1],
+                              len(idx))
+            self.smoke.vel[idx, 0] = (np.sin(ang) * speed).astype(np.float32)
+            self.smoke.vel[idx, 2] = (np.cos(ang) * speed).astype(np.float32)
+
+    def rideout_plume(self, pos, direction, rng=None) -> None:
+        """Low-thrust ride-out: short white-orange tail flame and the dense
+        cream-white smoke column (per sim step while in IGNITION/RIDE-OUT/
+        PITCH-OVER)."""
+        r = self.rng if rng is None else rng
+        d = np.asarray(direction, dtype=np.float64)
+        d = d / max(np.linalg.norm(d), 1e-9)
+        back = -d * RIDEOUT_EXHAUST_SPEED
+        self.fire.emit(2, pos, 0.45, back, 4.0, (0.12, 0.25),
+                       RIDEOUT_FIRE_SIZE,
+                       ((1.0, 0.93, 0.70), (1.0, 0.50, 0.14)), r)
+        self.smoke.emit(3, pos - d * RIDEOUT_SMOKE_DROP, 0.9, back * 0.35,
+                        2.5, (2.2, 3.8), (1.8, 6.5), RIDEOUT_SMOKE_COL, r)
+
+    def boost_plume(self, pos, direction, rng=None) -> None:
+        """High-thrust mode: the plume blooms ~4x with a white-yellow core
+        and the trail smoke turns noticeably darker grey."""
+        r = self.rng if rng is None else rng
+        d = np.asarray(direction, dtype=np.float64)
+        d = d / max(np.linalg.norm(d), 1e-9)
+        back = -d * BOOST_EXHAUST_SPEED
+        self.fire.emit(3, pos, 1.0, back, 8.0, (0.08, 0.18),
+                       BOOST_FIRE_SIZE,
+                       ((1.0, 0.96, 0.74), (1.0, 0.45, 0.10)), r)
+        self.smoke.emit(3, pos, 1.2, back * 0.40, 5.0, (1.6, 3.0),
+                        (2.0, 8.5), BOOST_SMOKE_COL, r)
+
+    def nose_puff(self, pos, side_dir, rng=None) -> None:
+        """One nose-cap pulse-jet event: a small asymmetric orange puff at
+        the NOSE while the tail still burns (fire only, a few frames long)."""
+        r = self.rng if rng is None else rng
+        d = np.asarray(side_dir, dtype=np.float64)
+        d = d / max(np.linalg.norm(d), 1e-9)
+        self.fire.emit(4, pos, 0.5, d * NOSE_PUFF_SPEED, 2.5, (0.20, 0.40),
+                       NOSE_PUFF_SIZE,
+                       ((1.0, 0.72, 0.30), (0.95, 0.40, 0.08)), r)
+
+    def ignition_fireball(self, pos, rng=None) -> None:
+        """S-300 motor light-off at the hang apex: one-frame flash, a
+        spherical orange-yellow fireball wider than the missile, and the
+        expanding ground-level smoke donut."""
+        r = self.rng if rng is None else rng
+        self.fire.emit(2, pos, 0.4, (0.0, 0.0, 0.0), 0.0, 0.12,
+                       (7.0, 13.0), ((1.0, 0.97, 0.85), (1.0, 0.62, 0.2)), r)
+        self.fire.emit(IGNITION_FIRE_COUNT, pos, 1.4, (0.0, 4.0, 0.0), 9.0,
+                       (0.30, 0.70), (1.8, 5.5),
+                       ((1.0, 0.82, 0.35), (0.85, 0.25, 0.04)), r)
+        idx = self.smoke.emit(IGNITION_DONUT_COUNT, pos, 0.8,
+                              (0.0, 2.5, 0.0), 1.0, (2.2, 4.0), (1.5, 7.5),
+                              ((0.80, 0.78, 0.75), (0.60, 0.60, 0.62)), r)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            speed = r.uniform(IGNITION_DONUT_SPEED[0],
+                              IGNITION_DONUT_SPEED[1], len(idx))
+            self.smoke.vel[idx, 0] = (np.sin(ang) * speed).astype(np.float32)
+            self.smoke.vel[idx, 2] = (np.cos(ang) * speed).astype(np.float32)
 
     def explosion(self, pos, scale, rng=None, water=False) -> None:
         """One-shot blast: flash + fireball + smoke column (+ spray ring)."""

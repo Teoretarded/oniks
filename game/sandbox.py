@@ -2,14 +2,23 @@
 
 Owns the WorldState, the Terrain/Ocean/Sky renderers, the Effects pools +
 particle renderer and the cinematic CameraRig. ``sim_step`` advances the
-world and turns sim happenings into effects (booster plume, exhaust trail,
-explosions / splashes / deck fires, the dropped booster's ballistic tumble);
+world and turns sim happenings into effects (launch plumes, exhaust trail,
+explosions / splashes / deck fires, jettisoned parts' ballistic tumbles);
 ``render`` draws the scene in the fixed order sky -> terrain -> ocean ->
 sites -> ships -> aircraft -> TELs -> missiles -> particles -> HUD/map
 overlay. The tactical map (M) replaces the HUD while open and drives the
 player intent fields (target_point / waypoints). Audio rides the same
 seams: launch / boom / splash one-shots fire where the effects do, and
 per-missile booster/cruise loops are reconciled every frame in ``render``.
+
+Task LC launch cinematics (normative: docs/research/oniks_launch_sequence.md
+and s300_reference.md): the Oniks hot launch fires a muzzle blast at t = 0,
+feeds a cream-white column through the ride-out, pulses orange nose jets in
+the pitch-over, shoots the nose cap FORWARD at the high-thrust handover
+(dark-grey boost trail, 4x plume), and ram-ejects the booster slug at Mach-2
+burnout — after which the thick trail STOPS (near-transparent ramjet). The
+S-300 cold launch blows its tube cover at t = 0, coasts unlit through the
+hang, then erupts in an ignition fireball + smoke donut.
 
 Task S4 adds the second platform: TAB toggles ``active_platform`` between
 the Bastion and the S-300 battery at the SAM site; SPACE routes by platform
@@ -28,7 +37,7 @@ import numpy as np
 from engine import math3d
 from engine.camera import Camera
 from engine.mesh import Mesh
-from engine.meshdata import make_box
+from engine.meshdata import MeshBuilder, make_box, make_cylinder, make_lathe
 from engine.particles import Effects, ParticleRenderer
 from engine.text import TextRenderer
 from game.cameras import CameraRig
@@ -39,16 +48,16 @@ from game.tactical_map import TacticalMap
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
 from models.common import PALETTE, rot_x, rot_y, rot_z
-from models.oniks import build_oniks, build_oniks_booster
+from models.oniks import build_oniks
 from models.s300 import build_s300_missile, build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
 from models.structures import (build_fuel_depot, build_harbor,
                                build_radar_station)
 from sim.aircraft import AC_FALLING, AC_GONE
 from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
-                         PH_TERMINAL)
+                         PH_PITCHOVER, PH_RIDEOUT, PH_TERMINAL)
 from sim.physics import GRAVITY
-from sim.sam import SPH_BOOST, SamMissile
+from sim.sam import SPH_BOOST, SPH_EJECT, SamMissile
 from sim.ships import ST_BURNING, ST_GONE, ST_SINKING
 from world.generation import BASE_POS
 from world.ocean import Ocean
@@ -60,22 +69,51 @@ from world.world import (LAUNCH_ELEV_DEG, SAM_TEL_POS, WorldState,
 # --- Tuning constants ---------------------------------------------------------
 
 MISSILE_HALF_LEN = 4.45        # m, Oniks origin -> tail (models.oniks _TAIL_Z)
-BOOSTER_ATTACH_BACK = 5.45     # m, missile origin -> attached booster origin
-BOOSTER_TAIL_BACK = 6.45       # m, missile origin -> booster bell (boost plume)
 RAMJET_PHASES = (PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL)
+LAUNCH_TRAIL_PHASES = (PH_RIDEOUT, PH_PITCHOVER)   # cream-column ribbon feed
 
 # Sustainer exhaust: a small, very short-lived additive jet right at the
-# nozzle (the booster_plume's big puffs read as a fireball chain at Mach 2
+# nozzle (the boost plume's big puffs read as a fireball chain at Mach 2
 # and blind the chase camera that flies through them).
 RAMJET_FIRE_LIFE = (0.05, 0.12)               # s
 RAMJET_FIRE_SIZE = (0.45, 1.0)                # m birth -> death
 RAMJET_FIRE_COLORS = ((0.95, 0.85, 0.65), (1.0, 0.45, 0.12))
 RAMJET_EXHAUST_SPEED = 18.0                   # m/s backward puff ejection
+# Near-transparent ramjet wake: a faint short-lived haze (the thick launch
+# trail STOPS at burnout — oniks_launch_sequence.md §4.6).
+RAMJET_HAZE_LIFE = (0.4, 0.8)                 # s
+RAMJET_HAZE_SIZE = (0.5, 2.6)                 # m birth -> death
+RAMJET_HAZE_COLORS = ((0.82, 0.82, 0.84), (0.78, 0.78, 0.80))
 
-BOOSTER_LIFE = 6.0             # s the dropped booster falls before despawn
-BOOSTER_SEP_DROP = 4.0         # m/s downward kick at separation
-BOOSTER_DRAG = 0.55            # 1/s exponential velocity decay while falling
-BOOSTER_TUMBLE_RATE = 3.2      # rad/s end-over-end tumble
+# Boost trail ribbon points are darker grey than the cream ride-out column.
+TRAIL_BOOST_COL = (0.38, 0.37, 0.36)
+
+# Jettisoned parts (visual-only ballistic tumbles, Task LC):
+# nose cap — shot FORWARD off the nose by the pull-away motors, then the
+# missile out-accelerates it and it falls behind (RU2240489C1). The slight
+# lateral kick (the pull-away nozzles are angled) drifts it clear of the
+# freshly lit plume so the 'dark chunk hanging in mid-air' beat reads.
+CAP_FWD_KICK = 14.0            # m/s forward impulse at separation
+CAP_SIDE_KICK = 2.0            # m/s lateral drift out of the plume axis
+CAP_DROP_KICK = 3.5            # m/s downward: the cap sinks below the path
+CAP_DRAG = 0.9                 # 1/s exponential decay (light cone, draggy)
+CAP_TUMBLE_RATE = 7.0          # rad/s
+CAP_LIFE = 8.0                 # s before despawn
+CAP_NOSE_AHEAD = 4.6           # m, missile origin -> spawn point at the nose
+# booster slug — ram-ejected out the nozzle at burnout, brief.
+SLUG_BACK_KICK = 45.0          # m/s backward ejection relative to the missile
+SLUG_DRAG = 1.4                # 1/s (blunt slug into a Mach-2 stream)
+SLUG_TUMBLE_RATE = 9.0         # rad/s
+SLUG_LIFE = 5.0                # s before despawn
+SLUG_TAIL_BACK = 5.0           # m, missile origin -> spawn point at the tail
+# tube-cover fragments — blown clear at t = 0 (both launchers).
+COVER_LIFE = 4.0
+COVER_DRAG = 0.8
+COVER_TUMBLE_RATE = 6.0
+COVER_KICKS = ((4.5, 10.0, 2.0), (-3.5, 12.0, -1.5), (1.0, 14.0, -4.0))
+
+# Nose-cap pulse jets: orange puff cadence while the pitch-over turns.
+NOSE_PUFF_PERIOD = 0.22        # s (sim) between pulse-jet events
 
 SHIP_FIRE_PERIOD = 1.0 / 25.0  # s (sim) between deck-fire emissions per ship
 SHIP_FIRE_VIS_RANGE = 30_000.0 # m: deck fires emit only near the camera
@@ -92,7 +130,8 @@ SHIP_HIT_SPLASH_MAX_Y = 8.0    # hull hits below this height also splash
 LAUNCH_PUFF_COUNT = 22         # cold-launch gas puff at the canister mouth
 
 CRUISE_LOOP_GAIN = 1.0         # ramjet loop gain (low level baked in the wav)
-BOOSTER_LOOP_GAIN = 1.0        # booster roar loop gain
+BOOSTER_LOOP_GAIN = 1.0        # booster roar loop gain (high-thrust mode)
+RIDEOUT_LOOP_GAIN = 0.55       # muffled low-thrust roar before the slam
 
 TEL_ERECT_TIME = 4.0           # s for the canisters to swing 0 <-> 88 deg
 TEL_ELEV_STEPS = 12            # prebaked TEL meshes across the elevation arc
@@ -121,30 +160,34 @@ def _vhat(m) -> np.ndarray:
     return v / speed if speed > 1e-9 else _UP.copy()
 
 
-class _FallingBooster:
-    """Visual-only dropped booster: ballistic fall + end-over-end tumble."""
+class _FallingPart:
+    """Visual-only jettisoned part: ballistic fall + end-over-end tumble.
+    Covers the Oniks nose cap (forward kick), the ram-ejected booster slug
+    and the blown tube-cover fragments (Task LC dropped-part pattern)."""
 
-    def __init__(self, pos, vel, forward):
+    def __init__(self, pos, vel, forward, drag, tumble, life):
         self.pos = np.asarray(pos, dtype=np.float64).copy()
         self.vel = np.asarray(vel, dtype=np.float64).copy()
-        self.vel[1] -= BOOSTER_SEP_DROP
         self._rot0 = math3d.rotation_from_forward(forward)
+        self._drag = float(drag)
+        self._tumble = float(tumble)
+        self._life = float(life)
         self.angle = 0.0
         self.t = 0.0
 
     def update(self, dt: float) -> None:
         self.t += dt
-        self.vel *= np.exp(-BOOSTER_DRAG * dt)
+        self.vel *= np.exp(-self._drag * dt)
         self.vel[1] -= GRAVITY * dt
         self.pos += self.vel * dt
-        self.angle += BOOSTER_TUMBLE_RATE * dt
+        self.angle += self._tumble * dt
 
     @property
     def rot(self) -> np.ndarray:
         return self._rot0 @ rot_x(self.angle)
 
     def expired(self, surface_y: float) -> bool:
-        return self.t >= BOOSTER_LIFE or self.pos[1] <= surface_y
+        return self.t >= self._life or self.pos[1] <= surface_y
 
 
 class SandboxState(GameState):
@@ -180,18 +223,37 @@ class SandboxState(GameState):
 
         # Effects bookkeeping
         self._trails: dict[int, object] = {}      # id(missile) -> TrailRibbon
-        self._boosters: list[_FallingBooster] = []
+        self._parts: list[tuple] = []   # (mesh, _FallingPart) tumbling debris
         self._fire_acc: dict[str, float] = {}     # ship_id -> emission debt
         self._ac_smoke_acc: dict[str, float] = {} # falling aircraft debt
+        self._puff_acc: dict[int, float] = {}     # nose pulse-jet debt
         self._tel_frac = 1.0            # canister elevation 0..1 (armed = up)
 
         self._build_meshes()
 
     # ------------------------------------------------------------ GL meshes
 
+    @staticmethod
+    def _cap_meshdata():
+        """Jettisoned Oniks nose cap: a dark 1.35 m cone (the SUO fairing —
+        reads as the 'small dark angular chunk' of the launch footage)."""
+        b = MeshBuilder()
+        b.add_mesh(make_lathe([(0.0, 0.0), (0.0, 0.345), (1.35, 0.0)], 20,
+                              PALETTE["radome"]))
+        return b.build()
+
+    @staticmethod
+    def _slug_meshdata():
+        """Spent booster slug: a small dark cylinder ram-ejected at burnout."""
+        return make_cylinder(0.17, 0.9, 14, PALETTE["exhaust_ring"],
+                             axis="z", cap_ends=True)
+
     def _build_meshes(self) -> None:
         self._mesh_oniks = Mesh(build_oniks())
-        self._mesh_booster = Mesh(build_oniks_booster())
+        self._mesh_cap = Mesh(self._cap_meshdata())
+        self._mesh_slug = Mesh(self._slug_meshdata())
+        self._mesh_cover = Mesh(make_box((0.6, 0.09, 0.6),
+                                         PALETTE["exhaust_ring"]))
         self._ship_meshes = {"cargo": Mesh(build_cargo()),
                              "tanker": Mesh(build_tanker()),
                              "warship": Mesh(build_warship())}
@@ -255,7 +317,11 @@ class SandboxState(GameState):
                               tuple(self.waypoints))
         if m is not None:
             self.followed = m
-            self._launch_puff(m.pos)
+            # Hot launch t = 0: muzzle fireball + pink-grey cloud + ground
+            # wash + the canister cap blown off in chunks (storyboard step 2).
+            self.effects.muzzle_blast(m.pos,
+                                      ground_y=float(self._tel_pos[1]) + 1.5)
+            self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)
         return m
 
@@ -269,9 +335,21 @@ class SandboxState(GameState):
         m = self.world.launch_sam(self.tactical_map.selected_contact)
         if m is not None:                   # None while the tube reloads
             self.followed = m
+            # True cold launch t = 0: tube cover shot off + a grey-white gas
+            # puff — NO flame until the hang-apex ignition.
             self._launch_puff(m.pos)
+            self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)
         return m
+
+    def _spawn_cover_debris(self, mouth_pos) -> None:
+        """Tube-cover fragments blown clear of the muzzle at t = 0."""
+        for i, kick in enumerate(COVER_KICKS):
+            fwd = np.array([math.sin(1.1 + 2.1 * i), 0.35,
+                            math.cos(1.1 + 2.1 * i)])
+            self._parts.append((self._mesh_cover, _FallingPart(
+                mouth_pos, np.array(kick, dtype=np.float64), fwd,
+                COVER_DRAG, COVER_TUMBLE_RATE * (1.0 + 0.2 * i), COVER_LIFE)))
 
     def effective_time_scale(self) -> float:
         """Requested accel, forced to 1x while a launch is in EJECT/BOOST."""
@@ -291,17 +369,22 @@ class SandboxState(GameState):
         self.tactical_map.record(world)     # map trails + tracked target
         live = {id(m) for m in world.missiles}
 
-        self._missile_effects(world.missiles)
-        for m, phase in prev:       # Oniks booster separation: BOOST -> ramjet
-            if (not isinstance(m, SamMissile)
-                    and phase in (PH_EJECT, PH_BOOST) and id(m) in live
-                    and m.phase in RAMJET_PHASES):
-                v = _vhat(m)
-                self._boosters.append(_FallingBooster(
-                    m.pos - v * BOOSTER_ATTACH_BACK, m.vel, v))
+        self._missile_effects(world.missiles, dt)
+        for m, phase in prev:               # launch-sequence seams (Task LC)
+            if id(m) not in live:
+                continue
+            if isinstance(m, SamMissile):
+                if phase == SPH_EJECT and m.phase == SPH_BOOST:
+                    self._sam_ignition(m)   # hang ends: fireball + donut
+                continue
+            if phase == PH_PITCHOVER and m.phase == PH_BOOST:
+                self._cap_jettison(m)       # cap shot forward + full grunt
+            elif phase == PH_BOOST and m.phase in RAMJET_PHASES:
+                self._slug_ejection(m)      # burnout: slug out the nozzle
         for key in list(self._trails):      # finish trails of dead missiles
             if key not in live:
                 self._trails.pop(key).finished = True
+                self._puff_acc.pop(key, None)
 
         for kind, pos in world.drain_events():
             if kind == "ship_hit":
@@ -323,37 +406,93 @@ class SandboxState(GameState):
 
         self._ship_fires(dt)
         self._aircraft_smoke(dt)
-        self._update_boosters(dt)
+        self._update_parts(dt)
         self._update_tel(dt)
         self.effects.update(dt)
 
-    def _missile_effects(self, missiles) -> None:
+    def _missile_effects(self, missiles, dt: float) -> None:
         """Exhaust trail feed + plume emission for every live missile."""
+        fx = self.effects
         for m in missiles:
             key = id(m)
-            trail = self._trails.get(key)
-            if trail is None:
-                trail = self._trails[key] = self.effects.add_trail()
             v = _vhat(m)
             if isinstance(m, SamMissile):
                 tail = m.pos - v * SAM_HALF_LEN
-                if m.phase >= SPH_BOOST:    # contrail through boost + coast
-                    trail.add_point(tail)
-                if m.phase == SPH_BOOST:
-                    self.effects.booster_plume(tail, v, 1.0)
+                if m.phase == SPH_BOOST:    # torch + trail END at burnout
+                    self._trail_for(key).add_point(tail)
+                    fx.booster_plume(tail, v, 1.0)
                 continue
             tail = m.pos - v * MISSILE_HALF_LEN
-            if m.phase == PH_BOOST:
-                trail.add_point(tail)
-                self.effects.booster_plume(m.pos - v * BOOSTER_TAIL_BACK,
-                                           v, 1.0)
-            elif m.phase in RAMJET_PHASES:
-                trail.add_point(tail)
-                if m.fuel > 0.0:
-                    self.effects.fire.emit(
-                        1, tail, 0.3, -v * RAMJET_EXHAUST_SPEED, 2.0,
-                        RAMJET_FIRE_LIFE, RAMJET_FIRE_SIZE,
-                        RAMJET_FIRE_COLORS, self.effects.rng)
+            if m.phase in LAUNCH_TRAIL_PHASES:      # the heavy cream column
+                self._trail_for(key).add_point(tail)
+                fx.rideout_plume(tail, v)
+                if m.phase == PH_PITCHOVER:
+                    self._nose_puffs(m, v, dt)
+            elif m.phase == PH_BOOST:               # 4x bloom, grey trail
+                self._trail_for(key).add_point(tail, col=TRAIL_BOOST_COL)
+                fx.boost_plume(tail, v)
+            elif m.phase in RAMJET_PHASES and m.fuel > 0.0:
+                # Near-transparent ramjet: tiny jet + faint haze, NO ribbon.
+                fx.fire.emit(
+                    1, tail, 0.3, -v * RAMJET_EXHAUST_SPEED, 2.0,
+                    RAMJET_FIRE_LIFE, RAMJET_FIRE_SIZE,
+                    RAMJET_FIRE_COLORS, fx.rng)
+                fx.smoke.emit(
+                    1, tail, 0.4, -v * 4.0, 1.0,
+                    RAMJET_HAZE_LIFE, RAMJET_HAZE_SIZE,
+                    RAMJET_HAZE_COLORS, fx.rng)
+
+    def _trail_for(self, key):
+        trail = self._trails.get(key)
+        if trail is None:
+            trail = self._trails[key] = self.effects.add_trail()
+        return trail
+
+    def _nose_puffs(self, m, v, dt: float) -> None:
+        """Orange pulse-jet puffs at the NOSE while the pitch-over turns —
+        sideways, against the turn (the jets push the nose over)."""
+        key = id(m)
+        acc = self._puff_acc.get(key, NOSE_PUFF_PERIOD)  # first puff at once
+        if acc < NOSE_PUFF_PERIOD:
+            self._puff_acc[key] = acc + dt
+            return
+        self._puff_acc[key] = 0.0
+        nose = m.pos + v * CAP_NOSE_AHEAD
+        side = np.cross(v, _UP)
+        n = float(np.linalg.norm(side))
+        side = side / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
+        up_ish = np.cross(side, v)
+        self.effects.nose_puff(nose, up_ish + side * 0.3)
+
+    def _cap_jettison(self, m) -> None:
+        """End of tip-over: the pull-away motors shoot the nose cap FORWARD;
+        the missile out-accelerates it on the freshly lit high-thrust mode."""
+        v = _vhat(m)
+        side = np.cross(v, _UP)
+        n = float(np.linalg.norm(side))
+        side = side / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
+        kick = (m.vel + v * CAP_FWD_KICK + side * CAP_SIDE_KICK
+                - _UP * CAP_DROP_KICK)
+        self._parts.append((self._mesh_cap, _FallingPart(
+            m.pos + v * CAP_NOSE_AHEAD, kick, v,
+            CAP_DRAG, CAP_TUMBLE_RATE, CAP_LIFE)))
+
+    def _slug_ejection(self, m) -> None:
+        """Mach-2 burnout: ram air expels the spent booster slug out the
+        nozzle; the thick launch trail STOPS here."""
+        v = _vhat(m)
+        self._parts.append((self._mesh_slug, _FallingPart(
+            m.pos - v * SLUG_TAIL_BACK, m.vel - v * SLUG_BACK_KICK, v,
+            SLUG_DRAG, SLUG_TUMBLE_RATE, SLUG_LIFE)))
+        trail = self._trails.pop(id(m), None)
+        if trail is not None:
+            trail.finished = True       # ages out; no new points in cruise
+
+    def _sam_ignition(self, m) -> None:
+        """S-300 motor light-off at the hang apex: instantaneous fireball
+        wider than the missile + the expanding smoke donut."""
+        v = _vhat(m)
+        self.effects.ignition_fireball(m.pos - v * SAM_HALF_LEN)
 
     def _launch_puff(self, mouth_pos) -> None:
         """Cold-launch gas puff at the canister mouth (the eject is unlit)."""
@@ -409,13 +548,13 @@ class SandboxState(GameState):
                     ((1.0, 0.75, 0.30), (0.85, 0.22, 0.05)), rng)
             self._ac_smoke_acc[ac.aircraft_id] = acc
 
-    def _update_boosters(self, dt: float) -> None:
-        for b in self._boosters:
-            b.update(dt)
-        self._boosters = [
-            b for b in self._boosters
-            if not b.expired(max(self.world.terrain_height_at(
-                float(b.pos[0]), float(b.pos[2])), 0.0))]
+    def _update_parts(self, dt: float) -> None:
+        for _, p in self._parts:
+            p.update(dt)
+        self._parts = [
+            (mesh, p) for mesh, p in self._parts
+            if not p.expired(max(self.world.terrain_height_at(
+                float(p.pos[0]), float(p.pos[2])), 0.0))]
 
     def _update_tel(self, dt: float) -> None:
         """Swing the canisters up when armed, down while reloading."""
@@ -427,9 +566,12 @@ class SandboxState(GameState):
     # ---------------------------------------------------------------- audio
 
     def _loop_sources(self) -> dict:
-        """Per-missile engine loops for AudioManager.update_loops: booster
-        roar through BOOST, ramjet hiss while the sustainer burns. Empty
-        while paused (a frozen sim should not roar)."""
+        """Per-missile engine loops for AudioManager.update_loops: the Oniks
+        rides a low-gain booster roar through IGNITION/RIDE-OUT/PITCH-OVER
+        (the 'rising roar'), full gain through the high-thrust BOOST, then
+        the ramjet hiss; the S-300 roars only while its motor burns (the
+        eject hang is near-silent — that pause is sacred). Empty while
+        paused (a frozen sim should not roar)."""
         if self.app.paused:
             return {}
         sources = {}
@@ -437,6 +579,8 @@ class SandboxState(GameState):
             if isinstance(m, SamMissile):   # solid motor roar, silent coast
                 if m.phase == SPH_BOOST:
                     sources[id(m)] = ("booster", m.pos, BOOSTER_LOOP_GAIN)
+            elif m.phase in (PH_EJECT, PH_RIDEOUT, PH_PITCHOVER):
+                sources[id(m)] = ("booster", m.pos, RIDEOUT_LOOP_GAIN)
             elif m.phase == PH_BOOST:
                 sources[id(m)] = ("booster", m.pos, BOOSTER_LOOP_GAIN)
             elif m.phase in RAMJET_PHASES and m.fuel > 0.0:
@@ -452,8 +596,8 @@ class SandboxState(GameState):
 
     def dispose(self) -> None:
         """Free this session's GL objects (called when SANDBOX restarts)."""
-        meshes = ([self._mesh_oniks, self._mesh_booster,
-                   self._mesh_sam_pad, self._mesh_s300_tel,
+        meshes = ([self._mesh_oniks, self._mesh_cap, self._mesh_slug,
+                   self._mesh_cover, self._mesh_sam_pad, self._mesh_s300_tel,
                    self._mesh_s300_missile]
                   + list(self._aircraft_meshes.values())
                   + list(self._ship_meshes.values()) + self._tel_meshes
@@ -532,12 +676,8 @@ class SandboxState(GameState):
         for m in self.world.missiles:
             v = _vhat(m)
             rot = math3d.rotation_from_forward(v)
-            if isinstance(m, SamMissile):
-                self.renderer.draw_mesh(self._mesh_s300_missile, m.pos, rot)
-                continue
-            self.renderer.draw_mesh(self._mesh_oniks, m.pos, rot)
-            if m.phase in (PH_EJECT, PH_BOOST):     # booster still attached
-                self.renderer.draw_mesh(self._mesh_booster,
-                                        m.pos - v * BOOSTER_ATTACH_BACK, rot)
-        for b in self._boosters:
-            self.renderer.draw_mesh(self._mesh_booster, b.pos, b.rot)
+            mesh = (self._mesh_s300_missile if isinstance(m, SamMissile)
+                    else self._mesh_oniks)
+            self.renderer.draw_mesh(mesh, m.pos, rot)
+        for mesh, p in self._parts:     # tumbling caps / slugs / covers
+            self.renderer.draw_mesh(mesh, p.pos, p.rot)

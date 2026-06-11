@@ -26,7 +26,7 @@ from sim.aircraft import AC_FALLING, AC_GONE, Aircraft
 from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
 from sim.contacts import ContactBoard
 from sim.damage import apply_missile_hits
-from sim.missile import PH_BOOST, PH_EJECT, Missile
+from sim.missile import LAUNCH_PHASES, Missile
 from sim.sam import SamMissile
 from sim.ships import Ship
 from world.generation import (AIRCRAFT_SPAWNS, BASE_POS, LANES,
@@ -67,10 +67,12 @@ SAM_MOUTH_OFFSETS = tuple(
 
 
 def launch_realtime_lock(missiles) -> bool:
-    """True while any live missile is in EJECT/BOOST: time accel is forced to
-    1x so the launch always plays real-time (requested rate auto-restores once
-    every missile reaches CLIMB/CRUISE — the caller re-evaluates each frame)."""
-    return any(m.alive and m.phase in (PH_EJECT, PH_BOOST) for m in missiles)
+    """True while any live missile is inside the launch cinematic (Oniks
+    IGNITION/RIDE-OUT/PITCH-OVER/BOOST; the S-300's eject/boost ints alias
+    into the same set): time accel is forced to 1x so the launch always plays
+    real-time (requested rate auto-restores once every missile reaches
+    CLIMB/CRUISE — the caller re-evaluates each frame)."""
+    return any(m.alive and m.phase in LAUNCH_PHASES for m in missiles)
 
 
 class WorldState:

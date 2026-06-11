@@ -11,7 +11,8 @@ import numpy as np
 
 from sim.aircraft import AC_ALIVE, AC_FALLING
 from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
-from sim.missile import PH_BOOST, PH_CRUISE, PH_EJECT, PH_TERMINAL, Missile
+from sim.missile import (PH_BOOST, PH_CRUISE, PH_EJECT, PH_PITCHOVER,
+                         PH_RIDEOUT, PH_TERMINAL, Missile)
 from sim.sam import SPH_EJECT, SPH_MIDCOURSE, SPH_TERMINAL, SamMissile
 from sim.ships import ST_BURNING
 from world import generation
@@ -241,7 +242,11 @@ def test_sam_self_destruct_emits_event_not_ground_hit():
 def test_oniks_phase_label_duck_typing():
     ws = WorldState()
     m = ws.launch("hi-lo", FAR_NORTH)
-    assert m.phase_label == "EJECT"
+    assert m.phase_label == "IGNITION"          # Task LC hot-launch labels
+    m.phase = PH_RIDEOUT
+    assert m.phase_label == "RIDE-OUT"
+    m.phase = PH_PITCHOVER
+    assert m.phase_label == "PITCH-OVER"
     m.phase = PH_TERMINAL
     assert m.phase_label == "TERMINAL"
 
@@ -252,8 +257,9 @@ def test_launch_realtime_lock_follows_phase():
     m = ws.launch("hi-lo", FAR_NORTH)
     assert m.phase == PH_EJECT
     assert launch_realtime_lock(ws.missiles)
-    m.phase = PH_BOOST
-    assert launch_realtime_lock(ws.missiles)
+    for ph in (PH_RIDEOUT, PH_PITCHOVER, PH_BOOST):       # whole cinematic
+        m.phase = ph
+        assert launch_realtime_lock(ws.missiles)
     m.phase = PH_CRUISE
     assert not launch_realtime_lock(ws.missiles)          # auto-restore point
     m.phase = PH_BOOST

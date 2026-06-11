@@ -1,6 +1,10 @@
+import math
+
 import numpy as np, pytest
-from sim.missile import Missile, PH_EJECT, PH_BOOST, PH_CRUISE, PH_TERMINAL, PH_DEAD
+from sim.missile import (Missile, PH_EJECT, PH_RIDEOUT, PH_PITCHOVER,
+                         PH_BOOST, PH_CLIMB, PH_CRUISE, PH_TERMINAL, PH_DEAD)
 from sim.arsenal import ONIKS
+from sim.physics import mach_scalar
 
 DT = 1/120
 class _World:  # minimal stub
@@ -12,16 +16,66 @@ def _launch(profile="hi-lo", target=(0., 0., 200_000.)):
                 target_point=np.array(target))
     return m
 
-def test_cold_launch_goes_straight_up():
-    m = _launch(); w = _World()
-    for _ in range(int(0.8 / DT)): m.update(DT, w)
-    assert m.phase == PH_EJECT
-    assert m.pos[1] > 60.0 and abs(m.pos[0]) < 0.5 and abs(m.pos[2]) < 0.5
+def _fly_to_boost(m, w):
+    """Step until the cap-jettison handover (PITCH-OVER -> BOOST)."""
+    while m.phase != PH_BOOST and m.t < 8.0:
+        m.update(DT, w)
+    assert m.phase == PH_BOOST
+    return m.t
 
-def test_booster_ignites_and_climbs():
+# --- Task LC: hybrid hot launch (in-tube ignition, ride-out, pitch-over) -----
+
+def test_hot_launch_exit_speed_and_vertical_rideout():
     m = _launch(); w = _World()
-    for _ in range(int(3.5 / DT)): m.update(DT, w)
-    assert m.phase != PH_EJECT
+    m.update(DT, w)
+    assert m.phase == PH_EJECT and m.phase_label == "IGNITION"
+    assert 25.0 <= m.vel[1] <= 40.0             # plan: exit at 25-40 m/s
+    for _ in range(int(1.4 / DT)):              # into the heavy ride-out
+        m.update(DT, w)
+    assert m.phase == PH_RIDEOUT and m.phase_label == "RIDE-OUT"
+    assert abs(m.pos[0]) < 0.5 and abs(m.pos[2]) < 0.5   # dead vertical
+    assert m.vel[1] > ONIKS.eject_speed         # net accel small but POSITIVE
+    assert m.vel[1] < 60.0                      # ... and visibly heavy
+
+def test_pitchover_cap_jettison_window_and_heading():
+    bearing = math.radians(30.0)                # off-axis: heading must turn
+    target = (100_000.0 * math.sin(bearing), 0.0, 100_000.0 * math.cos(bearing))
+    m = _launch(target=target); w = _World()
+    t_cap = _fly_to_boost(m, w)
+    assert 2.8 <= t_cap <= 3.6                  # plan: end of tip-over ~3.0-3.5
+    assert 100.0 <= m.pos[1] - 60.0 <= 260.0    # plan: cap-jettison altitude
+    hdg = math.atan2(m.vel[0], m.vel[2])
+    err = (hdg - bearing + math.pi) % (2.0 * math.pi) - math.pi
+    assert abs(err) <= math.radians(15.0)       # plan: within 15 deg of route
+
+def test_pitchover_window_lo_profile():
+    m = _launch("lo-lo"); w = _World()
+    t_cap = _fly_to_boost(m, w)
+    assert 2.8 <= t_cap <= 3.6
+    assert 100.0 <= m.pos[1] - 60.0 <= 260.0
+    assert m.phase_label == "BOOST"
+
+def test_pitchover_label_while_turning():
+    m = _launch(); w = _World()
+    for _ in range(int(2.4 / DT)):
+        m.update(DT, w)
+    assert m.phase == PH_PITCHOVER and m.phase_label == "PITCH-OVER"
+    assert np.linalg.norm(m.vel) < 120.0        # still slow: the violent beat waits
+
+def test_high_thrust_reaches_mach2_in_6_to_9s():
+    m = _launch(); w = _World()
+    t0 = _fly_to_boost(m, w)
+    while m.phase == PH_BOOST and m.t - t0 < 12.0:
+        m.update(DT, w)
+    assert m.phase in (PH_CLIMB, PH_CRUISE)     # burnout hands over to ramjet
+    burn = m.t - t0
+    assert 6.0 <= burn <= 9.0                   # plan: Mach 2 6-9 s after slam
+    assert mach_scalar(float(np.linalg.norm(m.vel)), float(m.pos[1])) > 1.9
+
+def test_high_thrust_boost_climbs_hard():
+    m = _launch(); w = _World()
+    for _ in range(int(6.5 / DT)): m.update(DT, w)
+    assert m.phase == PH_BOOST
     assert m.vel[1] > 50.0                      # climbing hard
     assert np.linalg.norm(m.vel) > 250.0
 

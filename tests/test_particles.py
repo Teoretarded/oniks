@@ -173,3 +173,61 @@ def test_effects_trail_lifecycle():
     rib.finished = True
     fx.update(30.0)       # all points expire -> finished trail pruned
     assert rib not in fx.trails
+
+
+# ------------------------------------------------- Task LC launch effects
+
+def test_launch_effect_helpers_emit_into_pools():
+    """muzzle_blast / rideout_plume / boost_plume / nose_puff /
+    ignition_fireball all spawn live particles."""
+    for name, args in (
+            ("muzzle_blast", (np.array([0.0, 65.0, -180.0]),)),
+            ("rideout_plume", (np.array([0.0, 90.0, -180.0]),
+                               np.array([0.0, 1.0, 0.0]))),
+            ("boost_plume", (np.array([0.0, 200.0, -180.0]),
+                             np.array([0.0, 0.6, 0.8]))),
+            ("nose_puff", (np.array([0.0, 150.0, -180.0]),
+                           np.array([1.0, 0.0, 0.0]))),
+            ("ignition_fireball", (np.array([0.0, 30.0, 0.0]),))):
+        fx = Effects(seed=5)
+        getattr(fx, name)(*args)
+        assert int(fx.fire.alive.sum()) > 0, name
+        if name != "nose_puff":              # puffs are fire-only
+            assert int(fx.smoke.alive.sum()) > 0, name
+        fx.update(0.1)
+        assert np.isfinite(fx.smoke.pos[: fx.smoke._hi]).all()
+        assert np.isfinite(fx.fire.pos[: fx.fire._hi]).all()
+
+
+def test_boost_plume_blooms_vs_rideout():
+    """The high-thrust plume is the violent beat: its fire sprites are
+    several times the ride-out plume's."""
+    a = Effects(seed=2)
+    a.rideout_plume(np.zeros(3), np.array([0.0, 1.0, 0.0]))
+    b = Effects(seed=2)
+    b.boost_plume(np.zeros(3), np.array([0.0, 1.0, 0.0]))
+    size_a = float(a.fire.size1[a.fire.alive].max())
+    size_b = float(b.fire.size1[b.fire.alive].max())
+    assert size_b >= 3.0 * size_a
+
+
+def test_ignition_fireball_has_radial_smoke_donut():
+    fx = Effects(seed=9)
+    fx.ignition_fireball(np.array([0.0, 30.0, 0.0]))
+    v = fx.smoke.vel[fx.smoke.alive]
+    horiz = np.hypot(v[:, 0], v[:, 2])
+    # a good share of the smoke is the expanding ground-level donut: its
+    # horizontal radial speed dominates the vertical component
+    assert (horiz > 2.0 * np.abs(v[:, 1])).sum() >= 12
+
+
+def test_ribbon_per_point_color():
+    rib = TrailRibbon()
+    dark = (0.40, 0.39, 0.38)
+    rib.add_point(np.array([0.0, 100.0, 0.0]))            # default cream
+    rib.add_point(np.array([0.0, 100.0, 50.0]), col=dark)  # boost grey
+    strip = rib.build_strip(np.array([200.0, 100.0, 0.0]))
+    assert strip.shape == (4, 10)
+    assert np.allclose(strip[0, 5:8], strip[1, 5:8])
+    assert np.allclose(strip[2, 5:8], dark, atol=1e-6)     # fresh: birth color
+    assert not np.allclose(strip[0, 5:8], strip[2, 5:8])   # colors differ
