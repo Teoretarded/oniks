@@ -4,9 +4,13 @@ usage: python -m tools.perf_harness [frames]    (default 600)
 
 Hidden 1600x900 window. Worst-case scene: camera 400 m over the base
 looking north; ALL 14 ships alive (the two nearest moved into view and
-set burning so deck fires emit); 4 missiles airborne — 2 hi cruise at
-100/200 km downrange, 1 terminal at 8 km with a full trail ribbon, and
-1 mid-boost at t = +2 s launched through the real launch path.
+set burning so deck fires emit); the 4 patrol aircraft airborne with one
+moved overhead and shot down (falling spiral + smoke/flame emission for
+the whole run); 6 missiles airborne — 2 hi cruise at 100/200 km
+downrange, 1 terminal at 8 km with a full trail ribbon, 2 S-300s in
+midcourse coast (full ribbons, honest out-of-envelope shots at the far
+patrols so they steer all 600 frames), and 1 mid-boost at t = +2 s
+launched through the real launch path (S6 re-gate scene).
 
 Each rendered frame advances the sim by 16 fixed 120 Hz substeps (time
 scale 8 at a 60 FPS render rate) and draws the sandbox scene in its
@@ -35,6 +39,7 @@ frame total exceeds the 16.0 ms (60 FPS) budget.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 
@@ -43,11 +48,14 @@ import pygame
 
 from engine.particles import TRAIL_MAX_POINTS, TRAIL_POINT_SPACING
 from main import PHYS_DT, App
-from sim.arsenal import ONIKS
+from sim.aircraft import AC_FALLING
+from sim.arsenal import ONIKS, S300
 from sim.missile import PH_CRUISE, PH_TERMINAL, Missile
 from sim.physics import speed_of_sound
+from sim.sam import SPH_MIDCOURSE, SamMissile
 from sim.ships import ST_BURNING
 from world.generation import BASE_POS
+from world.world import SAM_TEL_POS
 
 FRAMES = 600                  # rendered frames measured
 SUBSTEPS = 16                 # sim steps per frame: time_scale 8 @ 120/60 Hz
@@ -56,6 +64,17 @@ CAM_ALT = 400.0               # m above the base
 CAM_PITCH = -0.15             # slight down pitch: ocean + terrain + ships in view
 WARMUP_FRAMES = 1200          # cap on terrain LOD streaming warm-up
 SETUP_BOOST_S = 2.0           # sim time after launch -> missile mid-boost
+
+# S6 expansion: the shot-down aircraft falls here (~11.5 km from the camera,
+# inside both the 60 km draw range and the 40 km smoke-emission range, and
+# high enough that the spiral never hits the water inside the run).
+FALLER_XZ = (1_200.0, 9_500.0)
+SAM_TARGET_IDS = ("air_patrol_02", "air_fast_03")   # far orbits: no intercept
+SAM_DOWNRANGES = (30_000.0, 55_000.0)  # m along the site->target line
+SAM_MID_ALT = 17_000.0        # m, on the S2 loft profile (cmd ~20.5 km)
+SAM_MID_SPEED = 1_500.0       # m/s post-burnout coast entry
+SAM_MID_CLIMB = 0.25          # vertical velocity fraction (still climbing)
+SAM_MID_T = 20.0              # s already flown (+102 s run << 180 s cutoff)
 FENCE_DEPTH = 2               # frames in flight before the swap wait (triple buffer)
 THROTTLE_PROBE_FLIPS = 16     # probed flips: must outlast DWM's ~10-present grace
 THROTTLE_LIMIT_S = 0.1        # a flip blocking this long = compositor-throttled
@@ -86,6 +105,29 @@ def _terminal_missile(world) -> Missile:
     m.t = 60.0
     speed = ONIKS.cruise_mach_lo * float(speed_of_sound(pos[1]))
     m.vel = np.array([0.0, 0.0, speed])
+    world.missiles.append(m)
+    return m
+
+
+def _midcourse_sam(world, target, downrange: float) -> SamMissile:
+    """Hand-built 48N6 in post-burnout midcourse coast toward ``target``:
+    placed ``downrange`` m from the SAM site along the line to the target,
+    climbing on the loft profile (truth-aimed, like Task S2's e2e shots).
+    Both targets orbit ~220 km out, so the shot steers — and pays the full
+    midcourse guidance cost — every frame of the run without connecting."""
+    tp = target.pos
+    dx = float(tp[0]) - SAM_TEL_POS[0]
+    dz = float(tp[2]) - SAM_TEL_POS[2]
+    n = math.hypot(dx, dz)
+    ux, uz = dx / n, dz / n
+    m = SamMissile(S300, np.array([SAM_TEL_POS[0] + ux * downrange,
+                                   SAM_MID_ALT,
+                                   SAM_TEL_POS[2] + uz * downrange]), target)
+    m.phase = SPH_MIDCOURSE
+    m.t = SAM_MID_T
+    m.propellant = 0.0
+    horiz = math.sqrt(1.0 - SAM_MID_CLIMB * SAM_MID_CLIMB)
+    m.vel = np.array([ux * horiz, SAM_MID_CLIMB, uz * horiz]) * SAM_MID_SPEED
     world.missiles.append(m)
     return m
 
@@ -121,11 +163,23 @@ def setup_scene(app: App):
         ship.pos[0], ship.pos[2] = x, z
         ship.state = ST_BURNING
 
-    # Missiles: 2 hi cruise (100/200 km), 1 terminal (8 km, full trail).
+    # One of the 4 patrol aircraft (S1 spawns) shot down overhead: its spiral
+    # + smoke/flame emission runs all 600 frames (sink rate ~21 m/s from
+    # 6.5 km; the other three fly their racetracks 70+ km out).
+    faller = s.world.aircraft[0]
+    faller.pos[0], faller.pos[2] = FALLER_XZ
+    faller.kill()
+
+    # Missiles: 2 hi cruise (100/200 km), 1 terminal (8 km, full trail),
+    # 2 S-300s coasting in midcourse at the far patrols (full trails).
     _cruise_missile(s.world, 100_000.0)
     _cruise_missile(s.world, 200_000.0)
     term = _terminal_missile(s.world)
     _feed_full_trail(s, term)
+    aircraft = {a.aircraft_id: a for a in s.world.aircraft}
+    for target_id, downrange in zip(SAM_TARGET_IDS, SAM_DOWNRANGES):
+        sam = _midcourse_sam(s.world, aircraft[target_id], downrange)
+        _feed_full_trail(s, sam)
 
     # ... and 1 launched through the real path, simmed to mid-boost t=+2 s.
     boost = s.world.launch("hi-lo", np.array([0.0, 0.0, 250_000.0]))
@@ -152,6 +206,7 @@ def render_frame(s, timers=None) -> None:
     for mesh, pos in s._site_draws:
         s.renderer.draw_mesh(mesh, pos)
     s._draw_ships()
+    s._draw_aircraft()
     s._draw_tel()
     s._draw_missiles()
     t3 = mark()
@@ -280,6 +335,14 @@ def run(frames: int = FRAMES) -> int:
         for name in SECTIONS:
             per_frame[name][f] = timers[name]
         totals[f] = mark() - t0 - excluded
+
+    # Scene integrity: the worst case must not shed load mid-run (a SAM
+    # self-destructing or the faller splashing would quietly lighten it).
+    live = sum(1 for m in s.world.missiles if m.alive)
+    falling = sum(1 for a in s.world.aircraft if a.state == AC_FALLING)
+    if live != 6 or falling != 1:
+        print(f"[perf] WARNING: scene shed load mid-run ({live}/6 missiles "
+              f"live, {falling}/1 falling aircraft)")
 
     pygame.quit()
     if pacer.throttled:
