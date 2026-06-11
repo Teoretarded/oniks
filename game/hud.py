@@ -1,5 +1,14 @@
-"""Telemetry overlay (HUD): flight block, launcher block, camera/controls
-hint line and the terminal target bracket.
+"""Telemetry overlay (HUD): flight block, launcher block, corner micro-
+labels, the F1 controls overlay and the terminal target bracket.
+
+Task UI (normative: docs/research/ui_reference.md §4): the permanent
+bottom hint bar is REMOVED — the entire resting footprint is a bottom-right
+``F1 CONTROLS`` micro-label with the bare camera-mode text stacked above
+it. F1 toggles a centered overlay generated live from the binding table
+(so it can never lie after a rebind); contextual one-liners (COMMITTED,
+S-300: SELECT AIR TARGET) keep the existing hint_flash mechanism. The
+telemetry panel gains the menu language's chrome: 1px border, amber corner
+ticks and the header rule.
 
 Pure screen-space layout on top of ``engine.text.TextRenderer`` — this
 module issues only draw_text / draw_rect / draw_lines calls (no direct GL),
@@ -12,7 +21,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from engine.text import BODY_SIZE, HEADER_SIZE
+from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
+from game.keybinds import ACTIONS
+from game.states import (ACCENT_DIM, BG0, MUTED, TEXT_COL, draw_header_rule,
+                         draw_panel)
 from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
 from sim.physics import mach
 from world.generation import BASE_POS, SAM_SITE_POS
@@ -23,22 +35,30 @@ from world.generation import BASE_POS, SAM_SITE_POS
 
 # --- Layout tuning -------------------------------------------------------------
 
-MARGIN = 12                 # px, panel offset from the top-left corner
+MARGIN = 16                 # px, panel offset from the top-left corner (8px grid)
 PANEL_W = 268               # px, telemetry panel width
-PANEL_PAD = 10              # px, inner padding of panels
-LINE_H = 22                 # px, row pitch of the telemetry block
+PANEL_PAD = 16              # px, inner padding of panels (spec §1.5)
+LINE_H = 24                 # px, row pitch of the telemetry block (8px grid)
 VALUE_X = 104               # px, label -> value column offset inside the panel
-HEADER_GAP = 6              # px, extra gap under the header line
+HEADER_GAP = 12             # px, gap under the header rule
 HINT_MARGIN = 10            # px, hint line offset from the bottom edge
+CORNER_MARGIN = 16          # px, bottom-right micro-label inset (spec §4.1)
+CAM_LABEL_GAP = 24          # px, camera-mode text stacked above F1 CONTROLS
+PANEL_ALPHA = 0.55          # HUD panel fill alpha (menus use 0.92)
 
-PANEL_RGBA = (0.03, 0.06, 0.05, 0.55)        # translucent dark panel fill
+PANEL_RGBA = (0.043, 0.078, 0.071, 0.55)     # translucent dark panel fill
 LABEL_COL = (0.60, 0.72, 0.64, 1.0)          # muted green-gray labels
 VALUE_COL = (0.92, 0.97, 0.92, 1.0)          # near-white values
 HEADER_COL = (0.95, 0.85, 0.45, 1.0)         # amber headline
 ARMED_COL = (0.45, 1.00, 0.55, 1.0)          # status green
 RELOAD_COL = (1.00, 0.72, 0.25, 1.0)         # status amber
 TERMINAL_COL = (1.00, 0.55, 0.40, 1.0)       # TERMINAL phase pops red-ish
-HINT_COL = (0.85, 0.90, 0.85, 0.92)          # bottom hint text
+
+F1_LABEL = "F1 CONTROLS"    # the HUD's entire permanent hint footprint
+OVERLAY_W = 460             # px, F1 overlay panel width
+OVERLAY_ROW_H = 24          # px, overlay binding-row pitch
+OVERLAY_DIM = 24            # px, dim-rect margin around the overlay panel
+OVERLAY_FOOTER = "F1 CLOSE   REBIND IN SETTINGS"
 
 # Target bracket: 4 corner L's sized with the locked ship's on-screen extent.
 BRACKET_COL = (1.0, 0.36, 0.24, 0.95)
@@ -49,8 +69,18 @@ BRACKET_CORNER_FRAC = 0.38  # corner leg length as a fraction of the half-size
 BRACKET_LINE_W = 2.0        # px stroke
 BRACKET_TEXT_GAP = 6.0      # px between the bracket and the range text
 
-CONTROLS_HINT = ("TAB platform  C cam  M map  SPACE launch  1/2 profile  "
-                 "P pause  N step  -/= time  F2 shot  ESC menu")
+
+def overlay_rows(keybinds) -> list[tuple]:
+    """F1 overlay rows from the LIVE binding table: ("header", group) and
+    ("row", label, key_name) in registry order — pure, unit-testable."""
+    rows: list[tuple] = []
+    group = None
+    for a in ACTIONS:
+        if a.group != group:
+            group = a.group
+            rows.append(("header", group))
+        rows.append(("row", a.label, keybinds.name_for(a.id)))
+    return rows
 
 
 def world_to_screen(sandbox, pos_f64, w: float, h: float):
@@ -128,7 +158,9 @@ class HUD:
         else:
             self._launcher_block(sandbox)
         self._hint_flash(sandbox, w, h)
-        self._camera_line(sandbox, w, h)
+        self._corner_labels(sandbox, w, h)
+        if sandbox.controls_overlay:
+            self._controls_overlay(sandbox, w, h)
         self.text.flush(w, h)
 
     def draw_flight_block(self, sandbox, m) -> None:
@@ -140,14 +172,19 @@ class HUD:
     # ---------------------------------------------------------------- blocks
 
     def _block(self, header: str, rows) -> None:
-        """Panel at the top-left: header + (label, value, color) rows."""
+        """Panel at the top-left: header + rule + (label, value, color)
+        rows, in the menu language's chrome (border + amber corner ticks)."""
         head_h = self.text.line_height(HEADER_SIZE)
-        height = PANEL_PAD * 2 + head_h + HEADER_GAP + len(rows) * LINE_H
-        self.text.draw_rect(MARGIN, MARGIN, PANEL_W, height, PANEL_RGBA)
+        height = (PANEL_PAD * 2 + head_h + 4 + HEADER_GAP
+                  + len(rows) * LINE_H)
+        draw_panel(self.text, MARGIN, MARGIN, PANEL_W, height,
+                   alpha=PANEL_ALPHA)
         tx = MARGIN + PANEL_PAD
         ty = MARGIN + PANEL_PAD
         self.text.draw_text(tx, ty, header, HEADER_COL, HEADER_SIZE)
-        ty += head_h + HEADER_GAP
+        ty += head_h + 4
+        draw_header_rule(self.text, tx, ty, PANEL_W - 2 * PANEL_PAD)
+        ty += HEADER_GAP
         for label, value, col in rows:
             self.text.draw_text(tx, ty + 2, label, LABEL_COL)
             self.text.draw_text(tx + VALUE_X, ty + 2, value, col)
@@ -247,11 +284,12 @@ class HUD:
             txt += " (launch)"      # accel locked to 1x through the cinematic
         return txt
 
-    # ------------------------------------------------------------- hint line
+    # ----------------------------------------------- hints + corner labels
 
     def _hint_flash(self, sandbox, w: int, h: int) -> None:
-        """Transient one-line hint (e.g. 'S-300: SELECT AIR TARGET') above
-        the camera/controls line, while sandbox.hint_left > 0."""
+        """Transient state-driven one-liner (e.g. 'S-300: SELECT AIR
+        TARGET'), bottom-center, while sandbox.hint_left > 0 — the only
+        panel-filled text left at the screen bottom."""
         if sandbox.hint_left <= 0.0 or not sandbox.hint_text:
             return
         lh = self.text.line_height(BODY_SIZE)
@@ -261,15 +299,57 @@ class HUD:
         self.text.draw_rect(x - 10, y - 4, tw + 20, lh + 8, PANEL_RGBA)
         self.text.draw_text(x, y, sandbox.hint_text, RELOAD_COL)
 
-    def _camera_line(self, sandbox, w: int, h: int) -> None:
-        """Bottom-center: camera mode + controls hint."""
-        line = f"CAM {sandbox.rig.mode.upper()}    {CONTROLS_HINT}"
-        tw = self.text.text_width(line)
-        lh = self.text.line_height(BODY_SIZE)
-        x = (w - tw) * 0.5
-        y = h - lh - HINT_MARGIN
-        self.text.draw_rect(x - 10, y - 4, tw + 20, lh + 8, PANEL_RGBA)
-        self.text.draw_text(x, y, line, HINT_COL)
+    def _corner_labels(self, sandbox, w: int, h: int) -> None:
+        """Bottom-right, no panel fill (spec §4.1): the 'F1 CONTROLS'
+        micro-label with the bare camera-mode readout stacked above it."""
+        lh = self.text.line_height(SMALL_SIZE)
+        y = h - CORNER_MARGIN - lh
+        tw = self.text.text_width(F1_LABEL, SMALL_SIZE)
+        self.text.draw_text(w - CORNER_MARGIN - tw, y, F1_LABEL, ACCENT_DIM,
+                            SMALL_SIZE)
+        cam = f"CAM {sandbox.rig.mode.upper()}"
+        cw = self.text.text_width(cam, SMALL_SIZE)
+        self.text.draw_text(w - CORNER_MARGIN - cw, y - CAM_LABEL_GAP, cam,
+                            MUTED, SMALL_SIZE)
+
+    def _controls_overlay(self, sandbox, w: int, h: int) -> None:
+        """F1: centered corner-ticked panel listing every binding straight
+        from the live table (sim keeps running — overlay, not menu)."""
+        text = self.text
+        rows = overlay_rows(sandbox.app.keybinds)
+        head_h = text.line_height(HEADER_SIZE)
+        small_h = text.line_height(SMALL_SIZE)
+        body_h = text.line_height(BODY_SIZE)
+        content_h = len(rows) * OVERLAY_ROW_H
+        panel_h = (PANEL_PAD * 2 + head_h + 4 + HEADER_GAP + content_h
+                   + 8 + small_h)
+        x = (w - OVERLAY_W) // 2
+        y = (h - panel_h) // 2
+        text.draw_rect(x - OVERLAY_DIM, y - OVERLAY_DIM,
+                       OVERLAY_W + 2 * OVERLAY_DIM,
+                       panel_h + 2 * OVERLAY_DIM, (*BG0, 0.35))
+        draw_panel(text, x, y, OVERLAY_W, panel_h, alpha=0.92, strip=True)
+        tx = x + PANEL_PAD
+        ty = y + PANEL_PAD
+        text.draw_text(tx, ty, "CONTROLS", HEADER_COL, HEADER_SIZE)
+        ty += head_h + 4
+        draw_header_rule(text, tx, ty, OVERLAY_W - 2 * PANEL_PAD)
+        ty += HEADER_GAP
+        for row in rows:
+            if row[0] == "header":
+                text.draw_text(tx, ty + (OVERLAY_ROW_H - small_h) // 2,
+                               row[1], ACCENT_DIM, SMALL_SIZE)
+            else:
+                _, label, key = row
+                oy = ty + (OVERLAY_ROW_H - body_h) // 2
+                text.draw_text(tx, oy, label, MUTED)
+                kw = text.text_width(key)
+                text.draw_text(x + OVERLAY_W - PANEL_PAD - kw, oy, key,
+                               TEXT_COL)
+            ty += OVERLAY_ROW_H
+        fw = text.text_width(OVERLAY_FOOTER, SMALL_SIZE)
+        text.draw_text(x + (OVERLAY_W - fw) // 2, ty + 8, OVERLAY_FOOTER,
+                       ACCENT_DIM, SMALL_SIZE)
 
     # -------------------------------------------------------- target bracket
 
