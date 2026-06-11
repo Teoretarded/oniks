@@ -40,7 +40,8 @@ from engine.mesh import Mesh
 from engine.meshdata import make_box, make_cylinder
 from engine.particles import Effects, ParticleRenderer
 from engine.text import TextRenderer
-from game.cameras import CameraRig
+from game.cameras import (LAUNCHER_LOOK_UP, CameraRig, StaticSubject,
+                          next_subject, subject_cycle_order)
 from game.controls import SandboxControls
 from game.hud import HUD
 from game.states import GameState
@@ -228,7 +229,9 @@ class SandboxState(GameState):
         self.profile = "hi-lo"
         self.target_point = None        # float64 (3,) aim point (alt for air)
         self.waypoints: list = []       # (x, z) flown before the target
-        self.followed = None            # missile the cinematic cameras track
+        self.followed = None            # camera subject the cinematic rig
+        #                                 tracks: a missile, a TEL
+        #                                 StaticSubject or a contact entity
         self.map_open = False           # M toggles the tactical map
         self.tactical_map = TacticalMap(self)
         self.active_platform = "bastion"   # TAB toggles bastion <-> s300
@@ -244,6 +247,16 @@ class SandboxState(GameState):
         self._tel_frac = 1.0            # canister elevation 0..1 (armed = up)
 
         self._build_meshes()
+
+        # Orbit/chase subject anchors for the two TELs (Task CAM): aim at
+        # canister mid-height so the orbit cam frames the vehicle, not its
+        # wheels. Persistent objects — the [ / ] cycle matches by identity.
+        self._tel_subjects = {
+            "bastion": StaticSubject(self._tel_pos + _UP * LAUNCHER_LOOK_UP,
+                                     "BASTION TEL"),
+            "s300": StaticSubject(self._sam_tel_pos + _UP * LAUNCHER_LOOK_UP,
+                                  "S-300 TEL"),
+        }
 
     # ------------------------------------------------------------ GL meshes
 
@@ -312,6 +325,32 @@ class SandboxState(GameState):
         track = self.world.contacts.tracks.get(sid) if sid is not None else None
         return track if track is not None and track.get("is_air") else None
 
+    def _selected_entity(self):
+        """The Ship/Aircraft behind the map's selected contact (None when
+        nothing is selected or the entity is gone)."""
+        sid = self.tactical_map.selected_contact
+        track = self.world.contacts.tracks.get(sid) if sid is not None else None
+        if track is None:
+            return None
+        if track.get("is_air"):
+            return next((a for a in self.world.aircraft
+                         if a.aircraft_id == sid), None)
+        return next((s for s in self.world.ships if s.ship_id == sid), None)
+
+    def cycle_camera_subject(self, step: int = 1):
+        """[ / ] (Task CAM): cycle the orbit/chase camera subject through
+        newest missile -> other in-flight missiles -> active TEL ->
+        selected contact's entity, with a smooth rig blend onto each."""
+        order = subject_cycle_order(self.world.missiles,
+                                    self._tel_subjects[self.active_platform],
+                                    self._selected_entity())
+        subj = next_subject(order, self.followed, step)
+        if subj is not None and subj is not self.followed:
+            self.followed = subj
+            self.rig.retarget()
+            self.app.audio.ui_click()
+        return self.followed
+
     def request_launch(self):
         """SPACE, routed by the active platform with target-type validation:
         the Oniks takes ship contacts / surface points, the S-300 takes air
@@ -327,6 +366,7 @@ class SandboxState(GameState):
                               tuple(self.waypoints))
         if m is not None:
             self.followed = m
+            self.rig.retarget()         # smooth swing onto the new round
             # Hot launch t = 0: muzzle fireball + pink-grey cloud + ground
             # wash + the canister cap blown off in chunks (storyboard step 2).
             self.effects.muzzle_blast(m.pos,
@@ -346,6 +386,7 @@ class SandboxState(GameState):
         m = self.world.launch_sam(self.tactical_map.selected_contact)
         if m is not None:                   # None while the tube reloads
             self.followed = m
+            self.rig.retarget()             # smooth swing onto the new round
             # True cold launch t = 0: tube cover shot off + a grey-white gas
             # puff — NO flame until the hang-apex ignition.
             self._launch_puff(m.pos)

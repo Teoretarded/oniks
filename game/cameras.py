@@ -1,8 +1,14 @@
 """Camera controllers: FreeCam (Task 9) plus the cinematic CameraRig suite
-(chase / orbit / target / launcher with smooth mode transitions, Task 17)
-and the launch-event camera shake (Task LC).
+(chase / orbit / target / launcher with smooth mode transitions, Task 17),
+the launch-event camera shake (Task LC) and the player-controlled orbit
+camera with wheel zoom + subject cycling (Task CAM).
 
 Pure numpy state — GL-free, unit-testable headless. All eyes are float64.
+
+Task CAM subject model: chase/orbit/target follow whatever ``update`` is
+handed as the subject — a live missile, a :class:`StaticSubject` anchored
+on a TEL, or a ship/aircraft entity (anything with ``pos``/``vel``). The
+``subject_cycle_order``/``next_subject`` helpers define the [ / ] cycle.
 """
 
 from __future__ import annotations
@@ -30,9 +36,26 @@ CHASE_UP = 10.0            # m above the missile
 CHASE_LOOK_AHEAD = 60.0    # chase look point: missile.pos + vhat * this
 CHASE_SPRING_K = 8.0       # critically-damped spring stiffness (1/s)
 _SPRING_MAX_DT = 1.0 / 120.0   # substep cap keeps explicit Euler accurate
-ORBIT_RADIUS = 60.0        # m horizontal orbit radius around the missile
-ORBIT_RATE = 0.15          # rad/s azimuth advance
-ORBIT_ALT = 18.0           # m eye height above the missile
+ORBIT_RADIUS = 60.0        # m default horizontal orbit radius (sets the
+ORBIT_ALT = 18.0           # default dist/elevation with this eye height)
+
+# Task CAM: player-controlled orbit + wheel zoom. Drags rotate az/el at
+# MOUSE_SENS; the wheel multiplies the spring TARGET by ZOOM_STEP per click
+# (exponential steps) and the sprung distance follows critically damped.
+# The old always-on auto-orbit became a gentle drift that waits for
+# ORBIT_IDLE_DELAY of no player input.
+ORBIT_DIST_MIN = 8.0       # m wheel-zoom floor (reads the model close up)
+ORBIT_DIST_MAX = 600.0     # m wheel-zoom ceiling (whole launch column)
+ORBIT_EL_MIN = math.radians(-5.0)   # just below the horizon
+ORBIT_EL_MAX = math.radians(85.0)   # short of the pole (basis degenerates)
+ORBIT_DRIFT_RATE = 0.05    # rad/s idle auto-drift
+ORBIT_IDLE_DELAY = 5.0     # s of no orbit input before the drift starts
+ORBIT_DEFAULT_DIST = math.hypot(ORBIT_RADIUS, ORBIT_ALT)
+ORBIT_DEFAULT_EL = math.atan2(ORBIT_ALT, ORBIT_RADIUS)
+CHASE_DIST_MIN = 25.0      # m wheel range for the chase follow distance
+CHASE_DIST_MAX = 120.0
+CHASE_DEFAULT_DIST = math.hypot(CHASE_BACK, CHASE_UP)
+ZOOM_STEP = 1.2            # exponential wheel factor per click
 TARGET_BACK = 25.0         # m behind the target (away from incoming missile)
 TARGET_UP = 25.0           # m above the target
 LAUNCHER_DIST = 28.0       # m horizontal eye distance from the TEL
@@ -59,6 +82,19 @@ _LAUNCHER_VIEW_DIR = _LAUNCHER_VIEW_DIR / np.linalg.norm(_LAUNCHER_VIEW_DIR)
 def _unit(v):
     n = float(np.linalg.norm(v))
     return v / n if n > 1e-12 else np.array([0.0, 0.0, 1.0])
+
+
+def _spring_scalar(value, vel, target, dt, k=CHASE_SPRING_K):
+    """Critically-damped scalar spring -> (value, vel): the chase cam's
+    substepped explicit Euler, so a from-rest approach never overshoots."""
+    remaining = dt
+    while remaining > 1e-12:
+        h = min(remaining, _SPRING_MAX_DT)
+        remaining -= h
+        acc = k * k * (target - value) - 2.0 * k * vel
+        vel += acc * h
+        value += vel * h
+    return value, vel
 
 
 def _terrain_height_scalar(x, z) -> float:
@@ -138,10 +174,18 @@ class CameraRig:
         self._blend_t = TRANSITION_TIME          # no transition pending
         self._start_eye = np.zeros(3)
         self._start_fwd = np.array([0.0, 0.0, 1.0])
-        self._orbit_az = 0.0
+        self._orbit_az = 0.0                     # player orbit state (CAM)
+        self._orbit_el = ORBIT_DEFAULT_EL
+        self._orbit_dist = ORBIT_DEFAULT_DIST    # sprung wheel zoom
+        self._orbit_dist_target = ORBIT_DEFAULT_DIST
+        self._orbit_dist_vel = 0.0
+        self._orbit_idle = 0.0                   # s since last orbit input
         self._chase_off = np.zeros(3)            # sprung eye offset (world)
         self._chase_vel = np.zeros(3)
         self._chase_valid = False                # snap spring on (re)entry
+        self._chase_dist = CHASE_DEFAULT_DIST    # sprung follow distance
+        self._chase_dist_target = CHASE_DEFAULT_DIST
+        self._chase_dist_vel = 0.0
         self._shake_amp = 0.0                    # current shake amplitude (m)
         self._shake_t = 0.0                      # wobble clock (s)
         eye, fwd = self._launcher_view()         # sane camera from birth
@@ -177,6 +221,69 @@ class CameraRig:
         """Advance to the next mode in MODES (the C key)."""
         self.set_mode(MODES[(MODES.index(self.mode) + 1) % len(MODES)])
         return self.mode
+
+    def retarget(self) -> None:
+        """Smooth-blend onto the (possibly new) subject's view: called when
+        the player cycles the orbit/chase subject or a launch re-aims the
+        rig (Task CAM QOL — subject swaps must never snap)."""
+        self._start_eye = self.camera.eye.copy()
+        self._start_fwd = self.camera.forward.copy()
+        self._blend_t = 0.0
+        self._chase_valid = False        # chase springs re-snap on arrival
+
+    # ------------------------------------------- player orbit input (CAM)
+
+    @property
+    def orbit_az(self) -> float:
+        return self._orbit_az
+
+    @property
+    def orbit_el(self) -> float:
+        return self._orbit_el
+
+    @property
+    def orbit_dist(self) -> float:
+        """Current sprung orbit distance (m)."""
+        return self._orbit_dist
+
+    @property
+    def orbit_dist_target(self) -> float:
+        return self._orbit_dist_target
+
+    @property
+    def chase_dist(self) -> float:
+        """Current sprung chase follow distance (m)."""
+        return self._chase_dist
+
+    @property
+    def chase_dist_target(self) -> float:
+        return self._chase_dist_target
+
+    def orbit_drag(self, dx_px: float, dy_px: float) -> None:
+        """RMB/LMB drag in orbit mode: rotate around the subject. Drag
+        right swings the eye east of it; drag up raises the eye (pygame's
+        +y is down-screen, hence the sign). Elevation clamps to
+        ORBIT_EL_MIN..MAX; any drag parks the idle drift."""
+        self._orbit_az = math.remainder(
+            self._orbit_az + dx_px * MOUSE_SENS, math.tau)
+        self._orbit_el = float(np.clip(self._orbit_el - dy_px * MOUSE_SENS,
+                                       ORBIT_EL_MIN, ORBIT_EL_MAX))
+        self._orbit_idle = 0.0
+
+    def zoom(self, steps: float) -> None:
+        """Mouse wheel: positive steps zoom IN. Each click multiplies the
+        spring TARGET by ZOOM_STEP (exponential steps); the sprung distance
+        follows critically damped, so there is no overshoot. Orbit mode
+        zooms the orbit distance (8-600 m), chase mode the follow distance
+        (25-120 m); other modes ignore the wheel."""
+        f = ZOOM_STEP ** (-float(steps))
+        if self.mode == "orbit":
+            self._orbit_dist_target = float(np.clip(
+                self._orbit_dist_target * f, ORBIT_DIST_MIN, ORBIT_DIST_MAX))
+            self._orbit_idle = 0.0
+        elif self.mode == "chase":
+            self._chase_dist_target = float(np.clip(
+                self._chase_dist_target * f, CHASE_DIST_MIN, CHASE_DIST_MAX))
 
     # ----------------------------------------------------- shake (Task LC)
 
@@ -231,7 +338,8 @@ class CameraRig:
     def update(self, dt: float, missile=None, target_pos=None) -> None:
         """Advance the rig by real (unscaled) dt and write the camera.
 
-        missile: the followed Missile (pos/vel float64) or None.
+        missile: the followed camera subject — a Missile, a StaticSubject
+        (TEL) or a ship/aircraft entity (pos/vel float64) — or None.
         target_pos: float64 (3,) the missile's victim for target mode; if
         None it is derived from missile.locked_ship / missile.target_point.
         """
@@ -273,7 +381,18 @@ class CameraRig:
     def _chase_view(self, dt, m):
         speed = float(np.linalg.norm(m.vel))
         vhat = m.vel / speed if speed > 1e-9 else np.array([0.0, 0.0, 1.0])
-        desired_off = -vhat * CHASE_BACK + _UP * CHASE_UP
+        # Wheel-zoomed follow distance (Task CAM): the sprung scalar scales
+        # the stock CHASE_BACK/CHASE_UP offset, so the default distance
+        # reproduces the original framing bit-for-bit (scale = 1).
+        if self._chase_valid:
+            self._chase_dist, self._chase_dist_vel = _spring_scalar(
+                self._chase_dist, self._chase_dist_vel,
+                self._chase_dist_target, dt)
+        else:
+            self._chase_dist = self._chase_dist_target
+            self._chase_dist_vel = 0.0
+        desired_off = ((-vhat * CHASE_BACK + _UP * CHASE_UP)
+                       * (self._chase_dist / CHASE_DEFAULT_DIST))
         if not self._chase_valid:
             self._chase_off = desired_off.copy()
             self._chase_vel = np.zeros(3)
@@ -294,9 +413,18 @@ class CameraRig:
         return eye, _unit(look - eye)
 
     def _orbit_view(self, dt, m):
-        self._orbit_az += ORBIT_RATE * dt
-        off = np.array([np.sin(self._orbit_az) * ORBIT_RADIUS, ORBIT_ALT,
-                        np.cos(self._orbit_az) * ORBIT_RADIUS])
+        """Player-controlled orbit (Task CAM): az/el from drags, distance
+        from the sprung wheel zoom, idle drift after ORBIT_IDLE_DELAY."""
+        self._orbit_idle += dt
+        if self._orbit_idle >= ORBIT_IDLE_DELAY:
+            self._orbit_az += ORBIT_DRIFT_RATE * dt
+        self._orbit_dist, self._orbit_dist_vel = _spring_scalar(
+            self._orbit_dist, self._orbit_dist_vel,
+            self._orbit_dist_target, dt)
+        ce = math.cos(self._orbit_el)
+        off = self._orbit_dist * np.array(
+            [math.sin(self._orbit_az) * ce, math.sin(self._orbit_el),
+             math.cos(self._orbit_az) * ce])
         eye = self._clamp(np.asarray(m.pos, dtype=np.float64) + off)
         return eye, _unit(np.asarray(m.pos, dtype=np.float64) - eye)
 
@@ -339,3 +467,43 @@ class CameraRig:
         if eye[1] < floor:
             eye[1] = floor
         return eye
+
+
+# ------------------------------------------- camera subjects (Task CAM)
+
+class StaticSubject:
+    """Fixed-point camera subject (a TEL): satisfies the same pos/vel
+    contract as a missile, is never 'dead' to the rig, and carries no
+    ``phase_label`` so the HUD keeps showing the launcher block."""
+
+    __slots__ = ("pos", "vel", "label")
+
+    def __init__(self, pos, label: str = ""):
+        self.pos = np.asarray(pos, dtype=np.float64).copy()
+        self.vel = np.zeros(3)
+        self.label = label
+
+
+def subject_cycle_order(missiles, tel_subject=None, contact_entity=None):
+    """The [ / ] orbit/chase subject cycle: newest missile first, then the
+    other in-flight missiles newest -> oldest, then the active TEL, then
+    the selected contact's entity (when still alive). Pure + GL-free."""
+    order = [m for m in reversed(list(missiles)) if CameraRig._in_flight(m)]
+    if tel_subject is not None:
+        order.append(tel_subject)
+    if contact_entity is not None and CameraRig._in_flight(contact_entity):
+        order.append(contact_entity)
+    return order
+
+
+def next_subject(order, current, step: int = 1):
+    """``current``'s cycle neighbor ``step`` places along (wraps both
+    ways). A subject that left the cycle (died) or was never set lands on
+    the first candidate; an empty cycle returns None."""
+    if not order:
+        return None
+    try:
+        i = order.index(current)
+    except ValueError:
+        return order[0]
+    return order[(i + step) % len(order)]

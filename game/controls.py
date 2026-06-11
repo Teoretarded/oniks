@@ -3,7 +3,10 @@
     ESC menu | M map | C camera | TAB platform (Bastion <-> S-300)
     SPACE launch | 1/2 profile hi-lo/lo-lo
     P pause | N frame-step | - / = time accel down/up (1,2,4,8,16) | F2 screenshot
+    [ / ] camera subject cycle (missiles -> active TEL -> selected contact)
     free cam: WASD QE, mouse look (RMB drag), SHIFT fast, CTRL+SHIFT very fast
+    orbit cam: RMB/LMB drag rotates around the subject, wheel zooms 8-600 m
+    chase cam: wheel adjusts the follow distance 25-120 m
     map (while open): LMB target, RMB waypoint, X clear waypoints,
     wheel zoom at cursor, MMB drag / arrow keys pan
 
@@ -77,6 +80,7 @@ class SandboxControls:
         self.sandbox = sandbox
         self.free = FreeCamControls(sandbox.rig.freecam)
         self._scale_idx = 0
+        self._orbit_drag = False        # RMB/LMB orbit drag live (Task CAM)
 
     @property
     def requested_scale(self) -> float:
@@ -88,6 +92,12 @@ class SandboxControls:
         consumed = sandbox.map_open and sandbox.tactical_map.handle_event(ev)
         if not consumed and ev.type == pygame.KEYDOWN:
             self._handle_key(ev.key)
+        # Orbit drags die on ANY button-up, even one the map consumed, so
+        # opening the map mid-drag can never wedge the rotate state.
+        if ev.type == pygame.MOUSEBUTTONUP and ev.button in (1, 3):
+            self._orbit_drag = False
+        if not consumed and not sandbox.map_open:
+            self._handle_camera_mouse(ev)
         # Forward to the free cam while in free mode — and also while a
         # mouse-look drag is live, so leaving free mode (or opening the map)
         # mid-drag still sees the button-up and releases the grab.
@@ -95,9 +105,23 @@ class SandboxControls:
                                   and sandbox.rig.mode == "free"):
             self.free.handle_event(ev)      # RMB mouse-look grab
 
+    def _handle_camera_mouse(self, ev) -> None:
+        """Task CAM mouse layer: wheel zoom (orbit/chase ranges live in
+        game/cameras.py) and the orbit-mode RMB/LMB rotate drag."""
+        rig = self.sandbox.rig
+        if ev.type == pygame.MOUSEWHEEL:
+            rig.zoom(ev.y)
+        elif (ev.type == pygame.MOUSEBUTTONDOWN and ev.button in (1, 3)
+                and rig.mode == "orbit"):
+            self._orbit_drag = True
+        elif (ev.type == pygame.MOUSEMOTION and self._orbit_drag
+                and rig.mode == "orbit"):
+            rig.orbit_drag(ev.rel[0], ev.rel[1])
+
     def release_mouse(self) -> None:
-        """Drop any live mouse-look grab (sandbox.leave safety)."""
+        """Drop any live mouse-look/orbit drag (sandbox.leave safety)."""
         self.free.release()
+        self._orbit_drag = False
 
     def _handle_key(self, key) -> None:
         sandbox = self.sandbox
@@ -122,6 +146,10 @@ class SandboxControls:
         elif key == pygame.K_n:
             if app.paused:
                 app.frame_step = True       # exactly one 120 Hz step
+        elif key == pygame.K_LEFTBRACKET:
+            sandbox.cycle_camera_subject(-1)
+        elif key == pygame.K_RIGHTBRACKET:
+            sandbox.cycle_camera_subject(+1)
         elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
             self._scale_idx = max(0, self._scale_idx - 1)
         elif key in (pygame.K_EQUALS, pygame.K_KP_PLUS):

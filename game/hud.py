@@ -114,7 +114,11 @@ class HUD:
     def draw(self, sandbox, w: int, h: int) -> None:
         """Queue and flush the full overlay for this frame."""
         m = sandbox.followed
-        if m is not None and not getattr(m, "alive", False):
+        # The camera subject may be a TEL StaticSubject or a ship/aircraft
+        # entity (Task CAM [ / ] cycling): only a live missile (the only
+        # subject kind with a phase_label) gets the flight block.
+        if m is not None and not (getattr(m, "alive", False)
+                                  and hasattr(m, "phase_label")):
             m = None
         if m is not None:
             self._flight_block(sandbox, m)

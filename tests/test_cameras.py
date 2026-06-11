@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 
 from engine.camera import Camera
-from game.cameras import MODES, TRANSITION_TIME, CameraRig
+from game.cameras import (CHASE_DIST_MAX, CHASE_DIST_MIN, MODES, MOUSE_SENS,
+                          ORBIT_DIST_MAX, ORBIT_DIST_MIN, ORBIT_DRIFT_RATE,
+                          ORBIT_IDLE_DELAY, TRANSITION_TIME, ZOOM_STEP,
+                          CameraRig, StaticSubject, next_subject,
+                          subject_cycle_order)
 from world.generation import BASE_POS
 
 DT = 1.0 / 60.0
@@ -163,6 +167,195 @@ def test_modes_list_and_cycle_order():
     assert rig.mode == "launcher"
     seen = [rig.cycle_mode() for _ in range(5)]
     assert seen == ["free", "chase", "orbit", "target", "launcher"]
+
+
+# ------------------------------- Task CAM: player orbit + zoom + subjects
+
+class FakeEntity:
+    """Ship/aircraft stand-in: pos/vel + alive flag, no phase_label."""
+
+    def __init__(self, pos, alive=True):
+        self.pos = np.asarray(pos, dtype=np.float64)
+        self.vel = np.zeros(3)
+        self.alive = alive
+
+
+def settled_orbit_rig(subject, seconds=TRANSITION_TIME + 0.2):
+    """An orbit-mode rig blended onto ``subject`` and settled."""
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.set_mode("orbit")
+    for _ in range(int(seconds / DT)):
+        rig.update(DT, missile=subject)
+    return rig
+
+
+def test_orbit_drag_maps_pixels_to_az_el():
+    """Drag deltas map px -> radians at MOUSE_SENS (drag up raises the eye)
+    and the rendered eye sits exactly on the az/el/dist spherical offset."""
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.set_mode("orbit")
+    el0 = rig.orbit_el
+    rig.orbit_drag(120.0, 0.0)
+    assert rig.orbit_az == pytest.approx(120.0 * MOUSE_SENS)
+    rig.orbit_drag(0.0, -80.0)                   # drag UP
+    assert rig.orbit_el == pytest.approx(el0 + 80.0 * MOUSE_SENS)
+    m = FakeMissile([0.0, 500.0, 0.0], [0.0, 0.0, 200.0])
+    for _ in range(int((TRANSITION_TIME + 0.2) / DT)):
+        rig.update(DT, missile=m)
+    off = rig.camera.eye - m.pos
+    d = float(np.linalg.norm(off))
+    assert d == pytest.approx(rig.orbit_dist)
+    assert off[1] == pytest.approx(d * np.sin(rig.orbit_el))
+    assert float(np.arctan2(off[0], off[2])) == pytest.approx(rig.orbit_az)
+
+
+def test_orbit_elevation_clamps_minus5_to_85_deg():
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.set_mode("orbit")
+    rig.orbit_drag(0.0, -1e6)                    # crank all the way up
+    assert rig.orbit_el == pytest.approx(np.radians(85.0))
+    rig.orbit_drag(0.0, 1e6)                     # ... and all the way down
+    assert rig.orbit_el == pytest.approx(np.radians(-5.0))
+
+
+def test_orbit_zoom_steps_are_exponential_and_clamped():
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.set_mode("orbit")
+    d0 = rig.orbit_dist_target
+    rig.zoom(1)                                  # one click IN
+    assert rig.orbit_dist_target == pytest.approx(d0 / ZOOM_STEP)
+    rig.zoom(-1)                                 # one click back OUT
+    assert rig.orbit_dist_target == pytest.approx(d0)
+    rig.zoom(200)
+    assert rig.orbit_dist_target == ORBIT_DIST_MIN
+    rig.zoom(-500)
+    assert rig.orbit_dist_target == ORBIT_DIST_MAX
+    assert (ORBIT_DIST_MIN, ORBIT_DIST_MAX) == (8.0, 600.0)
+
+
+def test_orbit_zoom_spring_converges_without_overshoot():
+    m = FakeMissile([0.0, 500.0, 0.0], [0.0, 0.0, 0.0])
+    rig = settled_orbit_rig(m)
+    rig.zoom(6)                                  # zoom hard IN
+    target = rig.orbit_dist_target
+    assert target < rig.orbit_dist - 20.0        # a real distance to cover
+    prev = rig.orbit_dist
+    for _ in range(int(3.0 / DT)):
+        rig.update(DT, missile=m)
+        d = rig.orbit_dist
+        assert d <= prev + 1e-9                  # monotonic approach ...
+        assert d >= target - 1e-6                # ... with NO overshoot
+        prev = d
+    assert prev == pytest.approx(target, abs=0.01)
+    assert float(np.linalg.norm(rig.camera.eye - m.pos)) == pytest.approx(prev)
+
+
+def test_chase_wheel_adjusts_follow_distance_with_clamps():
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.set_mode("chase")
+    m = FakeMissile([0.0, 400.0, 0.0], [0.0, 0.0, 250.0])
+
+    def fly(seconds):
+        for _ in range(int(seconds / DT)):
+            m.pos = m.pos + m.vel * DT
+            rig.update(DT, missile=m)
+
+    fly(TRANSITION_TIME + 1.0)                   # blend + springs settled
+    assert (float(np.linalg.norm(rig.camera.eye - m.pos))
+            == pytest.approx(np.hypot(38.0, 10.0), abs=0.01))
+    rig.zoom(-100)                               # way out: clamps at 120 m
+    assert rig.chase_dist_target == CHASE_DIST_MAX
+    fly(3.0)
+    assert (float(np.linalg.norm(rig.camera.eye - m.pos))
+            == pytest.approx(CHASE_DIST_MAX, abs=0.05))
+    rig.zoom(200)                                # way in: clamps at 25 m
+    assert rig.chase_dist_target == CHASE_DIST_MIN
+    fly(3.0)
+    assert (float(np.linalg.norm(rig.camera.eye - m.pos))
+            == pytest.approx(CHASE_DIST_MIN, abs=0.05))
+
+
+def test_orbit_drift_only_after_idle_timeout():
+    """No auto-drift for ORBIT_IDLE_DELAY after player input; then the
+    azimuth advances at ORBIT_DRIFT_RATE. Zoom input parks it again."""
+    tel = StaticSubject([0.0, 50.0, 0.0], "TEL")
+    rig = settled_orbit_rig(tel)
+    rig.orbit_drag(10.0, 0.0)                    # player input: drift parked
+    az0 = rig.orbit_az
+    for _ in range(int(4.0 / DT)):               # 4.0 s idle: still parked
+        rig.update(DT, missile=tel)
+    assert rig.orbit_az == az0
+    for _ in range(int(4.0 / DT)):               # 8.0 s idle: 3 s of drift
+        rig.update(DT, missile=tel)
+    assert rig.orbit_az - az0 == pytest.approx(
+        ORBIT_DRIFT_RATE * (8.0 - ORBIT_IDLE_DELAY),
+        abs=2.0 * ORBIT_DRIFT_RATE * DT)
+    rig.zoom(1)                                  # zoom is input too
+    az1 = rig.orbit_az
+    for _ in range(int(4.0 / DT)):
+        rig.update(DT, missile=tel)
+    assert rig.orbit_az == az1
+
+
+def test_zoom_ignored_outside_orbit_and_chase():
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)   # launcher mode
+    o0, c0 = rig.orbit_dist_target, rig.chase_dist_target
+    rig.zoom(5)
+    assert rig.orbit_dist_target == o0
+    assert rig.chase_dist_target == c0
+
+
+def test_subject_cycle_order_and_wrap():
+    """[ / ] order: newest missile -> other in-flight missiles -> active
+    TEL -> selected contact's entity; wraps both ways; dead entries drop."""
+    m1 = FakeMissile([0.0, 100.0, 0.0], [0.0, 0.0, 200.0])      # older
+    dead = FakeMissile([0.0, 100.0, 0.0], [0.0, 0.0, 200.0])
+    dead.alive = False
+    m2 = FakeMissile([0.0, 200.0, 0.0], [0.0, 0.0, 200.0])      # newest
+    tel = StaticSubject([10.0, 0.0, 20.0], "TEL")
+    ship = FakeEntity([500.0, 0.0, 9_000.0])
+    order = subject_cycle_order([m1, dead, m2], tel, ship)
+    assert order == [m2, m1, tel, ship]
+    assert next_subject(order, m2, +1) is m1
+    assert next_subject(order, m1, +1) is tel
+    assert next_subject(order, tel, +1) is ship
+    assert next_subject(order, ship, +1) is m2               # wraps forward
+    assert next_subject(order, m2, -1) is ship               # wraps back
+    assert next_subject(order, None, +1) is m2               # nothing yet
+    assert next_subject(order, dead, +1) is m2               # gone subject
+    assert next_subject([], None, +1) is None
+    sunk = FakeEntity([0.0, 0.0, 0.0], alive=False)
+    assert subject_cycle_order([], tel, sunk) == [tel]
+
+
+def test_orbit_static_subject_and_smooth_retarget():
+    """The orbit cam works on a fixed TEL subject, and retarget() blends
+    to a new subject instead of snapping."""
+    tel = StaticSubject([0.0, 50.0, 0.0], "TEL")
+    rig = settled_orbit_rig(tel)
+    assert (float(np.linalg.norm(rig.camera.eye - tel.pos))
+            == pytest.approx(rig.orbit_dist))
+    eye0 = rig.camera.eye.copy()
+    m = FakeMissile([4_000.0, 600.0, 2_000.0], [0.0, 0.0, 0.0])
+    ce = np.cos(rig.orbit_el)                    # the new subject's orbit eye
+    expected = m.pos + rig.orbit_dist * np.array(
+        [np.sin(rig.orbit_az) * ce, np.sin(rig.orbit_el),
+         np.cos(rig.orbit_az) * ce])
+    rig.retarget()
+    rig.update(DT, missile=m)                    # one frame: barely moved
+    assert float(np.linalg.norm(rig.camera.eye - eye0)) < 60.0
+    prev = float(np.linalg.norm(rig.camera.eye - expected))
+    for _ in range(int(1.0 / DT)):               # > TRANSITION_TIME
+        rig.update(DT, missile=m)
+        d = float(np.linalg.norm(rig.camera.eye - expected))
+        assert d <= prev + 1e-9                  # monotonic approach
+        prev = d
+    assert np.allclose(rig.camera.eye, expected, atol=1e-9)
+    assert (float(np.linalg.norm(rig.camera.eye - m.pos))
+            == pytest.approx(rig.orbit_dist))
+    to_m = m.pos - rig.camera.eye
+    to_m /= np.linalg.norm(to_m)
+    assert float(to_m @ rig.camera.forward) > 0.999
 
 
 # ------------------------------------------------- Task LC: camera shake
