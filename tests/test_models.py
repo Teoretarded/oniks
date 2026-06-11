@@ -209,8 +209,8 @@ def test_s300_tel_fits_box_when_erect():
     p = md.vertices[:, 0:3]
     ext = p.max(axis=0) - p.min(axis=0)
     assert ext[0] <= 4.0           # width (east-west)
-    assert 8.0 <= ext[1] <= 10.0   # vertical 8.2 m tubes raised
-    assert ext[2] <= 13.8          # ~13 m chassis (+ tube overhang)
+    assert 9.0 <= ext[1] <= 10.0   # Task OM2: erect height 9-10 m
+    assert ext[2] <= 14.5          # ~13 m chassis + the rear tube overhang
     assert p[:, 1].min() >= -0.01  # nothing below the ground plane
 
 
@@ -230,6 +230,54 @@ def test_s300_tel_four_tube_block():
     # 2 x 2 block: tubes on both sides of x = 0 and at two z stations
     assert (up[:, 0] > 0.3).any() and (up[:, 0] < -0.3).any()
     assert (up[:, 2].max() - up[:, 2].min()) >= 2.2
+
+
+# --- Task OM2: 5P85 TEL proportions per s300_reference.md ---------------------
+
+
+def test_s300_tel_rear_block_towers():
+    """Signature 1: erect tube tops at ~9-9.5 m, the whole block at the rear
+    (aft of the rear axles); stowed tubes overhang the tail."""
+    md = build_s300_tel(elevation_deg=90.0)
+    tube = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["tube_grey"],
+                             atol=1e-4), axis=1)
+    assert 8.9 <= md.vertices[tube, 1].max() <= 9.6
+    up = md.vertices[tube & (md.vertices[:, 1] > 5.0)]
+    assert up[:, 2].max() < -4.0            # block fully on the rear overhang
+    stowed = build_s300_tel(elevation_deg=0.0)
+    tube_s = np.all(np.isclose(stowed.vertices[:, 6:9], PALETTE["tube_grey"],
+                               atol=1e-4), axis=1)
+    assert stowed.vertices[tube_s, 2].min() <= -6.6   # past the 13 m frame
+
+
+def test_s300_tel_clamp_rings():
+    """Signature 4: 3-4 circumferential clamp rings per tube, spread along
+    the barrel (distinct height bands when erect)."""
+    md = build_s300_tel(elevation_deg=90.0)
+    ring = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["tube_ring"],
+                             atol=1e-4), axis=1)
+    assert ring.any()
+    ys = md.vertices[ring, 1]
+    assert ys.max() - ys.min() >= 4.0       # spread along the 8 m tube
+    bands = np.unique(np.round(ys / 0.5))   # >= 3 distinct ring stations
+    assert len(bands) >= 3
+
+
+def test_s300_tel_dome_caps_and_f3s_cabin():
+    """Signatures 7/10: black dome bottom caps hanging just off the ground
+    when erect; boxy F3S electronics cabin (cab-tall) behind the cab."""
+    md = build_s300_tel(elevation_deg=90.0)
+    dome = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["exhaust_ring"],
+                             atol=1e-4), axis=1)
+    low = md.vertices[dome & (md.vertices[:, 1] < 1.2)]
+    assert len(low)
+    assert 0.3 <= low[:, 1].min() <= 1.0    # domes hang just off the ground
+    green = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["s300_green"],
+                              atol=1e-4), axis=1)
+    f3s = md.vertices[green & (md.vertices[:, 2] > 1.0)
+                      & (md.vertices[:, 2] < 3.85)]
+    assert len(f3s)
+    assert f3s[:, 1].max() >= 3.2           # cabin nearly as tall as the cab
 
 
 def test_aircraft_dimensions():

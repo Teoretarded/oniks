@@ -374,6 +374,27 @@ def _scene_oniks_folded(s) -> None:
     _aim(s, c + np.array([5.2, 1.0, 6.8]), c + np.array([0.0, 0.0, 2.4]))
 
 
+def _scene_s300_tel_quarter(s) -> None:
+    """Erect 5P85 from the rear quarter: the 2x2 block towering ~9 m on the
+    rear overhang, clamp rings, dome caps (Slovak_S300PS_5V55R composition)."""
+    _fly(s, 2.0)
+    tel = s._sam_tel_pos
+    _aim(s, tel + np.array([14.0, 2.5, -13.0]), tel + np.array([-1.0, 4.2, -2.5]))
+
+
+def _scene_s300_tel_stowed(s) -> None:
+    """A stowed 5P85 staged beside the pad: tubes forward over the deck,
+    mouths behind the F3S cabin, tails overhanging (Kyiv 2021 composition)."""
+    _fly(s, 2.0)
+    from models.s300 import build_s300_tel
+    tel = s._sam_tel_pos
+    x, z = float(tel[0] - 28.0), float(tel[2] + 8.0)
+    y = max(float(s.world.terrain_height_at(x, z)), 0.0)
+    pos = np.array([x, y, z])
+    _add_draw(s, build_s300_tel(elevation_deg=0.0), pos)
+    _aim(s, pos + np.array([11.0, 2.0, 10.0]), pos + np.array([0.0, 2.3, -0.5]))
+
+
 # --- models showcase: every vehicle/weapon model on a flat concrete pad ----
 # The pad is a quay just offshore (water ~50 m deep, home cliffs as backdrop).
 # Historically it ALSO dodged the pre-Task-16b vertex-log-depth artifact on
@@ -454,6 +475,8 @@ SCENES = {
     "oniks_side": _scene_oniks_side,
     "oniks_rear": _scene_oniks_rear,
     "oniks_folded": _scene_oniks_folded,
+    "s300_tel_quarter": _scene_s300_tel_quarter,
+    "s300_tel_stowed": _scene_s300_tel_stowed,
 }
 # Flight scenes advance the sim themselves to a precise moment, so shoot()
 # must not add its own wave-phase steps on top. The OM2 close-ups stage
@@ -466,7 +489,8 @@ SCENE_STEPS = {"launch": 0, "cruise": 0, "terminal": 0, "hud": 0, "map": 0,
                "s300_launch_t2": 0, "s300_launch_t3": 0,
                "s300_intercept": 0, "aircraft_patrol": 0,
                "oniks_front": SIM_STEPS, "oniks_side": SIM_STEPS,
-               "oniks_rear": SIM_STEPS, "oniks_folded": SIM_STEPS}
+               "oniks_rear": SIM_STEPS, "oniks_folded": SIM_STEPS,
+               "s300_tel_quarter": SIM_STEPS, "s300_tel_stowed": SIM_STEPS}
 MODEL_SCENES = ("models_front", "models_side", "models_high",
                 "models_fleet_side", "models_fleet_quarter", "models_fleet_high",
                 "models_shore_front", "models_shore_harbor", "models_shore_high")
