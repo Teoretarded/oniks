@@ -29,6 +29,7 @@ or double-click `run_game.bat`.
 | M | tactical map |
 | LMB / RMB (map) | set target / add waypoint |
 | X (map) | clear waypoints |
+| wheel / MMB-drag / arrows (map) | zoom at cursor / pan |
 | 1 / 2 | profile hi-lo / lo-lo |
 | SPACE | launch |
 | C | cycle camera (chase/orbit/target/launcher/free) |
