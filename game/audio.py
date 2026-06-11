@@ -95,9 +95,29 @@ UI_CLICK_DECAY = 70.0
 UI_CLICK_ATTACK_S = 0.002      # linear ramp-in avoids a start pop
 UI_CLICK_PEAK = 0.6
 
+# Task LC launch cinematics: the Oniks cap 'crack' (nose-cap pull-away
+# motors) and the full-thrust 'slam' (high-thrust mode lighting — a deep
+# detonation rolling into a crackling tear).
+CAP_CRACK_DUR_S = 0.30
+CAP_CRACK_BAND_HZ = (900.0, 3_500.0)   # bandpassed snap
+CAP_CRACK_DECAY = 18.0                 # very fast transient
+CAP_CRACK_ATTACK_S = 0.002
+CAP_CRACK_PEAK = 0.85
+
+SLAM_DUR_S = 2.4
+SLAM_SINE_HZ = 36.0            # deeper than the booms' 40 Hz
+SLAM_SINE_DECAY = 1.5
+SLAM_NOISE_FC_HZ = 520.0       # mid burst: the body of the slam
+SLAM_NOISE_DECAY = 2.2
+SLAM_NOISE_MIX = 1.05
+SLAM_CRACKLE_FC_HZ = 2_600.0   # sparse crackle riding the tail
+SLAM_CRACKLE_DECAY = 1.1
+SLAM_CRACKLE_MIX = 0.22
+
 # Fixed synthesis seeds: the cached wav files are reproducible.
 _SEEDS = {"launch": 101, "booster": 102, "cruise": 103,
-          "boom_far": 104, "boom_near": 105, "splash": 106}
+          "boom_far": 104, "boom_near": 105, "splash": 106,
+          "cap_crack": 107, "slam": 108}
 
 
 # ------------------------------------------------------------ DSP helpers
@@ -232,10 +252,38 @@ def synth_ui_click() -> np.ndarray:
     return _normalize(x, UI_CLICK_PEAK)
 
 
+def synth_cap_crack() -> np.ndarray:
+    """Oniks nose-cap pull-away: a sharp bandpassed CRACK over the roar."""
+    rng = np.random.default_rng(_SEEDS["cap_crack"])
+    t = _time(CAP_CRACK_DUR_S)
+    x = _unit(bandpass(rng.standard_normal(len(t)),
+                       CAP_CRACK_BAND_HZ[0], CAP_CRACK_BAND_HZ[1]))
+    x *= np.exp(-t * CAP_CRACK_DECAY)
+    x *= np.clip(t / CAP_CRACK_ATTACK_S, 0.0, 1.0)   # popless attack
+    return _normalize(x, CAP_CRACK_PEAK)
+
+
+def synth_slam() -> np.ndarray:
+    """High-thrust ignition: a second, deeper detonation rolling into a
+    crackling Saturn-style tear (36 Hz rumble + mid burst + crackle tail)."""
+    rng = np.random.default_rng(_SEEDS["slam"])
+    t = _time(SLAM_DUR_S)
+    x = (np.sin(2.0 * np.pi * SLAM_SINE_HZ * t)
+         * np.exp(-t * SLAM_SINE_DECAY))
+    burst = _unit(one_pole_lowpass(brown_noise(rng, len(t)),
+                                   SLAM_NOISE_FC_HZ))
+    x += SLAM_NOISE_MIX * burst * np.exp(-t * SLAM_NOISE_DECAY)
+    crackle = rng.standard_normal(len(t))
+    crackle = _unit(crackle - one_pole_lowpass(crackle, SLAM_CRACKLE_FC_HZ))
+    x += SLAM_CRACKLE_MIX * crackle * np.exp(-t * SLAM_CRACKLE_DECAY)
+    return _normalize(x)
+
+
 SYNTHS = {"launch": synth_launch, "booster": synth_booster,
           "cruise": synth_cruise, "boom_far": synth_boom_far,
           "boom_near": synth_boom_near, "splash": synth_splash,
-          "ui_click": synth_ui_click}
+          "ui_click": synth_ui_click, "cap_crack": synth_cap_crack,
+          "slam": synth_slam}
 
 
 # ------------------------------------------------------------- wav cache

@@ -163,3 +163,58 @@ def test_modes_list_and_cycle_order():
     assert rig.mode == "launcher"
     seen = [rig.cycle_mode() for _ in range(5)]
     assert seen == ["free", "chase", "orbit", "target", "launcher"]
+
+
+# ------------------------------------------------- Task LC: camera shake
+
+def test_shake_amplitude_decays_exponentially():
+    import numpy as _np
+    from game.cameras import SHAKE_DECAY
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.update(DT)                               # settle the launcher view
+    rig.kick_shake(1.0)
+    assert rig.shake_amp == pytest.approx(1.0)
+    rig.update(DT)
+    assert rig.shake_amp == pytest.approx(_np.exp(-SHAKE_DECAY * DT))
+    for _ in range(int(1.0 / DT)):
+        rig.update(DT)
+    assert rig.shake_amp == pytest.approx(
+        _np.exp(-SHAKE_DECAY * (1.0 + DT)), rel=1e-6)
+
+
+def test_shake_perturbs_eye_then_settles():
+    ref = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    for r in (ref, rig):
+        r.update(DT)
+    rig.kick_shake(1.0)
+    moved = 0.0
+    for _ in range(int(0.5 / DT)):
+        ref.update(DT)
+        rig.update(DT)
+        d = float(np.linalg.norm(rig.camera.eye - ref.camera.eye))
+        moved = max(moved, d)
+        assert d <= rig.shake_amp * np.sqrt(3.0) + 1e-9   # offset bounded
+    assert moved > 0.05                          # the shake actually shook
+    for _ in range(int(6.0 / DT)):               # ... and dies out
+        rig.update(DT)
+    assert rig.shake_amp == 0.0
+    rig.update(DT)
+    ref.update(DT)
+    assert np.allclose(rig.camera.eye, ref.camera.eye)
+
+
+def test_shake_distance_gate_2km():
+    from game.cameras import SHAKE_RANGE
+    assert SHAKE_RANGE == 2_000.0
+    rig = CameraRig(Camera(), terrain_height_fn=ocean)
+    rig.update(DT)
+    eye = rig.camera.eye.copy()
+    far = eye + np.array([2_500.0, 0.0, 0.0])
+    rig.kick_shake(1.0, pos=far)                 # beyond range: ignored
+    assert rig.shake_amp == 0.0
+    near = eye + np.array([1_000.0, 0.0, 0.0])
+    rig.kick_shake(1.0, pos=near)                # linear falloff to range
+    assert rig.shake_amp == pytest.approx(0.5, abs=0.01)
+    rig.kick_shake(0.2, pos=near)                # weaker kick never reduces
+    assert rig.shake_amp == pytest.approx(0.5, abs=0.01)

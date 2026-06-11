@@ -40,7 +40,30 @@ EXPECTED = [
     ("boom_near", audio.BOOM_NEAR_DUR_S,  audio.PEAK_NORM),
     ("splash",    audio.SPLASH_DUR_S,     audio.SPLASH_PEAK),
     ("ui_click",  audio.UI_CLICK_DUR_S,   audio.UI_CLICK_PEAK),
+    # Task LC launch cinematics
+    ("cap_crack", audio.CAP_CRACK_DUR_S,  audio.CAP_CRACK_PEAK),
+    ("slam",      audio.SLAM_DUR_S,       audio.PEAK_NORM),
 ]
+
+
+def test_cap_crack_is_short_and_sharp():
+    """The cap 'crack' is a sharp transient: short, with its energy packed
+    into the first third of the waveform."""
+    x = audio.SYNTHS["cap_crack"]()
+    assert audio.CAP_CRACK_DUR_S <= 0.5
+    e = x * x
+    third = len(e) // 3
+    assert e[:third].sum() > 0.7 * e.sum()
+
+
+def test_slam_has_deep_sustained_tail():
+    """The full-thrust slam rolls longer than the cap crack and keeps
+    meaningful energy past the first second (the rolling tear)."""
+    x = audio.SYNTHS["slam"]()
+    assert audio.SLAM_DUR_S >= 1.5
+    fs = audio.SAMPLE_RATE
+    tail = x[fs:]
+    assert np.abs(tail).max() > 0.05
 
 
 def test_every_synth_listed_once():

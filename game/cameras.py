@@ -1,10 +1,13 @@
 """Camera controllers: FreeCam (Task 9) plus the cinematic CameraRig suite
-(chase / orbit / target / launcher with smooth mode transitions, Task 17).
+(chase / orbit / target / launcher with smooth mode transitions, Task 17)
+and the launch-event camera shake (Task LC).
 
 Pure numpy state — GL-free, unit-testable headless. All eyes are float64.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -36,6 +39,16 @@ LAUNCHER_DIST = 28.0       # m horizontal eye distance from the TEL
 LAUNCHER_UP = 9.0          # m eye height above the TEL base
 LAUNCHER_LOOK_UP = 4.5     # aim at canister mid-height on the TEL
 GROUND_CLEARANCE = 2.0     # eye.y >= terrain+2 and >= 2 above water (y=0)
+
+# Camera shake (Task LC): small eye perturbation kicked by ignition events
+# within SHAKE_RANGE of the camera (linear falloff to zero at the range).
+# Amplitude decays exponentially; the offset wobbles on three
+# incommensurate frequencies so it never reads as a loop.
+SHAKE_RANGE = 2_000.0      # m: events farther than this do not shake
+SHAKE_DECAY = 1.9          # 1/s exponential amplitude decay (~0.36 s half-life)
+SHAKE_FREQS = (31.0, 24.7, 19.3)   # rad/s per axis
+SHAKE_PHASES = (0.0, 1.7, 3.9)
+SHAKE_FLOOR = 1e-4         # amplitude below this snaps to exactly zero
 
 # Launcher view sits SE of the TEL looking NW: canister in 3/4 profile with
 # the ocean (launch direction, +Z) behind it.
@@ -129,6 +142,8 @@ class CameraRig:
         self._chase_off = np.zeros(3)            # sprung eye offset (world)
         self._chase_vel = np.zeros(3)
         self._chase_valid = False                # snap spring on (re)entry
+        self._shake_amp = 0.0                    # current shake amplitude (m)
+        self._shake_t = 0.0                      # wobble clock (s)
         eye, fwd = self._launcher_view()         # sane camera from birth
         self.camera.eye = eye.copy()
         self.camera.set_orientation(fwd)
@@ -163,6 +178,42 @@ class CameraRig:
         self.set_mode(MODES[(MODES.index(self.mode) + 1) % len(MODES)])
         return self.mode
 
+    # ----------------------------------------------------- shake (Task LC)
+
+    @property
+    def shake_amp(self) -> float:
+        """Current shake amplitude in meters (testing/diagnostics)."""
+        return self._shake_amp
+
+    def kick_shake(self, amplitude: float, pos=None) -> None:
+        """Kick the camera shake to at least ``amplitude`` (m). ``pos``:
+        world position of the event — the kick falls off linearly to zero
+        at SHAKE_RANGE from the camera eye; ``None`` applies it in full."""
+        amp = float(amplitude)
+        if pos is not None:
+            p = np.asarray(pos, dtype=np.float64)
+            d = float(np.linalg.norm(p - self.camera.eye))
+            if d >= SHAKE_RANGE:
+                return
+            amp *= 1.0 - d / SHAKE_RANGE
+        if amp > self._shake_amp:
+            self._shake_amp = amp
+
+    def _shake_offset(self, dt: float) -> np.ndarray | None:
+        """Advance the shake clock/decay; return the eye offset or None."""
+        if self._shake_amp <= 0.0:
+            return None
+        self._shake_t += dt
+        self._shake_amp *= math.exp(-SHAKE_DECAY * dt)
+        if self._shake_amp < SHAKE_FLOOR:
+            self._shake_amp = 0.0
+            return None
+        t = self._shake_t
+        return self._shake_amp * np.array(
+            [math.sin(SHAKE_FREQS[0] * t + SHAKE_PHASES[0]),
+             math.sin(SHAKE_FREQS[1] * t + SHAKE_PHASES[1]),
+             math.sin(SHAKE_FREQS[2] * t + SHAKE_PHASES[2])])
+
     def set_launcher_pos(self, pos) -> None:
         """Anchor the launcher view on the active platform's TEL (Task S4:
         TAB platform switching). Starts a normal mode-blend so the camera
@@ -193,6 +244,9 @@ class CameraRig:
             if w < 1.0:
                 eye = self._clamp(self._start_eye * (1.0 - w) + eye * w)
                 fwd = _unit(self._start_fwd * (1.0 - w) + fwd * w)  # nlerp
+        shake = self._shake_offset(dt)           # ignition events (Task LC)
+        if shake is not None:
+            eye = self._clamp(eye + shake)
         self.camera.eye = eye.copy()
         self.camera.set_orientation(fwd)
 

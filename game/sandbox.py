@@ -133,6 +133,13 @@ CRUISE_LOOP_GAIN = 1.0         # ramjet loop gain (low level baked in the wav)
 BOOSTER_LOOP_GAIN = 1.0        # booster roar loop gain (high-thrust mode)
 RIDEOUT_LOOP_GAIN = 0.55       # muffled low-thrust roar before the slam
 
+# Camera shake kicks (amplitudes in m at the event, falling off to zero at
+# 2 km — game/cameras.py SHAKE_RANGE). Storyboard: step 2 (muzzle blast) is
+# the biggest, step 8 (full grunt) the deepest, S-300 ignition in between.
+SHAKE_MUZZLE = 0.9             # Oniks in-tube ignition breaching the muzzle
+SHAKE_SLAM = 0.6               # Oniks high-thrust mode lighting at ~120 m
+SHAKE_SAM_IGNITION = 0.8       # S-300 fireball at the hang apex
+
 TEL_ERECT_TIME = 4.0           # s for the canisters to swing 0 <-> 88 deg
 TEL_ELEV_STEPS = 12            # prebaked TEL meshes across the elevation arc
 
@@ -323,6 +330,7 @@ class SandboxState(GameState):
                                       ground_y=float(self._tel_pos[1]) + 1.5)
             self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)
+            self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
         return m
 
     def _request_sam_launch(self):
@@ -466,7 +474,8 @@ class SandboxState(GameState):
 
     def _cap_jettison(self, m) -> None:
         """End of tip-over: the pull-away motors shoot the nose cap FORWARD;
-        the missile out-accelerates it on the freshly lit high-thrust mode."""
+        the missile out-accelerates it on the freshly lit high-thrust mode.
+        Sound: the cap CRACK over the roar, then the full-thrust slam."""
         v = _vhat(m)
         side = np.cross(v, _UP)
         n = float(np.linalg.norm(side))
@@ -476,6 +485,9 @@ class SandboxState(GameState):
         self._parts.append((self._mesh_cap, _FallingPart(
             m.pos + v * CAP_NOSE_AHEAD, kick, v,
             CAP_DRAG, CAP_TUMBLE_RATE, CAP_LIFE)))
+        self.app.audio.play("cap_crack", pos=m.pos)
+        self.app.audio.play("slam", pos=m.pos)
+        self.rig.kick_shake(SHAKE_SLAM, pos=m.pos)
 
     def _slug_ejection(self, m) -> None:
         """Mach-2 burnout: ram air expels the spent booster slug out the
@@ -490,9 +502,13 @@ class SandboxState(GameState):
 
     def _sam_ignition(self, m) -> None:
         """S-300 motor light-off at the hang apex: instantaneous fireball
-        wider than the missile + the expanding smoke donut."""
+        wider than the missile + the expanding smoke donut, a detonation-
+        grade boom (boom_near family) and a camera shake pulse — ending the
+        1.5 s of near-silence."""
         v = _vhat(m)
         self.effects.ignition_fireball(m.pos - v * SAM_HALF_LEN)
+        self.app.audio.play("boom_near", pos=m.pos)
+        self.rig.kick_shake(SHAKE_SAM_IGNITION, pos=m.pos)
 
     def _launch_puff(self, mouth_pos) -> None:
         """Cold-launch gas puff at the canister mouth (the eject is unlit)."""
