@@ -16,6 +16,8 @@ GL-touching module (imports world.sky etc.) — never imported by unit tests.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from engine import math3d
@@ -86,8 +88,9 @@ _UP = np.array([0.0, 1.0, 0.0])
 
 def _vhat(m) -> np.ndarray:
     """Missile unit velocity (vertical fallback while still in the tube)."""
-    speed = float(np.linalg.norm(m.vel))
-    return m.vel / speed if speed > 1e-9 else _UP.copy()
+    v = m.vel
+    speed = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    return v / speed if speed > 1e-9 else _UP.copy()
 
 
 class _FallingBooster:
@@ -268,7 +271,11 @@ class SandboxState(GameState):
             if ship.state not in (ST_BURNING, ST_SINKING):
                 self._fire_acc.pop(ship.ship_id, None)
                 continue
-            if float(np.linalg.norm(ship.pos - eye)) > SHIP_FIRE_VIS_RANGE:
+            sp = ship.pos
+            dx = sp[0] - eye[0]
+            dy = sp[1] - eye[1]
+            dz = sp[2] - eye[2]
+            if math.sqrt(dx * dx + dy * dy + dz * dz) > SHIP_FIRE_VIS_RANGE:
                 continue
             acc = self._fire_acc.get(ship.ship_id, 0.0) + dt
             deck = ship.pos + _UP * (ship.height * SHIP_FIRE_DECK_FRAC)
@@ -289,9 +296,8 @@ class SandboxState(GameState):
         """Swing the canisters up when armed, down while reloading."""
         target = 1.0 if self.world.launcher_armed else 0.0
         step = dt / TEL_ERECT_TIME
-        self._tel_frac = float(np.clip(self._tel_frac
-                                       + np.clip(target - self._tel_frac,
-                                                 -step, step), 0.0, 1.0))
+        delta = min(max(target - self._tel_frac, -step), step)
+        self._tel_frac = min(max(self._tel_frac + delta, 0.0), 1.0)
 
     # ---------------------------------------------------------------- audio
 

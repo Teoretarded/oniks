@@ -11,6 +11,8 @@ Axes per locked conventions: X = east, Y = up, Z = north; heading 0 = +Z
 simulation state is float64.
 """
 
+import math
+
 import numpy as np
 
 SHIP_TYPES = {  # length, beam, height(above water), speed_mps, hp
@@ -55,10 +57,16 @@ class Ship:
         self.burn_timer = BURN_TIME
         self.sink_elapsed = 0.0
         self.list_angle = 0.0     # rad, roll about the keel while sinking
+        # Bounding-sphere reach of the hull OBB about ship.pos: half diagonal
+        # plus the box-center offset (damage.py's pair prefilter, Task 22).
+        self.hit_reach = (0.5 * math.sqrt(
+            self.beam ** 2 + (self.height + HULL_DRAFT) ** 2 + self.length ** 2)
+            + 0.5 * (self.height - HULL_DRAFT))
 
         # Position interpolated along the lane polyline at fraction lane_t0 of
         # its total arc length; heading along the lane in the travel direction.
         self._pts = np.asarray(lane_pts, dtype=np.float64).reshape(-1, 2)
+        self._pts_xz = [(float(p[0]), float(p[1])) for p in self._pts]
         seg = np.diff(self._pts, axis=0)
         seg_len = np.hypot(seg[:, 0], seg[:, 1])
         cum = np.concatenate(([0.0], np.cumsum(seg_len)))
@@ -99,11 +107,12 @@ class Ship:
                          np.cos(self.heading) * sp])
 
     def _advance_waypoint(self):
-        wx, wz = self._pts[self._wp]
+        wx, wz = self._pts_xz[self._wp]
         dx = wx - self.pos[0]
         dz = wz - self.pos[2]
-        dist = float(np.hypot(dx, dz))
-        behind = (dx * np.sin(self.heading) + dz * np.cos(self.heading)) < 0.0
+        dist = math.hypot(dx, dz)
+        behind = (dx * math.sin(self.heading)
+                  + dz * math.cos(self.heading)) < 0.0
         if dist < WAYPOINT_RADIUS or (behind and dist < WAYPOINT_BEHIND_RADIUS):
             nxt = self._wp + self.direction
             if nxt >= len(self._pts):           # loop lane ends: reverse
@@ -131,13 +140,14 @@ class Ship:
                 return
         speed = self.speed * (BURN_SPEED_FRAC if self.state == ST_BURNING else 1.0)
         self._advance_waypoint()
-        wx, wz = self._pts[self._wp]
-        bearing = float(np.arctan2(wx - self.pos[0], wz - self.pos[2]))
-        err = (bearing - self.heading + np.pi) % (2.0 * np.pi) - np.pi
-        self.heading += float(np.clip(err, -TURN_RATE * dt, TURN_RATE * dt))
-        self.heading = (self.heading + np.pi) % (2.0 * np.pi) - np.pi
-        self.pos[0] += np.sin(self.heading) * speed * dt
-        self.pos[2] += np.cos(self.heading) * speed * dt
+        wx, wz = self._pts_xz[self._wp]
+        bearing = math.atan2(wx - self.pos[0], wz - self.pos[2])
+        err = (bearing - self.heading + math.pi) % (2.0 * math.pi) - math.pi
+        limit = TURN_RATE * dt
+        self.heading += min(max(err, -limit), limit)
+        self.heading = (self.heading + math.pi) % (2.0 * math.pi) - math.pi
+        self.pos[0] += math.sin(self.heading) * speed * dt
+        self.pos[2] += math.cos(self.heading) * speed * dt
 
     # --- hull box for hit tests ----------------------------------------------------
 

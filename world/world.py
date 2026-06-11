@@ -23,7 +23,7 @@ from sim.damage import apply_missile_hits
 from sim.missile import PH_BOOST, PH_EJECT, Missile
 from sim.ships import Ship
 from world.generation import (BASE_POS, LANES, SEED, SHIP_SPAWNS, SITES,
-                              terrain_height)
+                              terrain_height_scalar)
 
 # --- Launcher tuning ----------------------------------------------------------
 
@@ -74,8 +74,8 @@ class WorldState:
         return self.reload_left <= 0.0
 
     def terrain_height_at(self, x: float, z: float) -> float:
-        """Scalar wrapper over the vectorized generation.terrain_height."""
-        return float(terrain_height(np.array([x]), np.array([z]))[0])
+        """Scalar heightfield query (generation's bit-identical fast path)."""
+        return terrain_height_scalar(x, z)
 
     # ------------------------------------------------------------------ step
 

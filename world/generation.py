@@ -12,11 +12,19 @@ Layout (see plan LOCKED CONVENTIONS):
   - Ocean rendered at y = 0; seabed is negative terrain height.
 """
 
+import math
+
 import numpy as np
 
 SEED = 1337
 WORLD_HALF = 350_000.0
 ENEMY_COAST_Z = 500_000.0     # note: beyond WORLD_HALF in z; drawable band z in [-40_000, 560_000]
+
+# Strict upper bound on terrain_height anywhere (Task 22 perf): the tallest
+# island peak is 430 m scaled by (0.4 + 0.6 * fbm) with fbm < 1, and the
+# continents top out under 145 m — so no terrain ever reaches this. Flyers
+# above it can skip ground-impact queries entirely (sim/missile.py).
+TERRAIN_MAX_HEIGHT = 430.0
 
 
 def _hash01(ix, iz, seed):
@@ -117,6 +125,109 @@ def terrain_height(x, z):
 
 def is_land(x, z):
     return terrain_height(x, z) > 0.0
+
+
+# --- scalar fast path (Task 22 perf) ------------------------------------------
+#
+# Per-missile surface checks, falling boosters and the camera ground clamp all
+# query the heightfield at SINGLE points every sim step; the vectorized
+# terrain_height costs ~5 ms per scalar call (numpy dispatch overhead on
+# 1-element arrays times ~55 value_noise evaluations). The pure-Python path
+# below is bit-identical (verified by tests/test_generation.py) and ~300x
+# faster for scalars because it
+#   - runs the identical float64 arithmetic without array machinery, and
+#   - skips work that provably cannot change the final max():
+#     * a continent whose shelf ramp is fully clamped (r == -3) contributes
+#       at most -165 m, always below the ocean floor's worst case of -140 m;
+#     * an island's fbm matters only strictly inside its shoreline (outside,
+#       the skirt term m * slope needs no noise; at m == 0 the lift is 0);
+#     * the ocean floor (max -60 m) is masked whenever h already >= -60 m.
+#
+# Integer note: every hash product fits in int64 (|h| <= 2^31 * 1274126177 <
+# 2^63), so Python's arbitrary-precision ints and numpy's int64 agree exactly.
+
+def _hash01_s(ix: int, iz: int, seed: int) -> float:
+    h = (ix * 374761393 + iz * 668265263 + seed * 982451653) & 0x7FFFFFFF
+    h = (h ^ (h >> 13)) * 1274126177 & 0x7FFFFFFF
+    return ((h ^ (h >> 16)) & 0xFFFFFF) / 16777216.0
+
+
+def _value_noise_s(x: float, z: float, cell: float, seed: int) -> float:
+    gx = x / cell
+    gz = z / cell
+    ix = math.floor(gx)
+    iz = math.floor(gz)
+    fx = gx - ix
+    fz = gz - iz
+    wx = fx * fx * (3.0 - 2.0 * fx)
+    wz = fz * fz * (3.0 - 2.0 * fz)
+    n00 = _hash01_s(ix, iz, seed)
+    n10 = _hash01_s(ix + 1, iz, seed)
+    n01 = _hash01_s(ix, iz + 1, seed)
+    n11 = _hash01_s(ix + 1, iz + 1, seed)
+    nx0 = n00 + (n10 - n00) * wx
+    nx1 = n01 + (n11 - n01) * wx
+    return nx0 + (nx1 - nx0) * wz
+
+
+def _fbm_s(x: float, z: float, cell: float, octaves: int, seed: int) -> float:
+    total = 0.0
+    amp = 1.0
+    amp_sum = 0.0
+    c = float(cell)
+    for i in range(octaves):
+        total = total + amp * _value_noise_s(x, z, c, seed + i * 101)
+        amp_sum += amp
+        amp *= 0.5
+        c /= 2.0
+    return total / amp_sum
+
+
+def _continent_s(x: float, z: float, signed_dist: float,
+                 height_seed: int) -> float:
+    r = signed_dist / _COAST_RAMP
+    r = min(max(r, _SHELF_RAMP), 1.0)            # == np.clip order
+    return r * (55.0 + 90.0 * _fbm_s(x, z, 8_000.0, 4, height_seed))
+
+
+# Conservative skip bounds: a coast wiggles by at most _COAST_WIGGLE and the
+# shelf ramp clamps _COAST_RAMP * |_SHELF_RAMP| past the coast line.
+_HOME_SKIP_Z = _COAST_WIGGLE - _SHELF_RAMP * _COAST_RAMP            # 14_500
+_ENEMY_SKIP_Z = ENEMY_COAST_Z - _COAST_WIGGLE + _SHELF_RAMP * _COAST_RAMP
+
+
+def terrain_height_scalar(x: float, z: float) -> float:
+    """Scalar terrain_height: bit-identical, ~300x faster for single points."""
+    x = float(x)
+    z = float(z)
+    h = -1.0e30
+    if z < _HOME_SKIP_Z:                          # home shelf not fully clamped
+        home_coast = _COAST_WIGGLE * _fbm_s(x, 0.0, 30_000.0, 4, SEED + 1)
+        h = _continent_s(x, z, home_coast - z, SEED + 2)
+    if z > _ENEMY_SKIP_Z:                         # enemy shelf not fully clamped
+        enemy_coast = ENEMY_COAST_Z - _COAST_WIGGLE * _fbm_s(
+            x, 0.0, 30_000.0, 4, SEED + 3)
+        e = _continent_s(x, z, z - enemy_coast, SEED + 4)
+        if e > h:
+            h = e
+    for k, (cx, cz, radius, peak) in enumerate(ISLANDS):
+        dx = x - cx
+        dz = z - cz
+        m = 1.0 - math.sqrt(dx * dx + dz * dz) / radius
+        if m > 0.0:                               # inside: noise-lifted peak
+            t = m if m < 1.0 else 1.0             # smoothstep01 (m > 0 here)
+            s = t * t * (3.0 - 2.0 * t)
+            h_isl = s ** 1.5 * (peak * (0.4 + 0.6 * _fbm_s(
+                x, z, radius * 0.35, 4, SEED + 5 + 17 * k)))
+        else:                                     # outside: plain skirt slope
+            h_isl = m * _ISLAND_SHORE_SLOPE
+        if h_isl > h:
+            h = h_isl
+    if h < -60.0:                                 # floor can win only here
+        floor = -60.0 - 80.0 * _fbm_s(x, z, 20_000.0, 3, SEED + 6)
+        if floor > h:
+            h = floor
+    return h
 
 
 LANES = [  # 4 polylines (x, z) float64 crossing the ocean, dodging ISLANDS by >= 12 km

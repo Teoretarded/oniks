@@ -14,6 +14,8 @@ Screen coords: origin top-left, pixels. World: X = east (right), Z = north
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pygame
 
@@ -289,8 +291,8 @@ class TacticalMap:
             live.add(key)
             trail = self._trails.setdefault(key, [])
             p = (float(m.pos[0]), float(m.pos[2]))
-            if (not trail or np.hypot(p[0] - trail[-1][0],
-                                      p[1] - trail[-1][1]) >= TRAIL_SPACING_M):
+            if (not trail or math.hypot(p[0] - trail[-1][0],
+                                        p[1] - trail[-1][1]) >= TRAIL_SPACING_M):
                 trail.append(p)
         for key in list(self._trails):
             if key not in live:

@@ -1,8 +1,12 @@
 """Atmosphere model and aerodynamic helpers (pure numpy, GL-free).
 
 All quantities SI: meters, seconds, kilograms. Functions accept scalars or
-numpy arrays and return the same shape.
+numpy arrays and return the same shape. The ``*_scalar`` variants are
+plain-float fast paths for per-missile per-step calls (Task 22 perf):
+numpy's array dispatch costs more than the whole formula at size 1.
 """
+
+import math
 
 import numpy as np
 
@@ -53,3 +57,37 @@ def drag_force(speed, alt_m, cd, ref_area):
 def cd_from_mach(m):
     """Drag coefficient from Mach number (simple supersonic missile curve)."""
     return np.interp(m, CD_MACH_POINTS, CD_VALUES)
+
+
+# --- scalar fast paths (Task 22 perf) ----------------------------------------
+
+_CD_TABLE = list(zip(CD_MACH_POINTS.tolist(), CD_VALUES.tolist()))
+
+
+def speed_of_sound_scalar(alt_m: float) -> float:
+    """Plain-float speed_of_sound."""
+    if alt_m < TROPOPAUSE_ALT:
+        return SOS_SEA_LEVEL - SOS_LAPSE * max(alt_m, 0.0)
+    return SOS_STRATOSPHERE
+
+
+def mach_scalar(speed: float, alt_m: float) -> float:
+    """Plain-float mach."""
+    return speed / speed_of_sound_scalar(alt_m)
+
+
+def drag_force_scalar(speed: float, alt_m: float, cd: float,
+                      ref_area: float) -> float:
+    """Plain-float drag_force (exponential-atmosphere density inlined)."""
+    rho = RHO0 * math.exp(-max(alt_m, 0.0) / DENSITY_SCALE_HEIGHT)
+    return 0.5 * rho * speed * speed * cd * ref_area
+
+
+def cd_from_mach_scalar(m: float) -> float:
+    """Plain-float cd_from_mach (same clamped piecewise-linear table)."""
+    if m <= _CD_TABLE[0][0]:
+        return _CD_TABLE[0][1]
+    for (m0, c0), (m1, c1) in zip(_CD_TABLE, _CD_TABLE[1:]):
+        if m <= m1:
+            return c0 + (c1 - c0) * (m - m0) / (m1 - m0)
+    return _CD_TABLE[-1][1]

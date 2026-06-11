@@ -176,6 +176,15 @@ class TextRenderer:
         gl.glBindVertexArray(0)
 
         self._batch: list[np.ndarray] = []
+        # draw_text quad cache (Task 22 perf): the HUD redraws mostly-static
+        # strings at fixed positions every frame; building glyph quads is
+        # ~100 us per string, a dict hit is ~1 us. Entries are immutable
+        # once stored (flush only reads). Cleared when it hits the cap so
+        # ever-changing telemetry values cannot grow it without bound.
+        self._text_cache: dict[tuple, np.ndarray] = {}
+        self._width_cache: dict[tuple, float] = {}
+
+    _TEXT_CACHE_MAX = 1024
 
     # ------------------------------------------------------------- metrics
 
@@ -188,7 +197,14 @@ class TextRenderer:
 
     def text_width(self, s: str, size: int = BODY_SIZE) -> float:
         """Advance width of ``s`` in pixels at the given font size."""
-        return float(self.glyphs[size].adv[self._codes(s)].sum())
+        key = (s, size)
+        w = self._width_cache.get(key)
+        if w is None:
+            if len(self._width_cache) >= self._TEXT_CACHE_MAX:
+                self._width_cache.clear()
+            w = float(self.glyphs[size].adv[self._codes(s)].sum())
+            self._width_cache[key] = w
+        return w
 
     def line_height(self, size: int = BODY_SIZE) -> int:
         """Recommended baseline-to-baseline line height in pixels."""
@@ -218,6 +234,12 @@ class TextRenderer:
         title: 28 pt atlas glyphs x3) without rebaking the atlas; width is
         ``text_width(s, size) * scale``.
         """
+        rgba = _rgba(color)
+        key = (s, size, scale, rgba, float(x), float(y))
+        cached = self._text_cache.get(key)
+        if cached is not None:
+            self._batch.append(cached)
+            return
         g = self.glyphs[size]
         codes = self._codes(s)
         if len(codes) == 0:
@@ -225,11 +247,15 @@ class TextRenderer:
         adv = g.adv[codes].astype(np.float64) * scale
         pen = np.round(float(x)
                        + np.concatenate(([0.0], np.cumsum(adv)[:-1])))
-        self._batch.append(self._quads(
+        quads = self._quads(
             pen.astype(np.float32), np.float32(round(float(y))),
             g.w[codes] * np.float32(scale), g.h[codes] * np.float32(scale),
             g.u0[codes], g.v0[codes], g.u1[codes], g.v1[codes],
-            _rgba(color)))
+            rgba)
+        if len(self._text_cache) >= self._TEXT_CACHE_MAX:
+            self._text_cache.clear()
+        self._text_cache[key] = quads
+        self._batch.append(quads)
 
     def draw_rect(self, x, y, w, h, rgba) -> None:
         """Queue a filled rectangle (top-left x, y; size w, h pixels)."""

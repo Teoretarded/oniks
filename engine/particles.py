@@ -22,6 +22,8 @@ half-extent (spare channel, unused by the current shader).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from engine.shaderlib import HAZE_GLSL
@@ -87,6 +89,14 @@ class ParticlePool:
 
     Fields: pos (N,3) float64 world, vel (N,3) f32, life/max_life (N) f32,
     size0/size1 (N) f32, col0/col1 (N,3) f32, alive (N) bool.
+
+    Perf (Task 22): ``emit`` fills the LOWEST free slots, so the live set
+    stays packed at the front of the arrays; ``_hi`` (1 + highest live
+    index) bounds every per-frame pass to the occupied prefix, and
+    ``update`` runs plain full-slice ops over it instead of fancy-indexed
+    gathers (dead slots within the prefix harmlessly keep integrating —
+    they are fully re-initialized on their next emit and are never read
+    by ``build_quads``). The quad buffer is preallocated once.
     """
 
     def __init__(self, cap: int):
@@ -101,6 +111,8 @@ class ParticlePool:
         self.col0 = np.zeros((n, 3), dtype=np.float32)
         self.col1 = np.zeros((n, 3), dtype=np.float32)
         self.alive = np.zeros(n, dtype=bool)
+        self._hi = 0                            # 1 + highest live slot index
+        self._quads = np.empty((n, 4, 10), dtype=np.float32)  # build buffer
 
     def emit(self, n, pos, pos_jitter, vel_mean, vel_jitter, life,
              size01, col01, rng) -> np.ndarray:
@@ -112,6 +124,9 @@ class ParticlePool:
         size m; col01 = (birth_rgb, death_rgb). Returns the slot indices of
         the emitted particles (callers may post-shape e.g. splash rings).
         """
+        if int(n) == 1:                         # hot path: plume/fire feeds
+            return self._emit_one(pos, pos_jitter, vel_mean, vel_jitter,
+                                  life, size01, col01, rng)
         free = np.flatnonzero(~self.alive)[:int(n)]
         k = len(free)
         if k == 0:
@@ -133,29 +148,70 @@ class ParticlePool:
         self.col0[free] = np.asarray(col01[0], dtype=np.float32)
         self.col1[free] = np.asarray(col01[1], dtype=np.float32)
         self.alive[free] = True
+        self._hi = max(self._hi, int(free[-1]) + 1)
         return free
+
+    def _emit_one(self, pos, pos_jitter, vel_mean, vel_jitter, life,
+                  size01, col01, rng) -> np.ndarray:
+        """Single-particle emit without k-sized array machinery (Task 22
+        perf: exhaust/fire feeds emit 1 particle per missile per substep).
+        Identical sampling — the same rng draws in the same order — and the
+        same lowest-free-slot policy as the vector path."""
+        alive = self.alive
+        hi = self._hi
+        if hi:                                  # first dead slot in the prefix
+            i = int(np.argmin(alive[:hi]))      # argmin(bool): first False
+            if alive[i]:                        # prefix solid: append after it
+                if hi >= self.cap:
+                    return np.empty(0, dtype=np.intp)
+                i = hi
+        else:
+            i = 0
+        self.pos[i] = pos + rng.normal(0.0, pos_jitter, 3)
+        self.vel[i] = vel_mean + rng.normal(0.0, vel_jitter, 3)
+        lo, hi_life = _as_range(life)
+        lf = rng.uniform(lo, hi_life) if hi_life > lo else lo
+        self.life[i] = lf
+        self.max_life[i] = lf if lf > 1e-6 else 1e-6
+        scale = rng.uniform(SIZE_JITTER_LO, SIZE_JITTER_HI)
+        self.size0[i] = size01[0] * scale
+        self.size1[i] = size01[1] * scale
+        self.col0[i] = col01[0]
+        self.col1[i] = col01[1]
+        alive[i] = True
+        if i >= self._hi:
+            self._hi = i + 1
+        return np.array([i], dtype=np.intp)
 
     def update(self, dt, drag=0.15, gravity=0.0, buoyancy=0.0) -> None:
         """Vectorized step: age, kill life<=0, drag, vertical accel, move."""
-        live = self.alive
-        if not live.any():
+        n = self._hi
+        if n == 0:
             return
-        self.life -= np.float32(dt)
-        np.logical_and(live, self.life > 0.0, out=live)
+        alive = self.alive[:n]
+        life = self.life[:n]
+        vel = self.vel[:n]
+        life -= np.float32(dt)
+        np.logical_and(alive, life > 0.0, out=alive)
         if drag:
-            self.vel *= np.float32(np.exp(-drag * dt))
+            vel *= np.float32(np.exp(-drag * dt))
         acc = np.float32((buoyancy - gravity) * dt)
         if acc:
-            self.vel[live, 1] += acc
-        self.pos[live] += self.vel[live] * np.float32(dt)
+            vel[:, 1] += acc
+        self.pos[:n] += vel * np.float32(dt)
+        if not alive[n - 1]:                    # shrink the occupied prefix
+            live_idx = np.flatnonzero(alive)
+            self._hi = int(live_idx[-1]) + 1 if len(live_idx) else 0
 
     def build_quads(self, cam_eye, cam_right, cam_up) -> np.ndarray:
         """Camera-facing quads, back-to-front: (M*4, 10) float32.
 
         Per-vertex layout [px py pz u v r g b a size]; positions are
         camera-relative (float64 subtract, then float32 cast — LOCKED).
+        Returns a view into the pool's preallocated buffer, valid until
+        the next ``build_quads`` call on this pool.
         """
-        idx = np.flatnonzero(self.alive)
+        idx = np.flatnonzero(self.alive[:self._hi])
         m = len(idx)
         if m == 0:
             return np.empty((0, 10), dtype=np.float32)
@@ -175,7 +231,7 @@ class ParticlePool:
 
         right = np.asarray(cam_right, dtype=np.float32)
         up = np.asarray(cam_up, dtype=np.float32)
-        out = np.empty((m, 4, 10), dtype=np.float32)
+        out = self._quads[:m]
         h = half[:, None]
         for c, (ox, oy, u, v) in enumerate(((-1, -1, 0, 0), (1, -1, 1, 0),
                                             (1, 1, 1, 1), (-1, 1, 0, 1))):
@@ -216,7 +272,10 @@ class TrailRibbon:
         if self._count:
             last = self._pos[(self._start + self._count - 1)
                              % TRAIL_MAX_POINTS]
-            if np.linalg.norm(p - last) < TRAIL_POINT_SPACING:
+            dx = p[0] - last[0]
+            dy = p[1] - last[1]
+            dz = p[2] - last[2]
+            if math.sqrt(dx * dx + dy * dy + dz * dz) < TRAIL_POINT_SPACING:
                 return False
         if self._count == TRAIL_MAX_POINTS:     # full: overwrite oldest
             w = self._start
@@ -233,11 +292,22 @@ class TrailRibbon:
         """Age all points; drop the (oldest-first) ones past the fade time."""
         if self._count == 0:
             return
-        idx = self._indices()
-        self._age[idx] += np.float32(dt)
-        # Ages are monotonically decreasing oldest -> newest, so the expired
-        # set is a prefix of the ring.
-        n_dead = int((self._age[idx] > TRAIL_FADE_TIME).sum())
+        # The occupied ring entries are at most two contiguous slices —
+        # age them in place without building an index array (Task 22 perf).
+        end = self._start + self._count
+        dt32 = np.float32(dt)
+        if end <= TRAIL_MAX_POINTS:
+            seg = self._age[self._start:end]
+            seg += dt32
+            n_dead = int((seg > TRAIL_FADE_TIME).sum())
+        else:
+            seg_a = self._age[self._start:]
+            seg_b = self._age[:end - TRAIL_MAX_POINTS]
+            seg_a += dt32
+            seg_b += dt32
+            # Ages decrease oldest -> newest: the expired set is a prefix.
+            n_dead = int((seg_a > TRAIL_FADE_TIME).sum()
+                         + (seg_b > TRAIL_FADE_TIME).sum())
         self._start = (self._start + n_dead) % TRAIL_MAX_POINTS
         self._count -= n_dead
 

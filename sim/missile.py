@@ -9,11 +9,15 @@ Axes follow the locked conventions: X = east, Y = up, Z = north; heading 0 is
 +Z (north) increasing clockwise seen from above.
 """
 
+import math
+
 import numpy as np
 
 from sim.guidance import (altitude_hold_accel, pn_accel, steer_heading_accel,
                           waypoint_reached)
-from sim.physics import GRAVITY, cd_from_mach, drag_force, mach
+from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
+                         mach_scalar)
+from world.generation import TERRAIN_MAX_HEIGHT
 
 # --- Phase enum (locked convention) ------------------------------------------
 PH_EJECT, PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL, PH_DEAD = range(7)
@@ -160,11 +164,11 @@ class Missile:
     def _dist_to_target(self):
         dx = self.pos[0] - self.target_point[0]
         dz = self.pos[2] - self.target_point[2]
-        return float(np.hypot(dx, dz))
+        return math.hypot(dx, dz)
 
     def _route_heading(self):
         wx, wz = self.route[0]
-        return float(np.arctan2(wx - self.pos[0], wz - self.pos[2]))
+        return math.atan2(wx - self.pos[0], wz - self.pos[2])
 
     def _sustainer_thrust(self, speed, alt, dt):
         """Mach-hold thrust (PI-like: P + drag feedforward); burns ramjet fuel."""
@@ -174,52 +178,62 @@ class Missile:
         target_mach = (w.cruise_mach_hi
                        if self.hi and self.phase in (PH_CLIMB, PH_CRUISE)
                        else w.cruise_mach_lo)
-        m_now = float(mach(speed, alt))
-        cd = float(cd_from_mach(m_now))
-        drag_ff = float(drag_force(speed, alt, cd, w.ref_area))
-        thrust = float(np.clip(KP_THRUST * (target_mach - m_now) * THRUST_SCALE
-                               + drag_ff, 0.0, w.max_thrust))
+        m_now = mach_scalar(speed, alt)
+        cd = cd_from_mach_scalar(m_now)
+        drag_ff = drag_force_scalar(speed, alt, cd, w.ref_area)
+        thrust = KP_THRUST * (target_mach - m_now) * THRUST_SCALE + drag_ff
+        thrust = min(max(thrust, 0.0), w.max_thrust)
         self.fuel = max(0.0, self.fuel - thrust / (w.isp * GRAVITY) * dt)
         return thrust
 
     def _acquire_lock(self, world, speed):
         """Pick the nearest alive ship inside seeker range and gimbal cone."""
         w = self.weapon
-        cos_half = np.cos(np.radians(w.seeker_half_angle_deg))
+        cos_half = math.cos(math.radians(w.seeker_half_angle_deg))
         best, best_d = None, w.seeker_range
+        px, py, pz = self.pos[0], self.pos[1], self.pos[2]
+        vx, vy, vz = self.vel[0], self.vel[1], self.vel[2]
         for ship in world.ships:
             if not getattr(ship, "alive", True):
                 continue
-            r = np.asarray(ship.pos, dtype=np.float64) - self.pos
-            d = float(np.linalg.norm(r))
+            sp = ship.pos
+            rx = sp[0] - px
+            ry = sp[1] - py
+            rz = sp[2] - pz
+            d = math.sqrt(rx * rx + ry * ry + rz * rz)
             if d >= best_d or d < 1e-6:
                 continue
-            if speed > 1e-9 and float(r @ self.vel) / (d * speed) < cos_half:
+            if speed > 1e-9 and ((rx * vx + ry * vy + rz * vz)
+                                 / (d * speed)) < cos_half:
                 continue
             best, best_d = ship, d
         if best is not None:
             self.locked_ship = best   # once locked, stays locked
 
     def _guidance(self, alt, vs, speed, dt, world):
-        """Commanded guidance accel (includes gravity compensation 'lift')."""
+        """Commanded guidance accel (includes gravity compensation 'lift').
+
+        The vertical commands (altitude-hold PD + the gravity-cancel lift)
+        are added into component [1] of the freshly-allocated steer/PN
+        vector instead of via ``* _UP`` array temporaries (Task 22 perf —
+        this runs per missile per 120 Hz substep)."""
         w = self.weapon
-        lift = GRAVITY * _UP   # cancel gravity so altitude PDs have no droop
         if self.phase == PH_CLIMB:
-            g = (steer_heading_accel(self.vel, self._route_heading())
-                 + (altitude_hold_accel(alt, vs, self.cruise_alt,
-                                        ALT_KP, ALT_KD, ALT_MAX_A)) * _UP + lift)
+            g = steer_heading_accel(self.vel, self._route_heading())
+            g[1] += altitude_hold_accel(alt, vs, self.cruise_alt,
+                                        ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_CRUISE:
             target_alt = self.cruise_alt if self.hi else w.lo_alt
-            g = (steer_heading_accel(self.vel, self._route_heading())
-                 + altitude_hold_accel(alt, vs, target_alt,
-                                       ALT_KP, ALT_KD, ALT_MAX_A) * _UP + lift)
+            g = steer_heading_accel(self.vel, self._route_heading())
+            g[1] += altitude_hold_accel(alt, vs, target_alt,
+                                        ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_DESCENT:
             self._descent_elapsed += dt
             ramp = self._descent_alt0 - DESCENT_RAMP_RATE * self._descent_elapsed
             target_alt = max(w.skim_alt, ramp)
-            g = (steer_heading_accel(self.vel, self._route_heading())
-                 + altitude_hold_accel(alt, vs, target_alt,
-                                       DESCENT_KP, DESCENT_KD, ALT_MAX_A) * _UP + lift)
+            g = steer_heading_accel(self.vel, self._route_heading())
+            g[1] += altitude_hold_accel(alt, vs, target_alt,
+                                        DESCENT_KP, DESCENT_KD, ALT_MAX_A) + GRAVITY
         else:   # PH_TERMINAL
             if self.locked_ship is None:
                 self._acquire_lock(world, speed)
@@ -227,28 +241,33 @@ class Missile:
             if tgt is not None:
                 tpos = np.asarray(tgt.pos, dtype=np.float64)
                 tvel = np.asarray(getattr(tgt, "vel", np.zeros(3)), dtype=np.float64)
-                if float(np.linalg.norm(tpos - self.pos)) < FINAL_PN_RANGE:
-                    g = pn_accel(self.pos, self.vel, tpos, tvel) + lift
+                dx = tpos[0] - self.pos[0]
+                dy = tpos[1] - self.pos[1]
+                dz = tpos[2] - self.pos[2]
+                if math.sqrt(dx * dx + dy * dy + dz * dz) < FINAL_PN_RANGE:
+                    g = pn_accel(self.pos, self.vel, tpos, tvel)
+                    g[1] += GRAVITY
                 else:
-                    a = pn_accel(self.pos, self.vel, tpos, tvel)
-                    a[1] = 0.0
-                    g = (a + altitude_hold_accel(alt, vs, w.skim_alt,
-                                                 ALT_KP, ALT_KD, ALT_MAX_A) * _UP
-                         + lift)
+                    g = pn_accel(self.pos, self.vel, tpos, tvel)
+                    g[1] = (altitude_hold_accel(alt, vs, w.skim_alt,
+                                                ALT_KP, ALT_KD, ALT_MAX_A)
+                            + GRAVITY)
             elif self._dist_to_target() < FINAL_PN_RANGE:
                 g = pn_accel(self.pos, self.vel, self.target_point,
-                             np.zeros(3)) + lift
+                             np.zeros(3))
+                g[1] += GRAVITY
             else:
-                g = (steer_heading_accel(self.vel, self._route_heading())
-                     + altitude_hold_accel(alt, vs, w.skim_alt,
-                                           ALT_KP, ALT_KD, ALT_MAX_A) * _UP + lift)
+                g = steer_heading_accel(self.vel, self._route_heading())
+                g[1] += altitude_hold_accel(alt, vs, w.skim_alt,
+                                            ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         # No dynamic pressure -> no control authority (fuel-starved missiles sink).
-        g = g * min(1.0, (speed / STALL_SPEED) ** 2)
+        if speed < STALL_SPEED:
+            g *= (speed / STALL_SPEED) ** 2
         # G-limit the total commanded accel.
         gmax = w.max_g * GRAVITY
-        n = float(np.linalg.norm(g))
-        if n > gmax:
-            g = g * (gmax / n)
+        n2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2]
+        if n2 > gmax * gmax:
+            g *= gmax / math.sqrt(n2)
         return g
 
     # --- main step --------------------------------------------------------------
@@ -259,12 +278,17 @@ class Missile:
         w = self.weapon
         if self.phase == PH_EJECT and self.t == 0.0:
             self.vel = np.array([0.0, w.eject_speed, 0.0])   # cold launch: straight up
-        self.prev_pos = self.pos.copy()
+        np.copyto(self.prev_pos, self.pos)
         self.t += dt
 
         alt = float(self.pos[1])
-        speed = float(np.linalg.norm(self.vel))
-        vhat = self.vel / speed if speed > 1e-9 else _UP.copy()
+        vx, vy, vz = self.vel.tolist()         # plain floats: scalar-fast math
+        speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if speed > 1e-9:
+            inv = 1.0 / speed
+            hx, hy, hz = vx * inv, vy * inv, vz * inv
+        else:
+            hx, hy, hz = 0.0, 1.0, 0.0
 
         # Pop reached waypoints (never the final target point). Route entries
         # are (x, z) pairs; waypoint_reached expects a 3-vector.
@@ -289,8 +313,7 @@ class Missile:
             self.phase = PH_TERMINAL
 
         # --- forces ---
-        grav = np.array([0.0, -GRAVITY, 0.0])
-        guidance = np.zeros(3)
+        gx = gy = gz = 0.0                 # guidance accel components
         thrust = 0.0
         drag = 0.0
         if self.phase == PH_BOOST:
@@ -300,35 +323,56 @@ class Missile:
             hd = self._route_heading()
             tilt_dir = np.array([np.sin(hd) * np.cos(elev), np.sin(elev),
                                  np.cos(hd) * np.cos(elev)])
-            vhat = _rotate_toward(vhat, tilt_dir, BOOST_TILT_RATE * dt)
-            self.vel = vhat * speed
+            vhat = _rotate_toward(np.array([hx, hy, hz]), tilt_dir,
+                                  BOOST_TILT_RATE * dt)
+            hx, hy, hz = vhat.tolist()
+            vx, vy, vz = hx * speed, hy * speed, hz * speed
+            self.vel[0] = vx
+            self.vel[1] = vy
+            self.vel[2] = vz
             thrust = w.booster_thrust
-            drag = float(drag_force(speed, alt, float(cd_from_mach(mach(speed, alt))),
-                                    w.ref_area))
+            drag = drag_force_scalar(
+                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
+                w.ref_area)
         elif self.phase in (PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL):
             thrust = self._sustainer_thrust(speed, alt, dt)
-            guidance = self._guidance(alt, float(self.vel[1]), speed, dt, world)
-            drag = float(drag_force(speed, alt, float(cd_from_mach(mach(speed, alt))),
-                                    w.ref_area))
+            g = self._guidance(alt, vy, speed, dt, world)
+            gx, gy, gz = g.tolist()
+            drag = drag_force_scalar(
+                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
+                w.ref_area)
         # PH_EJECT: gravity only — no thrust, no guidance, negligible drag.
 
-        m = self.mass
-        accel = (thrust / m) * vhat + guidance + grav - (drag / m) * vhat
-
-        # --- semi-implicit Euler + phase shaping clamps ---
-        self.vel += accel * dt
+        # --- semi-implicit Euler + phase shaping clamps (scalar: Task 22) ---
+        coef = (thrust - drag) / self.mass
+        vx += (hx * coef + gx) * dt
+        vy += (hy * coef + gy - GRAVITY) * dt
+        vz += (hz * coef + gz) * dt
         if self.phase == PH_CLIMB:
-            horiz = float(np.hypot(self.vel[0], self.vel[2]))
-            max_vy = horiz * CLIMB_MAX_TAN
-            if self.vel[1] > max_vy:
-                self.vel[1] = max_vy
-        elif self.phase == PH_DESCENT and self.vel[1] < -DESCENT_MAX_SINK:
-            self.vel[1] = -DESCENT_MAX_SINK
-        self.pos += self.vel * dt
+            max_vy = math.hypot(vx, vz) * CLIMB_MAX_TAN
+            if vy > max_vy:
+                vy = max_vy
+        elif self.phase == PH_DESCENT and vy < -DESCENT_MAX_SINK:
+            vy = -DESCENT_MAX_SINK
+        self.vel[0] = vx
+        self.vel[1] = vy
+        self.vel[2] = vz
+        px0, py0, pz0 = self.pos.tolist()
+        px = px0 + vx * dt
+        py = py0 + vy * dt
+        pz = pz0 + vz * dt
+        self.pos[0] = px
+        self.pos[1] = py
+        self.pos[2] = pz
 
         # --- impact (terrain, or the water surface at y = 0) ---
-        surface = max(float(world.terrain_height_at(self.pos[0], self.pos[2])), 0.0)
-        if self.pos[1] <= surface:
+        # Above the world's strict terrain ceiling no surface can be hit, so
+        # the heightfield query is skipped (Task 22 perf: saves the query for
+        # the whole climb/cruise of a hi profile).
+        if py > TERRAIN_MAX_HEIGHT:
+            return
+        surface = max(float(world.terrain_height_at(px, pz)), 0.0)
+        if py <= surface:
             self.pos[1] = surface
             self.impact_pos = self.pos.copy()
             self.phase = PH_DEAD

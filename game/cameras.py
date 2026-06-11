@@ -49,8 +49,8 @@ def _unit(v):
 
 
 def _terrain_height_scalar(x, z) -> float:
-    """Scalar wrapper over the vectorized world heightfield."""
-    return float(generation.terrain_height(np.array([x]), np.array([z]))[0])
+    """Scalar world heightfield query (generation's fast path)."""
+    return generation.terrain_height_scalar(x, z)
 
 
 class FreeCam:

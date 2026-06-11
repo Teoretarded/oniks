@@ -5,6 +5,8 @@ are detected with a swept segment (prev_pos -> pos) against the ship hull OBB â€
 a point-in-box sample would tunnel straight through a beam-on hull.
 """
 
+import math
+
 import numpy as np
 
 from sim.missile import PH_DEAD
@@ -46,13 +48,31 @@ def apply_missile_hits(missiles, ships, effects_out):
     On a hit: ship loses 1 hp and starts BURNING (or SINKING at 0 hp), the
     missile dies with impact_pos at the segment midpoint, and a
     ("ship_hit", pos) effect is appended for particles/audio.
+
+    A conservative sphere prefilter rejects nearly every pair before the
+    OBB math (Task 22 perf): a hit needs a segment point inside the hull
+    box, which lies within ``ship.hit_reach`` of ``ship.pos``, and every
+    segment point is within the step length of ``m.pos`` â€” so any pair
+    farther apart than the sum cannot possibly hit.
     """
     for m in missiles:
         if not m.alive:
             continue
+        mp = m.pos
+        mx, my, mz = mp[0], mp[1], mp[2]
+        pp = m.prev_pos
+        seg = math.sqrt((mx - pp[0]) ** 2 + (my - pp[1]) ** 2
+                        + (mz - pp[2]) ** 2)
         for ship in ships:
             if ship.state not in (ST_ALIVE, ST_BURNING):
                 continue                          # sinking/gone: no longer hittable
+            sp = ship.pos
+            dx = mx - sp[0]
+            dy = my - sp[1]
+            dz = mz - sp[2]
+            reach = ship.hit_reach + seg
+            if dx * dx + dy * dy + dz * dz > reach * reach:
+                continue                          # provably out of reach
             center, half, rot = ship.obb()
             if not segment_hits_obb(m.prev_pos, m.pos, center, half, rot):
                 continue

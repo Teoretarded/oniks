@@ -33,6 +33,7 @@ the camera-relative model matrix — no jitter.
 
 from __future__ import annotations
 
+import math
 import time
 
 import numpy as np
@@ -345,16 +346,27 @@ class Terrain:
     def draw(self, renderer) -> None:
         cam = renderer.camera
         self._run_builds(cam)
+        # Scalar per-tile math (Task 22 perf: this loop runs over every land
+        # tile each frame; numpy temporaries per tile dominated the pass).
+        eye = cam.eye
+        ex, ey, ez = eye[0], eye[1], eye[2]
+        fwd = cam.forward
+        fx, fy, fz = fwd[0], fwd[1], fwd[2]
+        lod0_max, lod1_max = LODS[0][1], LODS[1][1]
         for tile in self.tiles:
-            rel = cam.rel(tile.center)
-            if float(np.dot(rel, cam.forward)) < -tile.radius:
+            center = tile.center
+            rx = center[0] - ex
+            ry = center[1] - ey
+            rz = center[2] - ez
+            if (rx * fx + ry * fy + rz * fz) < -tile.radius:
                 continue                    # entirely behind the camera
-            dist = float(np.linalg.norm(rel))
-            lod = next(k for k, (_c, mx) in enumerate(LODS) if dist <= mx)
+            dist = math.sqrt(rx * rx + ry * ry + rz * rz)
+            lod = 0 if dist <= lod0_max else 1 if dist <= lod1_max else 2
             self._request(tile, lod)
-            while tile.meshes[lod] is None:  # fall back while streaming
+            meshes = tile.meshes
+            while meshes[lod] is None:       # fall back while streaming
                 lod += 1
-            renderer.draw_mesh(tile.meshes[lod], tile.center)
+            renderer.draw_mesh(meshes[lod], center)
 
     def delete(self) -> None:
         """Drop queued builds and free all GPU meshes."""

@@ -34,3 +34,41 @@ def test_height_continuity():
     x = np.linspace(-50_000, 50_000, 2000); z = np.full(2000, 100_000.0)
     h = G.terrain_height(x, z)
     assert np.abs(np.diff(h)).max() < 30.0   # no cliffs from hashing artifacts at 50m sampling
+
+def test_terrain_never_exceeds_max_height_bound():
+    """TERRAIN_MAX_HEIGHT is a strict upper bound (missiles above it skip
+    ground-impact queries — Task 22 perf): sample the world densely plus
+    every island peak neighborhood."""
+    x = np.linspace(-340_000, 340_000, 900)
+    z = np.linspace(-40_000, 560_000, 900)
+    assert G.terrain_height(x[None, :], z[:, None]).max() < G.TERRAIN_MAX_HEIGHT
+    for cx, cz, r, peak in G.ISLANDS:
+        xs = np.linspace(cx - r, cx + r, 300)
+        zs = np.linspace(cz - r, cz + r, 300)
+        h = G.terrain_height(xs[None, :], zs[:, None])
+        assert h.max() < G.TERRAIN_MAX_HEIGHT
+
+
+def test_scalar_fast_path_bit_identical():
+    """terrain_height_scalar (Task 22 perf fast path) must be bit-identical
+    to the vectorized terrain_height everywhere: open ocean, coasts, island
+    interiors/shores/skirts, deep shelf, land, and the exact mask edges its
+    conservative skipping logic keys on."""
+    rng = np.random.default_rng(22)
+    xs = list(rng.uniform(-340_000.0, 340_000.0, 400))
+    zs = list(rng.uniform(-40_000.0, 560_000.0, 400))
+    # Hand-picked stress points: base, coast bands, shelf cutoffs, mid ocean.
+    for x, z in [(0.0, -600.0), (0.0, 1_000.0), (0.0, 2_500.0),
+                 (0.0, 14_500.0), (0.0, 14_499.9), (0.0, 150_000.0),
+                 (0.0, 485_500.0), (0.0, 499_000.0), (0.0, 530_000.0),
+                 (12_345.6, 200_000.0)]:
+        xs.append(x); zs.append(z)
+    # Island center / shoreline / skirt / just-outside for every island.
+    for cx, cz, r, _peak in G.ISLANDS:
+        for d in (0.0, 0.5 * r, 0.999 * r, float(r), 1.001 * r, 1.8 * r):
+            xs.append(cx + d); zs.append(cz)
+            xs.append(cx); zs.append(cz - d)
+    expect = G.terrain_height(np.array(xs), np.array(zs))
+    for x, z, e in zip(xs, zs, expect):
+        got = G.terrain_height_scalar(x, z)
+        assert got == e, f"mismatch at ({x}, {z}): {got!r} != {e!r}"

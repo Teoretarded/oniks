@@ -19,12 +19,13 @@ from OpenGL.GL import (
     GL_COLOR_BUFFER_BIT,
     GL_CW,
     GL_DEPTH_BUFFER_BIT,
+    GL_TRUE,
     glClear,
     glClearColor,
     glFrontFace,
+    glUniformMatrix4fv,
 )
 
-from engine import math3d
 from engine.shader import Shader
 from engine.shaderlib import HAZE_GLSL
 
@@ -85,8 +86,6 @@ SUN_HAZE_COLOR = (0.95, 0.86, 0.72)
 FAR = 900_000.0
 MAX_DRAW_DIST = 700_000.0
 
-_IDENTITY3 = np.eye(3, dtype=np.float64)
-
 
 class Renderer:
     """Owns the lit shader and per-frame camera matrices; culls and draws."""
@@ -102,6 +101,12 @@ class Renderer:
         self.camera = None
         self.proj = np.eye(4, dtype=np.float64)
         self.view_rot = np.eye(4, dtype=np.float64)
+        # Scratch model matrix for draw_mesh (Task 22 perf: one f32 (4,4)
+        # reused per draw instead of np.eye + compose + astype each call).
+        # Row 3 stays (0, 0, 0, 1); rows 0-2 are overwritten every draw.
+        self._model = np.zeros((4, 4), dtype=np.float32)
+        self._model[3, 3] = 1.0
+        self._u_model_loc = None       # lit-shader uniform location cache
 
     def begin(self, camera, aspect) -> None:
         """Clear to haze color, store camera, compute proj/view_rot once."""
@@ -129,16 +134,32 @@ class Renderer:
         """Draw ``mesh`` at a float64 world position with the lit shader.
 
         Culls when farther than MAX_DRAW_DIST or when the whole bounding
-        sphere is behind the camera plane.
+        sphere is behind the camera plane. (Scalar math + a reused scratch
+        matrix: this runs for every tile/ship/missile per frame — Task 22.)
         """
         cam = self.camera
-        rel = cam.rel(pos_f64)
-        if float(np.linalg.norm(rel)) > MAX_DRAW_DIST:
+        eye = cam.eye
+        rx = pos_f64[0] - eye[0]
+        ry = pos_f64[1] - eye[1]
+        rz = pos_f64[2] - eye[2]
+        if rx * rx + ry * ry + rz * rz > MAX_DRAW_DIST * MAX_DRAW_DIST:
             return
-        if float(np.dot(rel, cam.forward)) < -mesh.radius * scale:
+        fwd = cam.forward
+        if (rx * fwd[0] + ry * fwd[1] + rz * fwd[2]) < -mesh.radius * scale:
             return
-        rot = _IDENTITY3 if rot3x3 is None else rot3x3
-        model = math3d.compose(rot, rel.astype(np.float32), scale)
+        m = self._model
+        if rot3x3 is None:
+            m[:3, :3] = 0.0
+            m[0, 0] = m[1, 1] = m[2, 2] = scale
+        elif scale == 1.0:
+            m[:3, :3] = rot3x3
+        else:
+            np.multiply(rot3x3, scale, out=m[:3, :3])
+        m[0, 3] = rx
+        m[1, 3] = ry
+        m[2, 3] = rz
         self.lit.use()
-        self.lit.set_mat4("u_model", model)
+        if self._u_model_loc is None:
+            self._u_model_loc = self.lit._loc("u_model")
+        glUniformMatrix4fv(self._u_model_loc, 1, GL_TRUE, m)
         mesh.draw()
