@@ -88,6 +88,7 @@ physics works, game is optimized, models look good."
   drag/zoom, mid-flight retarget + kill, S-300 hang-launch + aircraft kill, F1, pause,
   resume, quit). All harness scenes re-rendered and critiqued against the reference
   images one final time; harbor backlog item closed (see above).
+- **2026-06-11 S6 perf re-gate (S-300 expansion complete).** Worst-case scene expanded with
   the 4 patrol aircraft (one shot down overhead: falling spiral + smoke/flame emission all
   600 frames) and 2 S-300s coasting in midcourse with full trail ribbons (honest
   out-of-envelope shots, steering every frame) on top of the v1 load (14 ships, 2 burning,
