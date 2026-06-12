@@ -717,7 +717,7 @@ class TacticalMap:
 
     def _sites(self) -> None:
         s = SITE_HALF_PX
-        for site in SITES:
+        for site in self.sandbox.world.sites:
             sx, sy = self.view.world_to_screen(site["pos"])
             if not self._on_screen(sx, sy, pad=120.0):
                 continue
