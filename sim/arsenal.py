@@ -122,13 +122,16 @@ SM2 = SamDef(
     max_g=25.0, fuse_radius=20.0,
     terminal_range=20_000.0, max_range=150_000.0,
     self_destruct_t=180.0, self_destruct_speed=250.0,
-    # Engagement floor 100 m: semi-active illumination against a sea-skimmer
-    # in clutter is the SM-2's hard problem (why CIWS exists as the inner
-    # layer) — and the spec's profile contract (§5.2 "lo-lo becomes king")
-    # requires the Oniks 60 m lo cruise to fly UNDER this floor. Matches the
-    # modeled S-300 floor. Two-sided regression:
-    # tests/test_enemy_defense.py::test_lo_cruise_above_horizon_is_below_sm2_floor
-    min_intercept_alt=100.0, max_intercept_alt=24_000.0,
+    # Engagement floor 25 m: real Aegis engages sea-skimmers all the way
+    # down to the wavetops — there is no altitude at which the ship simply
+    # refuses to shoot. What keeps the spec's profile contract ("lo-lo
+    # becomes king", §5.2) is PHYSICS, not this gate: below MULTIPATH_ALT_M
+    # (sim/sam.py) the position the SM-2 guides on carries low-elevation
+    # multipath noise, so sea-skim shots miss often while hi flyers stay
+    # near-certain kills. Statistical contract (supersedes the old
+    # floor-justification regression): tests/test_sm2_statistics.py —
+    # hi batch kill >= 0.75, lo batch within [0.2, 0.65].
+    min_intercept_alt=25.0, max_intercept_alt=24_000.0,
 )
 
 
