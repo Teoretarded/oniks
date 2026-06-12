@@ -63,6 +63,19 @@ physics works, game is optimized, models look good."
 
 ## Iterations
 
+- **2026-06-12 map-freeze fix (user bug report: app Not Responding on M).**
+  Measured root cause: build_map_pixels ran the DENSE vectorized terrain_height
+  (55 noise layers everywhere) over 1024^2 points on the main thread at the first
+  M press — 42.4 s frozen, no event pumping, Windows flags Not Responding; all
+  input appears dead and terrain streaming stalls (explains the flat-terrain
+  report too — streaming resumed after the freeze). Fixes: (1) masked vectorized
+  terrain_height (continent bands / island interiors+skirts / floor-only-where-
+  it-wins) — bit-identical vs the scalar path on 4,845 boundary-stress points,
+  42.4 s -> 3.9 s; (2) map pixels build in a daemon thread kicked at sandbox
+  construction + disk cache (cache/map_pixels_v1_seed1337_1024.npy) — M press now
+  blocks 0.019 s worst case and shows BUILDING MAP if pressed inside the first
+  seconds; (3) BUILDING WORLD loading frame on SANDBOX click (prior commit).
+  Full suite green.
 - **2026-06-12 turn-dynamics fix (user playtest feedback, controller solo).**
   User reported missiles cornering instantly at launch (visible trail kink) and the
   S-300 platform accepting waypoint paths it ignores. Measured: velocity-direction
