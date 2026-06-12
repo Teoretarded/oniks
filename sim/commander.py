@@ -1,0 +1,988 @@
+"""Enemy commander AI — the brain on the enemy side (pure numpy, GL-free).
+
+ORDER SCHEMA
+============
+Every order issued by EnemyCommander is a plain dict.  The integrator
+(world/combat.py or a Phase-5b wiring layer) reads it and calls into the
+relevant entity.  Defined schemas:
+
+  VECTOR_TO_DRONE:
+      {"type": "vector_to_drone", "fighter_id": str,
+       "target_pos": np.ndarray,   # last-known XZ of the drone
+       "aim9x": True}
+      Instructs the named fighter to fly toward target_pos and engage with
+      its IR missiles once close enough.  The fighter's own nose-radar
+      reacquire + IR lock logic is downstream; the commander only says "go".
+
+  AWACS_FLEE:
+      {"type": "awacs_flee", "threat_pos": np.ndarray}
+      Passed to Awacs.flee(); issued when a player missile track is within
+      AWACS_FLEE_RANGE_M.
+
+  AWACS_RESUME:
+      {"type": "awacs_resume"}
+      Passed to Awacs.stop_flee(); issued when no player missile track is
+      within AWACS_FLEE_RANGE_M.
+
+  SHIP_SILENT:
+      {"type": "ship_silent", "ship_id": str}
+      Tell the ship's radar to go silent (emitting = False).
+
+  SHIP_EMIT:
+      {"type": "ship_emit", "ship_id": str}
+      Tell the ship's radar to start emitting (for self-defense).
+
+  HARM_PACKAGE:
+      {"type": "harm_package",
+       "target_pos": np.ndarray,           # believed player radar XZ
+       "target_id": str,                   # structure id in the enemy picture
+       "fighter_ids": list[str],           # exactly 2 fighters
+       "harms_per_fighter": int,           # 2
+       "ingress_alt_m": float,             # HARM_INGRESS_ALT_M = 150
+       "standoff_m": float}                # HARM_STANDOFF_M = 90_000
+      Instructs two fighters to fly a HARM strike package.  Ingress LOW
+      inside the player radar horizon-extended envelope, pop to cruise alt
+      and release at standoff.
+
+  JASSM_PACKAGE:
+      {"type": "jassm_package",
+       "target_pos": np.ndarray,           # believed bastion XZ
+       "target_id": str,                   # cluster id
+       "fighter_ids": list[str],           # exactly 2 fighters
+       "jassms_per_fighter": int,          # 2
+       "standoff_m": float}                # JASSM_STANDOFF_M = 250_000
+      Instructs two fighters to release JASSMs at the cluster from standoff.
+
+  TOMAHAWK_SALVO:
+      {"type": "tomahawk_salvo",
+       "target_pos": np.ndarray,           # believed bastion XZ
+       "target_id": str}                   # cluster id
+      Triggers EnemyStrikeController-style Tomahawk salvo at a bastion
+      cluster (the docstring seam).  The integrator calls
+      commander.fire_tomahawk_at(target_pos) or wires its own salvo
+      mechanism; the order signals intent.
+
+INTEL MODEL
+===========
+The commander holds an EnemyPicture: a side-level intel store derived
+entirely from sensor events the enemy side can physically observe.
+No truth peeking — every targeting decision traces to a sensor event.
+
+  emitter_intel: emitter_id -> {"pos": ..., "alive": bool, "fix": float}
+      Built from ESM localization progress (generalized from
+      sim/enemy_strikes.py): a fix accumulates while the radar emits and
+      any enemy sensor can hear it.
+
+  launch_back_plots: list of BackPlotEntry
+      When an enemy radar (typically the AWACS look-down) holds a track on
+      a player missile whose first-detected altitude is < BACKPLOT_LOW_ALT_M
+      and first-detected age is < BACKPLOT_MAX_AGE_S, the observed velocity
+      is extrapolated backward to the surface to estimate the launch site.
+      Error grows with detection range (BACKPLOT_ERR_FRAC * range).
+      After BACKPLOT_FIXES_NEEDED distinct back-plots cluster within
+      BACKPLOT_CLUSTER_R_M, the cluster is TARGETABLE.
+
+  known_structures: structure_id -> {"pos": ..., "alive": bool, "kind": str}
+      Radar station: located via ESM fix.
+      Bastion clusters: located via back-plot accumulation.
+      A structure is marked alive=False when a friendly weapon records an
+      impact on it (observed outcome); it is marked alive=True again when
+      the emitter re-lights (the belief is reset by evidence).
+
+DOCTRINE (priority order, evaluated each tick)
+===============================================
+1. DEFEND:
+   - Vector the nearest armed CAP fighter at any drone track the picture
+     holds (AIM-9X hunt order VECTOR_TO_DRONE).
+   - AWACS: flee when any player missile track closes to AWACS_FLEE_RANGE_M;
+     resume orbit when clear.
+   - Ship radar silence: SILENT when a drone track exists in the picture
+     and the ship's sector is quiet; EMIT when inbound missile tracks exist
+     (self-defense beats stealth).
+
+2. BLIND:
+   While the player radar station is believed alive and located, and HARM
+   stock remains, schedule HARM strike packages
+   (2 fighters, 2 HARM each, HARM_INGRESS_ALT_M = 150 m inside the
+    radar's horizon-extended envelope, pop to HARM_STANDOFF_M = 90 km).
+
+3. KILL:
+   While a bastion cluster is targetable:
+   - JASSM packages (2 fighters x 2 JASSM, JASSM_STANDOFF_M = 250 km).
+   - Tomahawk salvos (TOMAHAWK_SALVO orders at the cluster).
+
+DETERMINISM
+===========
+Given the same seed and the same sequence of picture updates the commander
+produces identical orders.  Internal random state is carried by a single
+np.random.Generator seeded once at construction.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# Module-level constants (all named with units and justification comments)
+# ---------------------------------------------------------------------------
+
+# ESM fix accumulation: generalised from sim/enemy_strikes.py.
+ESM_FIX_TIME_S: float = 90.0       # s of cumulative emission for a full fix
+ESM_DECAY_FACTOR: float = 0.5      # silent decay rate = half the accrual rate
+
+# Back-plot geometry (spec section 6 "back-plot launch point").
+BACKPLOT_LOW_ALT_M: float = 2_000.0   # m; missile must be below this when
+#                                        first detected to back-plot cleanly
+BACKPLOT_MAX_AGE_S: float = 30.0      # s; track age at first detection must
+#                                        be <= this (young track = fresh launch)
+BACKPLOT_ERR_FRAC: float = 0.02       # error = detection range × this fraction
+#                                        (2% of range: at 50 km = 1 km error)
+BACKPLOT_CLUSTER_R_M: float = 3_000.0  # m cluster radius — back-plots within
+#                                         this distance belong to one launch site
+BACKPLOT_FIXES_NEEDED: int = 3        # distinct launches before targetable
+
+# AWACS flee range (spec section 6 "AWACS: order flee when any player missile
+# track closes within ...").
+AWACS_FLEE_RANGE_M: float = 100_000.0  # m
+
+# Strike geometry (spec section 6 mission generator).
+HARM_INGRESS_ALT_M: float = 150.0     # m AGL ingress altitude for HARM package
+HARM_STANDOFF_M: float = 90_000.0     # m HARM launch standoff (within HARM
+#                                        max range, outside player radar horizon)
+JASSM_STANDOFF_M: float = 250_000.0   # m JASSM launch standoff (outside S-300
+#                                        max range 150 km — gives ~100 km margin)
+
+# Weapon magazine stocks per platform (spec section 6 mission generator).
+AIRFIELD_JASSM: int = 8
+AIRFIELD_HARM: int = 8
+CARRIER_JASSM: int = 6
+CARRIER_HARM: int = 6
+# AIM-9X: unlimited pairs at rearm (spec §5.1 "2 × AIM-9X-class IR missiles").
+# The magazine never runs out; we represent it as a large pool per fighter
+# for stock checks (each fighter carries 2 per sortie, unlimited at rearm).
+AIM9X_PER_FIGHTER: int = 2
+
+# Commander tick cadence (spec section 6: "~1 Hz").
+COMMANDER_TICK_S: float = 1.0   # s between doctrine evaluations
+
+# HARM fighters approach inside the player radar horizon before popping; using
+# the player's horizon-vs-fighter as a proxy for "when the player can see us"
+# gives a conservative estimate — we subtract a safety margin to stay masked.
+# Derived: player radar antenna 18 m, fighter 9 000 m → horizon ~393 km vs
+# the radar station for a high-flying fighter.  The ingress at 150 m reduces
+# the combined horizon to ~37 km.  We use the param HARM_STANDOFF_M as the
+# pop-up point instead of computing this live — the mission generator passes
+# it to the fighter as a standoff parameter; execution is downstream.
+
+
+# ---------------------------------------------------------------------------
+# Internal data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EmitterIntel:
+    """What the enemy side knows about one player radar emitter."""
+    emitter_id: str
+    believed_pos: np.ndarray          # (3,) float64, XYZ estimate
+    alive: bool = True
+    fix_progress: float = 0.0         # 0..1; 1 = firing-quality fix
+    last_heard_t: float = -1.0        # sim_time of last ESM interception
+
+    @property
+    def located(self) -> bool:
+        # Use >= (1 - epsilon) to handle floating-point accumulation near the
+        # limit (90 integer dt steps of 1/90 each may land at 0.9999...84).
+        return self.fix_progress >= (1.0 - 1e-9)
+
+
+@dataclass
+class BackPlotEntry:
+    """One back-plotted launch-site estimate."""
+    estimated_pos: np.ndarray   # (2,) XZ estimate
+    error_m: float              # 1-sigma position error (detection range × frac)
+    sim_time: float             # when this estimate was produced
+    track_id: str               # missile track that generated this fix
+
+
+@dataclass
+class LaunchCluster:
+    """A grouping of back-plot estimates that has accumulated enough fixes
+    to be considered a confirmed launch site."""
+    centre: np.ndarray          # (2,) XZ centroid of the cluster
+    fixes: list[BackPlotEntry] = field(default_factory=list)
+    believed_alive: bool = True
+
+    @property
+    def targetable(self) -> bool:
+        """True once BACKPLOT_FIXES_NEEDED distinct launches have been observed
+        from within BACKPLOT_CLUSTER_R_M of the cluster centre."""
+        return len(self.fixes) >= BACKPLOT_FIXES_NEEDED and self.believed_alive
+
+
+@dataclass
+class KnownStructure:
+    """Enemy-side belief about a player fixed structure."""
+    structure_id: str
+    kind: str                   # "radar_station" | "bastion_cluster"
+    believed_pos: np.ndarray    # (3,) XYZ
+    believed_alive: bool = True
+
+
+# ---------------------------------------------------------------------------
+# EnemyPicture — the enemy-side intel store
+# ---------------------------------------------------------------------------
+
+class EnemyPicture:
+    """Enemy side's sensor-derived picture of the player.
+
+    Updated by EnemyCommander.update_picture() each tick.  Nothing here
+    peeks at simulation truth — all fields are derived from sensor events
+    passed in from the outside.
+    """
+
+    def __init__(self) -> None:
+        # Emitter localization (ESM fix, generalised from enemy_strikes.py)
+        self.emitters: dict[str, EmitterIntel] = {}
+
+        # Back-plot launch-site estimates (raw, per-missile)
+        self._back_plots: list[BackPlotEntry] = []
+
+        # Clustered launch sites (confirmed after BACKPLOT_FIXES_NEEDED fixes)
+        self.clusters: list[LaunchCluster] = []
+
+        # Known player structures (radar station + bastion clusters)
+        self.structures: dict[str, KnownStructure] = {}
+
+        # Drone tracks: aircraft_id -> last-known pos (XZ) + sim_time
+        self.drone_tracks: dict[str, dict] = {}
+
+        # Player missile tracks: track_id -> {"pos", "vel", "alt_at_first",
+        # "range_at_first", "age_at_first", "first_seen_t"}
+        self.missile_tracks: dict[str, dict] = {}
+
+    # --------------------------------------------------------------------- ESM
+
+    def update_emitter(
+        self,
+        emitter_id: str,
+        believed_pos: np.ndarray,
+        is_emitting: bool,
+        dt: float,
+        sim_time: float,
+    ) -> None:
+        """Advance the ESM localization fix for one emitter.
+
+        Called by EnemyCommander.tick() for every enemy radar that has LoS to
+        the emitter.  Mirrors the accrual/decay math from enemy_strikes.py.
+        """
+        ei = self.emitters.get(emitter_id)
+        if ei is None:
+            ei = EmitterIntel(
+                emitter_id=emitter_id,
+                believed_pos=np.asarray(believed_pos, dtype=np.float64).copy(),
+            )
+            self.emitters[emitter_id] = ei
+
+        ei.believed_pos[:] = believed_pos   # track the last-known position
+
+        if is_emitting:
+            ei.fix_progress = min(1.0, ei.fix_progress + dt / ESM_FIX_TIME_S)
+            ei.last_heard_t = sim_time
+        else:
+            ei.fix_progress = max(
+                0.0, ei.fix_progress - ESM_DECAY_FACTOR * dt / ESM_FIX_TIME_S)
+
+    def mark_emitter_destroyed(self, emitter_id: str) -> None:
+        ei = self.emitters.get(emitter_id)
+        if ei is not None:
+            ei.alive = False
+
+    def mark_emitter_alive(self, emitter_id: str) -> None:
+        """Re-illuminate event (radar turned back on) resets the belief."""
+        ei = self.emitters.get(emitter_id)
+        if ei is not None:
+            ei.alive = True
+
+    # --------------------------------------------------------- back-plot
+
+    def add_back_plot(
+        self,
+        estimated_xz: np.ndarray,   # (2,) float64
+        error_m: float,
+        sim_time: float,
+        track_id: str,
+    ) -> None:
+        """Record one back-plotted launch-site estimate and update clusters."""
+        entry = BackPlotEntry(
+            estimated_pos=np.asarray(estimated_xz, dtype=np.float64).copy(),
+            error_m=error_m,
+            sim_time=sim_time,
+            track_id=track_id,
+        )
+        self._back_plots.append(entry)
+        self._update_clusters(entry)
+
+    def _update_clusters(self, entry: BackPlotEntry) -> None:
+        """Add the entry to an existing cluster within BACKPLOT_CLUSTER_R_M,
+        or start a new cluster.
+
+        A cluster grows when its centre is within the cluster radius of the
+        new estimate.  On each addition the centroid is recalculated from all
+        fixes in the cluster.  Track ids are deduplicated: a single missile
+        can only contribute one fix per cluster (prevents a single long-track
+        from satisfying BACKPLOT_FIXES_NEEDED by itself)."""
+        ep = entry.estimated_pos
+        for cluster in self.clusters:
+            dist = math.hypot(
+                float(ep[0]) - float(cluster.centre[0]),
+                float(ep[1]) - float(cluster.centre[1]),
+            )
+            if dist <= BACKPLOT_CLUSTER_R_M:
+                # Deduplicate: same track_id already represented?
+                existing_ids = {f.track_id for f in cluster.fixes}
+                if entry.track_id not in existing_ids:
+                    cluster.fixes.append(entry)
+                    # Recompute centroid
+                    xs = [f.estimated_pos[0] for f in cluster.fixes]
+                    zs = [f.estimated_pos[1] for f in cluster.fixes]
+                    cluster.centre = np.array(
+                        [sum(xs) / len(xs), sum(zs) / len(zs)],
+                        dtype=np.float64,
+                    )
+                return
+        # No matching cluster — start one
+        new_cluster = LaunchCluster(centre=ep.copy())
+        new_cluster.fixes.append(entry)
+        self.clusters.append(new_cluster)
+
+    def targetable_clusters(self) -> list[LaunchCluster]:
+        return [c for c in self.clusters if c.targetable]
+
+    # ---------------------------------------------------------- drone tracks
+
+    def update_drone_track(
+        self,
+        aircraft_id: str,
+        pos_xz: np.ndarray,
+        sim_time: float,
+    ) -> None:
+        self.drone_tracks[aircraft_id] = {
+            "pos": np.asarray(pos_xz, dtype=np.float64).copy(),
+            "t": sim_time,
+        }
+
+    def clear_drone_track(self, aircraft_id: str) -> None:
+        self.drone_tracks.pop(aircraft_id, None)
+
+    def live_drone_tracks(self, now: float, max_age: float = 30.0) -> list[dict]:
+        """Drone tracks last updated within max_age seconds."""
+        return [
+            {"id": aid, **v}
+            for aid, v in self.drone_tracks.items()
+            if now - v["t"] <= max_age
+        ]
+
+    # ------------------------------------------------------- missile tracks
+
+    def update_missile_track(
+        self,
+        track_id: str,
+        pos: np.ndarray,
+        vel: np.ndarray,
+        sim_time: float,
+        first_seen_t: Optional[float] = None,
+        alt_at_first: Optional[float] = None,
+        range_at_first: Optional[float] = None,
+    ) -> None:
+        """Record or refresh an enemy-radar missile track."""
+        mt = self.missile_tracks.get(track_id)
+        if mt is None:
+            mt = {
+                "pos": pos.copy(),
+                "vel": vel.copy(),
+                "t": sim_time,
+                "first_seen_t": first_seen_t if first_seen_t is not None else sim_time,
+                "alt_at_first": alt_at_first,
+                "range_at_first": range_at_first,
+            }
+            self.missile_tracks[track_id] = mt
+        else:
+            mt["pos"] = pos.copy()
+            mt["vel"] = vel.copy()
+            mt["t"] = sim_time
+
+    def live_missile_tracks(self, now: float, max_age: float = 30.0) -> list[dict]:
+        return [
+            {"id": tid, **v}
+            for tid, v in self.missile_tracks.items()
+            if now - v["t"] <= max_age
+        ]
+
+    def prune_missile_tracks(self, live_ids: set, now: float) -> None:
+        """Remove tracks for missiles that no longer exist."""
+        self.missile_tracks = {
+            k: v for k, v in self.missile_tracks.items()
+            if k in live_ids or now - v["t"] <= 30.0
+        }
+
+
+# ---------------------------------------------------------------------------
+# MissionState — one active strike package
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MissionState:
+    """Tracks the state of a strike package currently in progress."""
+    mission_type: str      # "harm_package" | "jassm_package" | "tomahawk_salvo"
+    target_id: str
+    fighter_ids: list[str]
+    jassm_consumed: int = 0
+    harm_consumed: int = 0
+    # Tomahawk salvos draw from the weapon controller; just record the order.
+    order_issued: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Weapon stock (enemy side, per the mission generator constants)
+# ---------------------------------------------------------------------------
+
+class WeaponStock:
+    """Tracks remaining JASSM / HARM magazines across the airfield and carrier."""
+
+    def __init__(self) -> None:
+        self.airfield_jassm: int = AIRFIELD_JASSM
+        self.airfield_harm: int = AIRFIELD_HARM
+        self.carrier_jassm: int = CARRIER_JASSM
+        self.carrier_harm: int = CARRIER_HARM
+
+    @property
+    def total_jassm(self) -> int:
+        return self.airfield_jassm + self.carrier_jassm
+
+    @property
+    def total_harm(self) -> int:
+        return self.airfield_harm + self.carrier_harm
+
+    def can_arm_harm_package(self, harms_needed: int = 4) -> bool:
+        """True when there are enough HARMs for one full package."""
+        return self.total_harm >= harms_needed
+
+    def can_arm_jassm_package(self, jassms_needed: int = 4) -> bool:
+        """True when there are enough JASSMs for one full package."""
+        return self.total_jassm >= jassms_needed
+
+    def consume_harm(self, count: int) -> None:
+        """Deduct HARMs from magazines (airfield first)."""
+        for _ in range(count):
+            if self.airfield_harm > 0:
+                self.airfield_harm -= 1
+            elif self.carrier_harm > 0:
+                self.carrier_harm -= 1
+
+    def consume_jassm(self, count: int) -> None:
+        """Deduct JASSMs from magazines (airfield first)."""
+        for _ in range(count):
+            if self.airfield_jassm > 0:
+                self.airfield_jassm -= 1
+            elif self.carrier_jassm > 0:
+                self.carrier_jassm -= 1
+
+
+# ---------------------------------------------------------------------------
+# EnemyCommander
+# ---------------------------------------------------------------------------
+
+class EnemyCommander:
+    """Enemy side strategic commander (spec section 6).
+
+    Ticks at COMMANDER_TICK_S (1 Hz) cadence; stepped from world/combat.py
+    alongside defense and strikes controllers.  Deterministic given a fixed
+    seed and the same sequence of picture updates.
+
+    Parameters
+    ----------
+    fighters :
+        List of Fighter objects (sim/enemy_air.py) — the air wing.
+    awacs :
+        The Awacs orbiter (sim/enemy_air.py).
+    destroyers :
+        List of Destroyer / Carrier ships — ship radar silence is ordered
+        here; the ships' own fire control (enemy_defense.py) still handles
+        SM-2 launches autonomously.
+    picture :
+        EnemyPicture instance (may be shared with / populated by the world).
+        If None, one is created internally (useful for tests).
+    weapon_stock :
+        WeaponStock instance.  If None, full stocks are assumed.
+    seed :
+        RNG seed for determinism.  Same seed + same picture sequence = same
+        orders.
+    """
+
+    def __init__(
+        self,
+        fighters: list,
+        awacs,
+        destroyers: list,
+        picture: Optional[EnemyPicture] = None,
+        weapon_stock: Optional[WeaponStock] = None,
+        seed: int = 0,
+    ) -> None:
+        self.fighters = list(fighters)
+        self.awacs = awacs
+        self.destroyers = list(destroyers)
+        self.picture: EnemyPicture = (picture
+                                      if picture is not None else EnemyPicture())
+        self.stock: WeaponStock = (weapon_stock
+                                   if weapon_stock is not None else WeaponStock())
+        self._rng = np.random.default_rng(seed)
+
+        # Tick state
+        self._next_tick: float = 0.0   # sim_time at which the next tick fires
+
+        # Pending orders queue: cleared each tick and handed to the integrator
+        self.pending_orders: list[dict] = []
+
+        # Active missions: prevent duplicate packages
+        self._active_missions: list[MissionState] = []
+
+        # AWACS flee state (tracks whether a flee order is currently in effect)
+        self._awacs_fleeing: bool = False
+
+    # ------------------------------------------------------------------ tick
+
+    def tick(self, sim_time: float, dt: float) -> list[dict]:
+        """Evaluate doctrine at 1 Hz.
+
+        Returns the list of NEW orders issued this tick (also stored in
+        ``self.pending_orders`` for the integrator to consume).  The integrator
+        should clear pending_orders after reading it each step.
+        """
+        if sim_time < self._next_tick:
+            return []
+        self._next_tick = sim_time + COMMANDER_TICK_S
+        self.pending_orders = []
+
+        # --- DOCTRINE (evaluated top-down; all branches run, no short-circuit
+        # --- because all four categories can generate orders simultaneously)
+
+        self._doctrine_defend(sim_time)
+        self._doctrine_blind(sim_time)
+        self._doctrine_kill(sim_time)
+
+        return list(self.pending_orders)
+
+    # ---------------------------------------------------------------- defend
+
+    def _doctrine_defend(self, sim_time: float) -> None:
+        """DEFEND: drone vectoring, AWACS flee, ship radar silence."""
+        self._defend_vs_drone(sim_time)
+        self._defend_awacs(sim_time)
+        self._defend_ship_radars(sim_time)
+
+    def _defend_vs_drone(self, sim_time: float) -> None:
+        """Vector the nearest armed CAP fighter at any live drone track."""
+        drone_tracks = self.picture.live_drone_tracks(sim_time)
+        if not drone_tracks:
+            return
+        # Pick the most recent drone track (could be multiple drones in future)
+        target_track = max(drone_tracks, key=lambda t: t["t"])
+        target_pos = target_track["pos"]   # XZ
+
+        # Find the nearest airborne fighter that could be armed with AIM-9X
+        best_fighter = None
+        best_dist = math.inf
+        from sim.enemy_air import (FS_TAKEOFF, FS_TRANSIT, FS_ON_STATION)
+        airborne_states = (FS_TAKEOFF, FS_TRANSIT, FS_ON_STATION)
+        for f in self.fighters:
+            if not f.alive or f.state not in airborne_states:
+                continue
+            dist = math.hypot(
+                float(f.pos[0]) - float(target_pos[0]),
+                float(f.pos[2]) - float(target_pos[1]),  # XZ in track
+            )
+            if dist < best_dist:
+                best_dist = dist
+                best_fighter = f
+
+        if best_fighter is not None:
+            target_3d = np.array(
+                [float(target_pos[0]), 0.0, float(target_pos[1])],
+                dtype=np.float64,
+            )
+            self.pending_orders.append({
+                "type": "vector_to_drone",
+                "fighter_id": best_fighter.aircraft_id,
+                "target_pos": target_3d,
+                "aim9x": True,
+            })
+
+    def _defend_awacs(self, sim_time: float) -> None:
+        """Issue AWACS flee / resume orders based on missile tracks."""
+        if self.awacs is None or not self.awacs.alive:
+            return
+        missile_tracks = self.picture.live_missile_tracks(sim_time)
+        awacs_pos = self.awacs.pos   # (3,) XYZ
+
+        threat_close = False
+        for mt in missile_tracks:
+            mpos = mt["pos"]
+            dist = math.hypot(
+                float(mpos[0]) - float(awacs_pos[0]),
+                float(mpos[2]) - float(awacs_pos[2]),
+            )
+            if dist <= AWACS_FLEE_RANGE_M:
+                threat_close = True
+                self.pending_orders.append({
+                    "type": "awacs_flee",
+                    "threat_pos": mpos.copy(),
+                })
+                self._awacs_fleeing = True
+                break   # one order is enough; the awacs picks the bearing
+
+        if not threat_close and self._awacs_fleeing:
+            self.pending_orders.append({"type": "awacs_resume"})
+            self._awacs_fleeing = False
+
+    def _defend_ship_radars(self, sim_time: float) -> None:
+        """Manage per-ship radar silence.
+
+        Logic:
+          * Inbound missile tracks -> EMIT (self-defense beats stealth).
+          * Drone track exists (recon threat) and no inbound missiles -> SILENT.
+          * Neither -> no change.
+        """
+        missile_tracks = self.picture.live_missile_tracks(sim_time)
+        drone_tracks = self.picture.live_drone_tracks(sim_time)
+        has_inbound = len(missile_tracks) > 0
+        drone_present = len(drone_tracks) > 0
+
+        for ship in self.destroyers:
+            if not ship.alive:
+                continue
+            radar = getattr(ship, "radar", None)
+            if radar is None:
+                continue
+            if has_inbound:
+                # Self-defense outranks stealth
+                if not radar.emitting:
+                    self.pending_orders.append({
+                        "type": "ship_emit",
+                        "ship_id": ship.ship_id,
+                    })
+            elif drone_present:
+                # Drone is a threat to the ship's radar emissions
+                if radar.emitting:
+                    self.pending_orders.append({
+                        "type": "ship_silent",
+                        "ship_id": ship.ship_id,
+                    })
+
+    # ----------------------------------------------------------------- blind
+
+    def _doctrine_blind(self, sim_time: float) -> None:
+        """BLIND: schedule HARM packages while the player radar is believed
+        alive and located AND HARM stock remains.
+
+        Spec doctrine order: BLIND comes before KILL (the commander first
+        tries to remove the player's eyes before attacking the TELs).
+        No HARM package is generated if HARM stock is empty — it would be
+        a paper order."""
+        # Check whether there is already an active HARM mission
+        active_harm = any(m.mission_type == "harm_package"
+                          for m in self._active_missions)
+        if active_harm:
+            return
+
+        # Does the picture hold the player radar station?
+        radar_intel = self._believed_radar_station()
+        if radar_intel is None:
+            return   # not located — nothing to BLIND
+        if not radar_intel.alive:
+            return   # believed destroyed — move on
+
+        if not self.stock.can_arm_harm_package(harms_needed=4):
+            return   # Winchester on HARM — cannot generate package
+
+        fighters = self._select_fighters_for_strike(2)
+        if len(fighters) < 2:
+            return   # not enough ready fighters
+
+        target_3d = np.array(
+            [float(radar_intel.believed_pos[0]),
+             float(radar_intel.believed_pos[1]),
+             float(radar_intel.believed_pos[2])],
+            dtype=np.float64,
+        )
+        mission = MissionState(
+            mission_type="harm_package",
+            target_id=radar_intel.emitter_id,
+            fighter_ids=[f.aircraft_id for f in fighters],
+            harm_consumed=4,
+        )
+        self._active_missions.append(mission)
+        self.stock.consume_harm(4)
+
+        self.pending_orders.append({
+            "type": "harm_package",
+            "target_pos": target_3d.copy(),
+            "target_id": radar_intel.emitter_id,
+            "fighter_ids": [f.aircraft_id for f in fighters],
+            "harms_per_fighter": 2,
+            "ingress_alt_m": HARM_INGRESS_ALT_M,
+            "standoff_m": HARM_STANDOFF_M,
+        })
+
+    # ------------------------------------------------------------------ kill
+
+    def _doctrine_kill(self, sim_time: float) -> None:
+        """KILL: JASSM packages + Tomahawk salvos at targetable bastion clusters.
+
+        Doctrine priority (spec section 6): BLIND comes before KILL.
+        The JASSM branch is GATED: no JASSM package is issued while the player
+        radar station is believed alive AND HARM stock remains.  The commander
+        must first attempt to blind the player before launching strike packages.
+        If the radar is alive but HARM stock is exhausted the gate releases the
+        JASSM branch — we cannot blind, but we can still attempt to kill.
+        Tomahawk salvos run regardless of the radar belief (cruise missiles fly
+        on GPS/INS, not dependent on the radar being blind).
+
+        Only fires when at least one cluster is targetable.  One JASSM mission
+        and one Tomahawk salvo per cluster per tick (the integrator throttles
+        further via the base fighter availability and Tomahawk reload timer
+        from enemy_strikes.py).
+        """
+        targetable = self.picture.targetable_clusters()
+        if not targetable:
+            return
+
+        # Blind-before-kill gate for JASSM: while the player radar station is
+        # believed alive (located + not destroyed), suppress JASSM packages
+        # entirely.  The commander must not launch air-to-ground strikes against
+        # the Bastion while the player's radar network is still up — doctrine
+        # requires blinding the enemy before exposing strike aircraft in a
+        # defended SAM environment (spec section 6 "Find -> Blind -> Kill").
+        # If HARM stock is exhausted the gate remains: the commander is
+        # effectively stalled at BLIND and cannot proceed to KILL until the
+        # radar station is either destroyed or belief changes.
+        radar_alive = self._believed_radar_station() is not None
+        jassm_gated = radar_alive   # strict blind-before-kill
+
+        for cluster in targetable:
+            cid = f"cluster_{id(cluster)}"
+
+            # Check whether there is already an active JASSM mission for this
+            # cluster (one active package per cluster at a time).
+            active_jassm = any(
+                m.mission_type == "jassm_package" and m.target_id == cid
+                for m in self._active_missions
+            )
+
+            if (not active_jassm
+                    and not jassm_gated      # blind-before-kill gate
+                    and self.stock.can_arm_jassm_package(jassms_needed=4)):
+                fighters = self._select_fighters_for_strike(2)
+                if len(fighters) >= 2:
+                    target_3d = np.array(
+                        [float(cluster.centre[0]), 0.0, float(cluster.centre[1])],
+                        dtype=np.float64,
+                    )
+                    mission = MissionState(
+                        mission_type="jassm_package",
+                        target_id=cid,
+                        fighter_ids=[f.aircraft_id for f in fighters],
+                        jassm_consumed=4,
+                    )
+                    self._active_missions.append(mission)
+                    self.stock.consume_jassm(4)
+                    self.pending_orders.append({
+                        "type": "jassm_package",
+                        "target_pos": target_3d.copy(),
+                        "target_id": cid,
+                        "fighter_ids": [f.aircraft_id for f in fighters],
+                        "jassms_per_fighter": 2,
+                        "standoff_m": JASSM_STANDOFF_M,
+                    })
+
+            # Always issue a Tomahawk salvo order alongside or instead of JASSM
+            # (Tomahawk inventory is managed by EnemyStrikeController; the
+            # commander issues the intent and the integration layer routes it).
+            active_tlam = any(
+                m.mission_type == "tomahawk_salvo" and m.target_id == cid
+                for m in self._active_missions
+            )
+            if not active_tlam:
+                target_3d = np.array(
+                    [float(cluster.centre[0]), 0.0, float(cluster.centre[1])],
+                    dtype=np.float64,
+                )
+                mission = MissionState(
+                    mission_type="tomahawk_salvo",
+                    target_id=cid,
+                    fighter_ids=[],
+                )
+                self._active_missions.append(mission)
+                self.pending_orders.append({
+                    "type": "tomahawk_salvo",
+                    "target_pos": target_3d.copy(),
+                    "target_id": cid,
+                })
+
+    # --------------------------------------------------------- helpers
+
+    def _believed_radar_station(self) -> Optional[EmitterIntel]:
+        """Return the EmitterIntel for the player radar station if located and
+        believed alive; None otherwise."""
+        for ei in self.picture.emitters.values():
+            if ei.located and ei.alive:
+                return ei
+        return None
+
+    def _select_fighters_for_strike(self, needed: int) -> list:
+        """Return up to ``needed`` fighters that are PARKED and rearmed at a
+        live base (ready to launch immediately).  Deterministic: fighters are
+        iterated in construction order; the RNG is not used here (ordering is
+        stable)."""
+        from sim.enemy_air import FS_PARKED, AirBase
+        available = []
+        for f in self.fighters:
+            if len(available) >= needed:
+                break
+            if f.state != FS_PARKED:
+                continue
+            if not f._alive:
+                continue
+            # Must be at a live base
+            if not f._base.alive:
+                continue
+            available.append(f)
+        return available
+
+    def complete_mission(self, mission_type: str, target_id: str) -> None:
+        """Mark an active mission as completed (called by the integrator after
+        the package has expended its weapons or been recalled)."""
+        self._active_missions = [
+            m for m in self._active_missions
+            if not (m.mission_type == mission_type and m.target_id == target_id)
+        ]
+
+    # ------------------------------------------------------- back-plot seam
+
+    def process_missile_track(
+        self,
+        track_id: str,
+        pos: np.ndarray,          # current position (3,) XYZ
+        vel: np.ndarray,          # current velocity (3,) XYZ
+        sim_time: float,
+        first_seen_t: float,
+        first_seen_pos: np.ndarray,  # position when first detected (3,) XYZ
+        first_seen_vel: np.ndarray,  # velocity when first detected
+        detector_pos: np.ndarray,    # (3,) XYZ position of the detecting sensor
+    ) -> None:
+        """Process an enemy-radar missile track for the back-plot pipeline.
+
+        Called by the integrator (or the commander's own tick, when it has
+        access to the track store) for every player missile track the enemy
+        picture holds.
+
+        Back-plot criteria (spec: "when any enemy radar holds a track on a
+        player Oniks/SAM whose flight time is young — first detected while
+        altitude < BACKPLOT_LOW_ALT_M and within BACKPLOT_MAX_AGE_S of launch"):
+          1. First-detected altitude < BACKPLOT_LOW_ALT_M (2 km): a missile
+             at cruise altitude cannot back-plot to the surface cleanly.
+          2. Track age at first detection < BACKPLOT_MAX_AGE_S: a 30 s window
+             from the launch moment ensures the velocity vector is still
+             pointing close to the launch azimuth (the missile hasn't turned
+             much yet).
+
+        Error model: Gaussian-equivalent 1-sigma = detection range × BACKPLOT_ERR_FRAC.
+        The AWACS look-down geometry is the main collector because it has
+        wide area coverage at low slant range vs a climbing missile — verified
+        in tests via a detector altitude assertion.
+        """
+        # Update the general missile track record first
+        alt_at_first = float(first_seen_pos[1])
+        det_range = math.hypot(
+            float(first_seen_pos[0]) - float(detector_pos[0]),
+            float(first_seen_pos[2]) - float(detector_pos[2]),
+        )
+        self.picture.update_missile_track(
+            track_id, pos, vel, sim_time,
+            first_seen_t=first_seen_t,
+            alt_at_first=alt_at_first,
+            range_at_first=det_range,
+        )
+
+        # --- Back-plot eligibility check ---
+        track_age_at_first = first_seen_t - (sim_time - (sim_time - first_seen_t))
+        # track_age_at_first is zero here; what we want is:
+        # time elapsed since the track was FIRST SEEN = sim_time - first_seen_t
+        # The spec says "first detected while its altitude < 2 km and within
+        # BACKPLOT_MAX_AGE_S of launch".  We interpret this as:
+        #   (a) first_seen altitude < BACKPLOT_LOW_ALT_M, AND
+        #   (b) the track has only been known for < BACKPLOT_MAX_AGE_S
+        #       (i.e. sim_time - first_seen_t < BACKPLOT_MAX_AGE_S).
+        # We only back-plot on the FIRST detection event (fresh track), not on
+        # every subsequent update — one fix per launch event.
+        track_known_s = sim_time - first_seen_t
+        if track_known_s > BACKPLOT_MAX_AGE_S:
+            return   # track is too old to back-plot
+        if alt_at_first >= BACKPLOT_LOW_ALT_M:
+            return   # first detection was too high
+
+        # Only back-plot once per track (the first time this function is called
+        # for this track_id with a fresh track_known_s near 0).
+        # We do this by checking if this track_id has already seeded a back-plot
+        # in any cluster or raw back-plot list.
+        already_plotted = any(
+            bp.track_id == track_id for bp in self.picture._back_plots
+        )
+        if already_plotted:
+            return
+
+        # Extrapolate first_seen_pos backward by the track age at first detection
+        # (i.e., the time from launch to first detection) to get the surface
+        # launch point.  We don't know the actual time-since-launch, so we
+        # use the observed velocity at first detection and project backward
+        # until Y reaches 0 (surface).
+        vx = float(first_seen_vel[0])
+        vy = float(first_seen_vel[1])
+        vz = float(first_seen_vel[2])
+        fx = float(first_seen_pos[0])
+        fy = float(first_seen_pos[1])
+        fz = float(first_seen_pos[2])
+
+        if abs(vy) < 1.0:
+            # Near-horizontal flight at detection: extrapolate as-is to y=0
+            t_back = -fy / max(abs(vy), 1.0) * math.copysign(1.0, vy)
+        else:
+            # Project backward to y=0: t_back = fy / vy (vy > 0 → launch below)
+            t_back = fy / vy
+
+        if t_back < 0.0:
+            # Missile was climbing; t_back is positive for going back in time
+            t_back = abs(t_back)
+
+        launch_x = fx - vx * t_back
+        launch_z = fz - vz * t_back
+
+        error_m = det_range * BACKPLOT_ERR_FRAC
+
+        self.picture.add_back_plot(
+            estimated_xz=np.array([launch_x, launch_z], dtype=np.float64),
+            error_m=error_m,
+            sim_time=sim_time,
+            track_id=track_id,
+        )
+
+    # ------------------------------------------------------- step seam
+
+    def step(self, sim_time: float, dt: float) -> list[dict]:
+        """World step seam: called every world step, returns orders on tick
+        boundaries.  Equivalent to tick() but respects the cadence gate.
+        Non-tick steps return an empty list."""
+        return self.tick(sim_time, dt)
