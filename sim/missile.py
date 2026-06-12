@@ -49,18 +49,35 @@ PHASE_LABELS = {PH_EJECT: "IGNITION", PH_RIDEOUT: "RIDE-OUT",
 # Task LC hot-launch timeline (normative: oniks_launch_sequence.md §3/§6).
 # Low-thrust mode burns from t = 0 (in-tube ignition): net accel ~+4 m/s^2
 # on top of the ~30 m/s exit — the "heavy ride" beat. The nose-cap pulse
-# jets start the tip-over at PITCH_START_T, the turn rate ramps up over
-# PITCH_RAMP_T to PITCH_RATE_MAX (ground-launch footage measures 90-120
-# deg/s; 62 reads heavy-but-agile from the chase cam), and the cap is shot
-# off the moment the velocity vector captures the climb-out direction
-# (~3.0-3.5 s) — high-thrust mode ignites the same instant.
+# jets start the tip-over at PITCH_START_T; the turn rate follows a
+# TRAPEZOIDAL profile — it can never CHANGE faster than TURN_ACCEL (the
+# pulse jets spin a 3 t airframe up and brake it back down), peaks at
+# PITCH_RATE_MAX (ground-launch footage measures 90-120 deg/s; 70 reads
+# heavy-but-agile from the chase cam) and bleeds off as the climb-out
+# direction is captured, so the flight path is a continuous heavy arc with
+# no kinks (user feedback 2026-06-11: the path used to corner 0 -> 49 deg/s
+# inside one physics tick). The cap is shot off at capture — high-thrust
+# mode ignites the same instant, inheriting the live turn rate.
 RIDEOUT_THRUST = 46_000.0            # N, booster low-thrust mode
 PITCH_START_T = 2.0                  # s after exit: pitch-initiate pulse
-PITCH_RATE_MAX = np.radians(70.0)    # rad/s peak velocity-vector rotation
-PITCH_RAMP_T = 0.8                   # s of rate ramp-in (pulse-jet spin-up)
+PITCH_RATE_MAX = np.radians(70.0)    # rad/s peak path rotation rate
+TURN_ACCEL = np.radians(150.0)       # rad/s^2 angular accel limit (launch)
+BRAKE_MARGIN = 0.6                   # fraction of TURN_ACCEL the braking
+#                                      curve plans with (arrive-slow margin)
 PITCH_DONE_COS = np.cos(np.radians(2.0))   # capture cone: cap-off trigger
 PITCH_MAX_T = 4.6                    # s hard cap on the tip-over
 BOOST_END_MACH = 2.0                 # high-thrust burnout -> slug ejection
+
+# Body attitude (render feel): the airframe rotates AHEAD of the flight path
+# — fins/jets turn the body, thrust then drags the velocity around — so the
+# nose visibly leads into a turn. The body slews toward the commanded
+# direction faster than the path (BODY_RATE_LEAD x the live turn rate, never
+# slower than BODY_RATE_MIN for guided-flight tracking) and is clamped to
+# AOA_MAX off the velocity vector (a sea-skimmer is not a shopping cart).
+BODY_RATE_LEAD = 1.6
+BODY_RATE_MIN = np.radians(30.0)     # rad/s attitude tracking floor
+AOA_MAX = np.radians(10.0)           # max visible angle of attack
+AOA_COS = float(np.cos(AOA_MAX))
 
 # Boost attitude hold: keep rotating the velocity direction onto the climb
 # direction at up to this rate, targeting the given elevation per profile.
@@ -69,7 +86,9 @@ BOOST_END_MACH = 2.0                 # high-thrust burnout -> slug ejection
 # through the full Mach-2 burn.
 BOOST_TILT_RATE = np.radians(40.0)   # rad/s of velocity-vector rotation
 BOOST_ELEV_HI = np.radians(38.0)     # hi-lo climb-out elevation (full cruise)
-BOOST_ELEV_LO = np.radians(12.0)     # lo-lo climb-out elevation (flat streak)
+BOOST_ELEV_LO = np.radians(10.5)     # lo-lo climb-out elevation (flat streak;
+#                                      10.5 keeps the gravity-comp'd boost
+#                                      under the 900 m lo-lo ceiling)
 # A hi-lo shot with a scaled-down cruise altitude (close target, Task 22b)
 # boosts shallow too — elevation blends LO -> HI as the commanded cruise
 # altitude approaches this reference (a 7 s Mach-2 burn at 38 deg would zoom
@@ -88,6 +107,11 @@ CLIMB_MAX_TAN = np.tan(np.radians(40.0))   # max climb slope (vy / horiz speed)
 ALT_KP = 0.35        # 1/s^2
 ALT_KD = 1.1         # 1/s
 ALT_MAX_A = 60.0     # m/s^2
+
+# Post-burnout guidance authority ease-in: the fins bite over this window
+# instead of stepping to the full saturated command in the single tick the
+# booster dies (a 6 g lateral step is an instant path kink on the trail).
+GUID_RAMP_T = 0.6    # s
 
 # Descent: track a target altitude ramped down at DESCENT_RAMP_RATE toward
 # skim_alt, with stiffer kp so the dive actually follows the ramp (a plain
@@ -199,22 +223,45 @@ def _descent_range(weapon, cruise_alt):
             + (ramp_s + DESCENT_SETTLE_T) * DESCENT_RUN_SPEED)
 
 
-def _rotate_toward(vhat, target_dir, max_angle):
-    """Rotate unit vector vhat toward unit target_dir by at most max_angle."""
-    c = float(np.clip(vhat @ target_dir, -1.0, 1.0))
-    angle = float(np.arccos(c))
+def _slewed_rate(turn_rate, angle_rem, rate_max, dt):
+    """Trapezoidal turn-rate profile: accelerate toward the commanded peak,
+    brake as the remaining angle shrinks, and never change the rate faster
+    than TURN_ACCEL — the physical guarantee that the flight path has
+    continuous curvature (no single-tick rate jumps). The braking curve
+    budgets only BRAKE_MARGIN of the available angular acceleration so the
+    rotation always reaches the target direction with the rate already bled
+    off (a full-budget curve arrives carrying ~20 deg/s and stops dead in
+    one tick — the snap the curve exists to prevent)."""
+    cmd = min(rate_max, math.sqrt(2.0 * BRAKE_MARGIN * TURN_ACCEL
+                                  * max(angle_rem, 0.0)))
+    if cmd > turn_rate:
+        return min(turn_rate + TURN_ACCEL * dt, cmd)
+    return max(turn_rate - TURN_ACCEL * dt, cmd)
+
+
+def _rotate_toward_scalar(hx, hy, hz, dx, dy, dz, max_angle):
+    """_rotate_toward on plain floats (Rodrigues) — the per-substep body
+    attitude update runs through here (Task 22 hot-loop style)."""
+    c = hx * dx + hy * dy + hz * dz
+    c = min(max(c, -1.0), 1.0)
+    angle = math.acos(c)
     if angle <= max_angle or angle < 1e-12:
-        return target_dir.copy()
-    axis = np.cross(vhat, target_dir)
-    n = float(np.linalg.norm(axis))
-    if n < 1e-12:   # anti-parallel: pick any perpendicular pivot
-        axis = np.array([1.0, 0.0, 0.0]) if abs(vhat[0]) < 0.9 else _UP
-        axis = axis - vhat * (axis @ vhat)
-        axis /= np.linalg.norm(axis)
-    else:
-        axis /= n
-    s, co = np.sin(max_angle), np.cos(max_angle)
-    return vhat * co + np.cross(axis, vhat) * s + axis * (axis @ vhat) * (1.0 - co)
+        return dx, dy, dz
+    ax = hy * dz - hz * dy
+    ay = hz * dx - hx * dz
+    az = hx * dy - hy * dx
+    n = math.sqrt(ax * ax + ay * ay + az * az)
+    if n < 1e-12:                      # anti-parallel: arbitrary perpendicular
+        ax, ay, az = (1.0, 0.0, 0.0) if abs(hx) < 0.9 else (0.0, 1.0, 0.0)
+        d = ax * hx + ay * hy + az * hz
+        ax, ay, az = ax - hx * d, ay - hy * d, az - hz * d
+        n = math.sqrt(ax * ax + ay * ay + az * az)
+    ax, ay, az = ax / n, ay / n, az / n
+    s, co = math.sin(max_angle), math.cos(max_angle)
+    k = (ax * hx + ay * hy + az * hz) * (1.0 - co)
+    return (hx * co + (ay * hz - az * hy) * s + ax * k,
+            hy * co + (az * hx - ax * hz) * s + ay * k,
+            hz * co + (ax * hy - ay * hx) * s + az * k)
 
 
 class Missile:
@@ -252,6 +299,11 @@ class Missile:
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
         self._boost_t0 = 0.0     # t at cap jettison / high-thrust ignition
+        self._turn_rate = 0.0    # rad/s live path rotation (launch slew state)
+        self._guid_t0 = None     # set at burnout: guidance ease-in clock
+        # Body attitude: starts dead vertical in the canister; the renderer
+        # orients the airframe by this, NOT by the velocity vector.
+        self.body_dir = np.array([0.0, 1.0, 0.0])
         # Terminal weave overlay state (Task RTG): the currently applied
         # cross-track position/velocity offsets, the weave clock and the
         # per-salvo phase seed.
@@ -472,6 +524,16 @@ class Missile:
                 ralt, rvs = self._skim_ref(alt, vs, world)
                 gy = altitude_hold_accel(ralt, rvs, w.skim_alt,
                                          ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
+        # Post-burnout ease-in: scale the COMMAND (not the gravity-comp lift)
+        # so the path curvature ramps instead of stepping (GUID_RAMP_T).
+        if self._guid_t0 is not None:
+            r = (self.t - self._guid_t0) / GUID_RAMP_T
+            if r >= 1.0:
+                self._guid_t0 = None
+            else:
+                gx *= r
+                gz *= r
+                gy = (gy - GRAVITY) * r + GRAVITY
         # No dynamic pressure -> no control authority (fuel-starved missiles sink).
         if speed < STALL_SPEED:
             k = (speed / STALL_SPEED) ** 2
@@ -538,6 +600,7 @@ class Missile:
                 mach_scalar(speed, alt) >= BOOST_END_MACH
                 or self.t - self._boost_t0 >= w.booster_time):
             self.phase = PH_CLIMB if self.hi else PH_CRUISE
+            self._guid_t0 = self.t      # fins ease in over GUID_RAMP_T
         if self.phase == PH_CLIMB and alt >= CLIMB_TO_CRUISE_FRAC * self.cruise_alt:
             self.phase = PH_CRUISE
         if self.phase == PH_CRUISE:
@@ -561,19 +624,30 @@ class Missile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase == PH_PITCHOVER:
-            # Nose-cap pulse jets: rotate the velocity direction toward the
-            # climb-out direction at a ramping rate. The instant it captures
-            # (or the hard cap expires) the cap is shot off and the
-            # high-thrust mode lights — phase BOOST from this same step.
+            # Nose-cap pulse jets: the path rotation rate slews under the
+            # TURN_ACCEL limit (trapezoid up, brake onto capture) — no
+            # rate discontinuity anywhere in the arc. The instant it
+            # captures (or the hard cap expires) the cap is shot off and
+            # the high-thrust mode lights — phase BOOST this same step.
             tilt_dir = self._climb_dir()
-            rate = PITCH_RATE_MAX * min(
-                (self.t - PITCH_START_T) / PITCH_RAMP_T, 1.0)
-            vhat = _rotate_toward(np.array([hx, hy, hz]), tilt_dir, rate * dt)
-            hx, hy, hz = vhat.tolist()
+            c = min(max(hx * tilt_dir[0] + hy * tilt_dir[1]
+                        + hz * tilt_dir[2], -1.0), 1.0)
+            self._turn_rate = _slewed_rate(self._turn_rate, math.acos(c),
+                                           PITCH_RATE_MAX, dt)
+            hx, hy, hz = _rotate_toward_scalar(
+                hx, hy, hz, tilt_dir[0], tilt_dir[1], tilt_dir[2],
+                self._turn_rate * dt)
             vx, vy, vz = hx * speed, hy * speed, hz * speed
             self.vel[0] = vx
             self.vel[1] = vy
             self.vel[2] = vz
+            # The pulse jets hold the commanded arc against gravity: cancel
+            # gravity's path-bending (perpendicular) component so the slewed
+            # turn rate IS the path's turn rate; the along-track part still
+            # costs climb energy honestly.
+            gx = -GRAVITY * hy * hx
+            gy = GRAVITY * (1.0 - hy * hy)
+            gz = -GRAVITY * hy * hz
             thrust = RIDEOUT_THRUST
             drag = drag_force_scalar(
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
@@ -586,13 +660,24 @@ class Missile:
         elif self.phase == PH_BOOST:
             # High-thrust mode: hold the climb-out direction and burn hard
             # until Mach 2 (the transition check at the top of update()).
-            vhat = _rotate_toward(np.array([hx, hy, hz]), self._climb_dir(),
-                                  BOOST_TILT_RATE * dt)
-            hx, hy, hz = vhat.tolist()
+            # The turn rate carries over from pitch-over and keeps slewing
+            # under the same accel limit — the handover leaves no kink.
+            tilt_dir = self._climb_dir()
+            c = min(max(hx * tilt_dir[0] + hy * tilt_dir[1]
+                        + hz * tilt_dir[2], -1.0), 1.0)
+            self._turn_rate = _slewed_rate(self._turn_rate, math.acos(c),
+                                           BOOST_TILT_RATE, dt)
+            hx, hy, hz = _rotate_toward_scalar(
+                hx, hy, hz, tilt_dir[0], tilt_dir[1], tilt_dir[2],
+                self._turn_rate * dt)
             vx, vy, vz = hx * speed, hy * speed, hz * speed
             self.vel[0] = vx
             self.vel[1] = vy
             self.vel[2] = vz
+            # TVC holds the climb-out against gravity (see PITCHOVER note).
+            gx = -GRAVITY * hy * hx
+            gy = GRAVITY * (1.0 - hy * hy)
+            gz = -GRAVITY * hy * hz
             thrust = w.booster_thrust
             drag = drag_force_scalar(
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
@@ -645,6 +730,37 @@ class Missile:
         # --- terminal weave overlay (Task RTG) ---
         if self.phase == PH_TERMINAL:
             self._apply_weave(dt, vx, vz)
+
+        self._update_body(dt)
+
+    def _update_body(self, dt):
+        """Rotate the body attitude toward its commanded direction: the
+        airframe leads the path during the launch tip-over (the fins/jets
+        turn the BODY first, thrust then drags the velocity around — the
+        nose visibly rotates before the trail bends), tracks the velocity
+        vector in guided flight, and never shows more than AOA_MAX off the
+        actual flight path. Plain-scalar per-substep math (Task 22 style)."""
+        vx, vy, vz = self.vel.tolist()
+        speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if speed < 1e-9:
+            return
+        inv = 1.0 / speed
+        hx, hy, hz = vx * inv, vy * inv, vz * inv
+        if self.phase in (PH_PITCHOVER, PH_BOOST):
+            tgt = self._climb_dir()
+            tx, ty, tz = float(tgt[0]), float(tgt[1]), float(tgt[2])
+        else:
+            tx, ty, tz = hx, hy, hz
+        bx, by, bz = self.body_dir.tolist()
+        rate = max(self._turn_rate * BODY_RATE_LEAD, BODY_RATE_MIN)
+        bx, by, bz = _rotate_toward_scalar(bx, by, bz, tx, ty, tz, rate * dt)
+        if bx * hx + by * hy + bz * hz < AOA_COS:
+            # AoA clamp: the body sits exactly AOA_MAX off the path, on the
+            # great-circle arc toward where it wanted to point.
+            bx, by, bz = _rotate_toward_scalar(hx, hy, hz, bx, by, bz, AOA_MAX)
+        self.body_dir[0] = bx
+        self.body_dir[1] = by
+        self.body_dir[2] = bz
 
     def _apply_weave(self, dt, vx, vz):
         """Re-apply the evasive S-curve as a cross-track overlay on the core

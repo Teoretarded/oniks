@@ -95,6 +95,7 @@ MAP_HINT = ("LMB target/missile  RMB waypoint  X clear  SPACE launch  "
 
 # Task RTG: refusal flash when a selected round can no longer be redirected.
 COMMITTED_HINT = "COMMITTED"
+SAM_NO_WAYPOINTS_HINT = "S-300: NO WAYPOINTS"
 
 # --- Terrain colorize ramps (uint8 RGB endpoints) ------------------------------
 
@@ -407,7 +408,9 @@ class TacticalMap:
     def _rmb_waypoint(self, wp) -> None:
         """RMB: append to the selected round's remaining route (Task RTG),
         else to the launch plan. A committed round flashes COMMITTED; a full
-        route refuses silently (matches the plan-chain behavior)."""
+        route refuses silently (matches the plan-chain behavior). The S-300
+        flies no route — with that platform active, planning waypoints is
+        refused with a hint instead of silently lying on the map."""
         m = self.selected_missile
         if m is not None:
             if isinstance(m, SamMissile):
@@ -416,6 +419,8 @@ class TacticalMap:
                 self.sandbox.app.audio.ui_click()
             elif not m.retargetable:
                 self.sandbox.show_hint(COMMITTED_HINT)
+        elif self.sandbox.active_platform == "s300":
+            self.sandbox.show_hint(SAM_NO_WAYPOINTS_HINT)
         elif add_waypoint(self.sandbox.waypoints, wp):
             self.sandbox.app.audio.ui_click()
 
@@ -427,6 +432,8 @@ class TacticalMap:
             if not isinstance(m, SamMissile) and m.clear_route_waypoints():
                 self.sandbox.app.audio.ui_click()
             return
+        if self.sandbox.active_platform == "s300":
+            return      # no plan chain to clear; don't wipe the hidden bastion plan
         clear_waypoints(self.sandbox.waypoints)
         self.sandbox.app.audio.ui_click()
 
@@ -668,8 +675,23 @@ class TacticalMap:
         return (BASE_POS[0], BASE_POS[2])
 
     def _plan_chain(self) -> None:
-        """Planned route: active platform -> waypoints -> target, marked."""
+        """Planned route: active platform -> waypoints -> target, marked.
+        The S-300 flies direct — its plan draws no waypoint chain (the
+        bastion's planned waypoints persist hidden until TAB back)."""
         sandbox = self.sandbox
+        if sandbox.active_platform == "s300":
+            chain = [self._platform_origin()]
+            tp = sandbox.target_point
+            if tp is not None:
+                chain.append((float(tp[0]), float(tp[2])))
+                self._poly_world(chain, PLAN_COL, 1.5)
+                sx, sy = self.view.world_to_screen((tp[0], tp[2]))
+                c = TARGET_CROSS_PX
+                self.text.draw_lines([(sx - c, sy - c), (sx + c, sy + c)],
+                                     TARGET_COL, 2.0)
+                self.text.draw_lines([(sx - c, sy + c), (sx + c, sy - c)],
+                                     TARGET_COL, 2.0)
+            return
         chain = [self._platform_origin()] + list(sandbox.waypoints)
         tp = sandbox.target_point
         if tp is not None:

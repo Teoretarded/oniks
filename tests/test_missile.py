@@ -186,3 +186,53 @@ def test_lo_lo_land_strike_rides_the_coast_up_to_the_site():
     assert not m.alive and m.impact_pos is not None
     assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 800.0
     assert m.impact_pos[1] > 30.0           # up on the slope, not the beach
+
+
+# --- Turn dynamics (user feedback 2026-06-11: no instant path kinks) ----------
+
+def _turn_rate_trace(m, w, seconds):
+    """Per-step velocity-direction turn rate (deg/s) over the given window."""
+    rates = []
+    prev_dir = None
+    for _ in range(int(seconds / DT)):
+        m.update(DT, w)
+        v = m.vel
+        s = float(np.linalg.norm(v))
+        if s < 1.0:
+            continue
+        d = (v / s).copy()
+        if prev_dir is not None:
+            c = min(1.0, max(-1.0, float(d @ prev_dir)))
+            rates.append(math.degrees(math.acos(c)) / DT)
+        prev_dir = d
+    return rates
+
+def test_launch_turn_rate_is_continuous():
+    # The flight path may turn fast, but its turn RATE must never jump:
+    # the angular-acceleration limit allows ~0.8 deg/s of change per tick
+    # (TURN_ACCEL), so any step-to-step jump beyond a small margin is the
+    # old single-tick kink (it measured 0 -> 49 deg/s before the fix).
+    m = _launch(target=(70_710.0, 0.0, 70_710.0))   # 45-deg off-axis launch
+    rates = _turn_rate_trace(m, _World(), 12.0)
+    jumps = [abs(b - a) for a, b in zip(rates, rates[1:])]
+    assert max(jumps) < 3.0
+    assert max(rates) < 80.0          # peak stays near PITCH_RATE_MAX + gravity
+
+def test_body_leads_path_through_pitchover():
+    m = _launch(target=(100_000.0, 0.0, 0.0))       # 90-deg off-axis: big turn
+    w = _World()
+    led = 0
+    samples = 0
+    while m.phase != PH_BOOST and m.t < 8.0:
+        m.update(DT, w)
+        if m.phase == PH_PITCHOVER:
+            assert abs(float(np.linalg.norm(m.body_dir)) - 1.0) < 1e-9
+            v = m.vel / np.linalg.norm(m.vel)
+            aoa = math.degrees(math.acos(min(1.0, max(-1.0, float(m.body_dir @ v)))))
+            assert aoa <= 10.0 + 1e-6               # AOA_MAX clamp holds
+            tilt = m._climb_dir()
+            samples += 1
+            if float(m.body_dir @ tilt) >= float(v @ tilt) - 1e-12:
+                led += 1                            # nose at/ahead of the path
+    assert samples > 30
+    assert led >= samples * 0.9                     # the nose leads the turn

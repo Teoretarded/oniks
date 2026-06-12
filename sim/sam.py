@@ -49,6 +49,25 @@ PHASE_LABELS = {SPH_EJECT: "EJECT", SPH_BOOST: "BOOST",
 # tilt toward the predicted intercept point begins (locked).
 BOOST_VERTICAL_TIME = 1.0      # s
 
+# Tip-over dynamics: the gas-vane TVC slews the path rotation rate under an
+# angular-acceleration limit — violent (the footage's 30-deg kink in the
+# first 100 m) but CONTINUOUS. The old code commanded the full g-limited
+# rate in a single 120 Hz tick (a 1.8 t missile cornering instantly — user
+# feedback 2026-06-11); now the rate trapezoids up at TILT_ACCEL, is capped
+# at TILT_RATE_MAX, and brakes onto the aim direction.
+TILT_ACCEL = math.radians(160.0)     # rad/s^2
+TILT_RATE_MAX = math.radians(120.0)  # rad/s
+BRAKE_MARGIN = 0.6   # braking-curve accel budget: arrive with the rate
+#                      already bled off (see sim/missile.py _slewed_rate)
+
+# Body attitude (render feel): the airframe slews ahead of the flight path
+# (TVC turns the body; the path follows), clamped to AOA_MAX off the
+# velocity vector. Mirrors sim/missile.py's body model.
+BODY_RATE_LEAD = 1.6
+BODY_RATE_MIN = math.radians(35.0)   # rad/s attitude tracking floor
+AOA_MAX = math.radians(10.0)
+AOA_COS = math.cos(AOA_MAX)
+
 # Predicted-intercept time-to-go: t_go = range / max(closing_speed, FLOOR)
 # (locked floor), then one fixed-point refinement on the led point. The cap
 # matters early in boost, where the closing speed is tiny and an uncapped
@@ -144,6 +163,11 @@ class SamMissile:
         self.self_destructed = False
         self._mdot = sam_def.motor_thrust / (sam_def.isp * GRAVITY)
         self._fuse_r2 = sam_def.fuse_radius * sam_def.fuse_radius
+        self._turn_rate = 0.0    # rad/s live path rotation (tilt slew state)
+        # Body attitude: dead vertical in the tube; the renderer orients the
+        # airframe by this, NOT by the velocity vector.
+        self.body_dir = np.array([0.0, 1.0, 0.0])
+        self._body_target = None   # boost-tilt aim dir (body leads the path)
 
     @property
     def mass(self):
@@ -329,9 +353,21 @@ class SamMissile:
         if self.phase == SPH_BOOST:
             if self.t >= w.eject_time + BOOST_VERTICAL_TIME and speed > 1e-9:
                 dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
-                max_ang = w.max_g * GRAVITY / max(speed, 1.0) * dt
-                hx, hy, hz = _rotate_toward_scalar(hx, hy, hz,
-                                                   dx, dy, dz, max_ang)
+                c = min(max(hx * dx + hy * dy + hz * dz, -1.0), 1.0)
+                omega_cap = min(w.max_g * GRAVITY / max(speed, 1.0),
+                                TILT_RATE_MAX)
+                cmd = min(omega_cap,
+                          math.sqrt(2.0 * BRAKE_MARGIN * TILT_ACCEL
+                                    * math.acos(c)))
+                if cmd > self._turn_rate:
+                    self._turn_rate = min(self._turn_rate + TILT_ACCEL * dt,
+                                          cmd)
+                else:
+                    self._turn_rate = max(self._turn_rate - TILT_ACCEL * dt,
+                                          cmd)
+                hx, hy, hz = _rotate_toward_scalar(hx, hy, hz, dx, dy, dz,
+                                                   self._turn_rate * dt)
+                self._body_target = (dx, dy, dz)
                 vx, vy, vz = hx * speed, hy * speed, hz * speed
                 self.vel[0] = vx
                 self.vel[1] = vy
@@ -398,3 +434,27 @@ class SamMissile:
                     and speed < w.self_destruct_speed)):
             self.self_destructed = True
             self._die(self.pos.copy())
+            return
+
+        self._update_body(dt, vx, vy, vz, speed)
+
+    def _update_body(self, dt, vx, vy, vz, speed):
+        """Slew the body attitude: leads the path toward the aim direction
+        during the boost tilt, tracks the velocity vector everywhere else,
+        clamped to AOA_MAX off the path (mirrors sim/missile.py)."""
+        if speed < 1e-9:
+            return
+        inv = 1.0 / speed
+        hx, hy, hz = vx * inv, vy * inv, vz * inv
+        if self.phase == SPH_BOOST and self._body_target is not None:
+            tx, ty, tz = self._body_target
+        else:
+            tx, ty, tz = hx, hy, hz
+        bx, by, bz = self.body_dir.tolist()
+        rate = max(self._turn_rate * BODY_RATE_LEAD, BODY_RATE_MIN)
+        bx, by, bz = _rotate_toward_scalar(bx, by, bz, tx, ty, tz, rate * dt)
+        if bx * hx + by * hy + bz * hz < AOA_COS:
+            bx, by, bz = _rotate_toward_scalar(hx, hy, hz, bx, by, bz, AOA_MAX)
+        self.body_dir[0] = bx
+        self.body_dir[1] = by
+        self.body_dir[2] = bz

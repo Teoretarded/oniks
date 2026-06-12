@@ -279,3 +279,34 @@ def test_determinism_bit_identical_reruns():
     assert np.array_equal(runs[0][0], runs[1][0])
     assert np.array_equal(runs[0][1], runs[1][1])
     assert runs[0][2] == runs[1][2] and runs[0][3] == runs[1][3]
+
+
+# --- Turn dynamics (user feedback 2026-06-11: no instant path kinks) ----------
+
+def test_sam_tilt_rate_is_continuous():
+    # The gas-vane tip-over is violent but must be CONTINUOUS: the rate can
+    # change at most TILT_ACCEL*dt (~1.3 deg/s) per tick, so a step-to-step
+    # jump beyond a small margin is the old single-tick kink (the unslewed
+    # code commanded the full g-limited rate — hundreds of deg/s at catapult
+    # speed — in one step).
+    ac = _crossing_patrol(60_000.0)
+    sam = _sam(ac)
+    w = _World()
+    rates = []
+    prev_dir = None
+    for _ in range(int(10.0 / DT)):
+        sam.update(DT, w)
+        ac.update(DT)
+        if not sam.alive:
+            break
+        v = sam.vel
+        s = float(np.linalg.norm(v))
+        if s < 1.0:
+            continue
+        d = (v / s).copy()
+        if prev_dir is not None:
+            c = min(1.0, max(-1.0, float(d @ prev_dir)))
+            rates.append(math.degrees(math.acos(c)) / DT)
+        prev_dir = d
+    jumps = [abs(b - a) for a, b in zip(rates, rates[1:])]
+    assert max(jumps) < 4.0

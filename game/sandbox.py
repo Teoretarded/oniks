@@ -798,7 +798,12 @@ class SandboxState(GameState):
 
     def _draw_missiles(self) -> None:
         for m in self.world.missiles:
-            v = _vhat(m)
+            # Body attitude, not the velocity vector: the airframe visibly
+            # rotates ahead of the flight path through a turn (sim/missile.py
+            # _update_body). _vhat stays the fallback for missiles without it.
+            v = getattr(m, "body_dir", None)
+            if v is None:
+                v = _vhat(m)
             rot = math3d.rotation_from_forward(v)
             if isinstance(m, SamMissile):
                 mesh = self._mesh_s300_missile
