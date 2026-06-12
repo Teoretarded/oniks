@@ -133,6 +133,21 @@ player-tasked with waypoints on the tactical map.
   estimates like any lost track.
 - If shot down, a replacement arrives after a long timer (configurable).
 
+### 4.3b Long-range additions (designed 2026-06-12, user request)
+
+- **3M22 Zircon-class hypersonic anti-ship (player, Phase 7):** Bastion-
+  family land launch, ~600+ km (covers the whole spawn zone + carrier
+  band), Mach 8 cruise ~20 km alt, Mach 5+ terminal dive. LAUNCH GATE:
+  requires a live located surface fix (drone ELINT/SAR track) — no
+  recon-by-fire; the drone enables the Zircon. Tiny magazine, long
+  reload, armory-configurable. SM-2 windows collapse vs it purely via
+  closing-speed physics (no special rules).
+- **40N6-class very-long-range SAM (player, Phase 5):** S-300 battery
+  upgrade round, ~380 km vs HIGH-altitude targets, high-loft + active
+  terminal seeker (over-horizon vs high targets only — the radar horizon
+  still rules low flyers). Purpose: threaten AWACS/standoff aircraft,
+  forcing low ingress where detection ranges shrink.
+
 ### 4.4 Existing systems
 
 - **Oniks:** unchanged flight logic (preset profile/waypoints + terminal
@@ -160,6 +175,12 @@ airfield + ground radars on the enemy continent, AWACS orbit deep.
     radar goes silent.
   - *(Designed but not enabled in v1: Harpoon-class anti-ship — for the future
     friendly-ships update.)*
+  - **2 × AIM-9X-class IR missiles** (Phase 5): the drone-hunt armament.
+    IR seekers ignore radar stealth — rear-aspect lock vs the subsonic
+    drone at ~8 km. Hunt loop: AWACS/ship sniff → vector to last-known →
+    nose radar reacquire inside ~11 km (every sweep heard by the drone's
+    RWR) → IR lock → kill. A fighter hunting the drone is a fighter not
+    striking the base.
 - Behavior loop: `PARKED → TAKEOFF → INGRESS (low when player radar net is
   up) → LAUNCH at standoff range → EGRESS → LAND → REARM (timer) → repeat`.
 - Rearm at the **nearest surviving base** (airfield or carrier). Both
