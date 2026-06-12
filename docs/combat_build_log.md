@@ -37,3 +37,27 @@ Orchestrator gate (balance pass, research-grounded per verifier numbers):
   (docs/research pattern).
 - Gate: 382 tests green, smoke 9/9, destroyer screenshot personally
   reviewed (renders/screenshot_022.png).
+
+## Mid-phase-3 user feedback (2026-06-12)
+
+- **Spawn zones** (DONE, wiring deferred to Phase 7): world/spawn_zones.py
+  + tests — one sector zone 110-300 km, triangular density peaking 180 km,
+  >=25 km separation, carrier-only deep band 240-330 km with 2 escorts.
+  Map render: renders/map_anchors.png (probe_map_anchors.py).
+- **SM-2 vs lo-lo must be physics, not dice** (QUEUED for the phase 3
+  gate — same files the running workflow edits): replace the planned Pk
+  roll with low-altitude multipath tracking noise feeding PN; measure
+  seeded engagement batches; lock two-sided statistical bands (hi ~0.85+,
+  sea-skim ~0.25-0.55 per shot). Revert the 100 m SM2 floor to a realistic
+  value (~25 m) at the same time and retire the floor-based regression
+  test in favor of the statistical contract. Memory: physics-not-dice.
+
+## Phase 8 — polish backlog (rolling)
+
+- Destroyer model: bow flare subtle, aft stack indistinct (reference-photo
+  pass).
+- Dedicated Tomahawk/JASSM/HARM meshes (currently reuse existing missiles).
+- Visual wreck states for destroyed structures.
+- Wasted close-in low SM-2 shots can splash (accepted realism; revisit).
+- Longer-range player anti-ship weapon to contest the carrier's deep band
+  (user: "if the oniks doesnt have the range we will build something new").
