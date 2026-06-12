@@ -470,6 +470,17 @@ class ElintReceiver:
         )
         # emitter_id -> list of (drone_xz [2], bearing_rad)
         self._pairs: dict[str, list] = {}
+        # emitter_id -> (fingerprint, (est_pos, quality)) memo for
+        # _triangulate: the full solve measures ~210 us at the 64-pair cap
+        # and the tactical map asks for fix_quality AND est_pos per emitter
+        # per rendered FRAME (game/tactical_map.py _elint_overlay) — ~1.3 ms
+        # a frame for 3 emitters, growing with every Phase-5 emitter. The
+        # solve is recomputed only when the fingerprint (list identity,
+        # length, per-emitter append counter) moves: update() bumps the
+        # counter on every stored bearing (append + FIFO eviction included)
+        # and a wholesale reassignment (tests) changes the list object.
+        self._tri_cache: dict[str, tuple] = {}
+        self._pair_seq: dict[str, int] = {}    # appends per emitter
         # emitter_id -> sim_time the emitter was last HEARD (integration
         # seam: the world only treats a fix as live intel while the emitter
         # was heard recently — stale pairs persist for triangulation but a
@@ -548,12 +559,31 @@ class ElintReceiver:
             pairs.append((np.array([dx, dz], dtype=np.float64), noisy_bearing))
             if len(pairs) > ELINT_MAX_PAIRS:
                 pairs.pop(0)      # FIFO eviction — oldest fix out
+            # Invalidate the memoized triangulation (see _tri_cache)
+            self._pair_seq[emitter_id] = \
+                self._pair_seq.get(emitter_id, 0) + 1
 
     # ------------------------------------------------------------------
     # Triangulation helpers
     # ------------------------------------------------------------------
 
     def _triangulate(self, emitter_id: str) -> Tuple[Optional[np.ndarray], float]:
+        """Memoized front-end for _solve_triangulation (cache rationale at
+        ``_tri_cache``).  Callers must not mutate the returned array — the
+        one integration consumer (world/combat.py) copies it."""
+        pairs = self._pairs.get(emitter_id, [])
+        if len(pairs) < 2:
+            return None, float("inf")
+        fp = (id(pairs), len(pairs), self._pair_seq.get(emitter_id, 0))
+        cached = self._tri_cache.get(emitter_id)
+        if cached is not None and cached[0] == fp:
+            return cached[1]
+        result = self._solve_triangulation(pairs)
+        self._tri_cache[emitter_id] = (fp, result)
+        return result
+
+    def _solve_triangulation(
+            self, pairs: list) -> Tuple[Optional[np.ndarray], float]:
         """Least-squares position estimate from stored bearing pairs.
 
         Coordinate system: X = east, Z = north.
@@ -574,10 +604,6 @@ class ElintReceiver:
         the least-squares solution gives the best-fit intersection.  The RMS of
         the residuals is a proxy for position uncertainty (metres).
         """
-        pairs = self._pairs.get(emitter_id, [])
-        if len(pairs) < 2:
-            return None, float("inf")
-
         rows_A = []
         rows_b = []
         for drone_xz, bearing in pairs:
