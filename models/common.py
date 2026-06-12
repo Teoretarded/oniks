@@ -20,6 +20,7 @@ PALETTE = dict(
     container_b=(0.22, 0.42, 0.55), container_c=(0.75, 0.65, 0.3),
     tanker_hull=(0.16, 0.17, 0.20), tanker_deck=(0.55, 0.30, 0.25), pipe=(0.7, 0.68, 0.6),
     warship_hull=(0.45, 0.49, 0.53), warship_deck=(0.38, 0.42, 0.46), superstructure=(0.55, 0.59, 0.63),
+    haze_gray=(0.50, 0.53, 0.57), haze_gray_dark=(0.40, 0.43, 0.47), haze_gray_deck=(0.43, 0.46, 0.50),
     concrete=(0.58, 0.57, 0.54), radar_white=(0.85, 0.86, 0.84), tank_white=(0.80, 0.79, 0.75),
     s300_green=(0.30, 0.34, 0.26), tube_grey=(0.42, 0.44, 0.42),
     aircraft_grey=(0.58, 0.62, 0.68), aircraft_dark=(0.30, 0.33, 0.38),
