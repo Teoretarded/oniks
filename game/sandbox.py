@@ -396,8 +396,13 @@ class SandboxState(GameState):
     def cycle_camera_subject(self, step: int = 1):
         """[ / ] (Task CAM): cycle the orbit/chase camera subject through
         newest missile -> other in-flight missiles -> active TEL ->
-        selected contact's entity, with a smooth rig blend onto each."""
-        order = subject_cycle_order(self.world.missiles,
+        selected contact's entity, with a smooth rig blend onto each.
+        Hostile strike rounds (Phase 3) are fog-of-war gated everywhere
+        the player gets intel, so the cycle skips them too — otherwise
+        [ / ] would chase-cam an undetected Tomahawk far beyond the radar
+        horizon. SANDBOX rounds never carry is_hostile: behavior unchanged."""
+        order = subject_cycle_order([m for m in self.world.missiles
+                                     if not getattr(m, "is_hostile", False)],
                                     self._tel_subjects[self.active_platform],
                                     self._selected_entity())
         subj = next_subject(order, self.followed, step)

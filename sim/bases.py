@@ -161,7 +161,15 @@ def apply_missile_hits_structures(
 
     Structures are static (no movement) so their OBBs are axis-aligned
     (identity rotation) and pre-computed once per call frame.
+
+    Early-out on an empty missile list BEFORE the OBB precompute: this
+    runs every 120 Hz substep (world/combat.py step) and hostile rounds
+    are airborne only a fraction of a battle — without the gate the
+    per-structure ``obb()`` numpy allocations would run all battle long
+    for nothing (same perf discipline as sim/damage.apply_missile_hits).
     """
+    if not missiles:
+        return
     live_structs = []
     for s in structures:
         if not s.alive:
