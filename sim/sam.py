@@ -142,23 +142,25 @@ def _rotate_toward_scalar(hx, hy, hz, dx, dy, dz, max_angle):
 
 
 class SamMissile:
-    """48N6-style point-mass interceptor with a phase machine.
+    """SamDef-driven point-mass interceptor with a phase machine.
 
-    sam_def: SamDef (sim.arsenal.S300).
-    pos_f64: (3,) float64 tube-mouth launch position.
-    target_aircraft: sim.aircraft.Aircraft — truth source for the terminal
-        seeker and the proximity fuse (``kill()`` is called on a fuse hit).
+    sam_def: SamDef (sim.arsenal.S300, sim.arsenal.SM2, …).
+    pos_f64: (3,) float64 tube-mouth / deck-ejector launch position.
+    target: truth target duck-typed as any object with ``.pos`` (3,),
+        ``.velocity()`` → (3,) float64, and ``.alive`` bool.  Aircraft
+        targets also expose ``.kill()``; missile and drone targets do not
+        (the fuse sets ``.alive = False`` directly in that case).
     contact_estimate_fn: optional () -> (pos(3,), vel(3,)) giving the stale
         CONTACT picture; used for boost/midcourse aiming when present.
     """
 
-    def __init__(self, sam_def, pos_f64, target_aircraft,
+    def __init__(self, sam_def, pos_f64, target,
                  contact_estimate_fn=None):
         self.weapon = sam_def
         self.pos = np.asarray(pos_f64, dtype=np.float64).copy()
         self.prev_pos = self.pos.copy()
         self.vel = np.zeros(3)
-        self.target = target_aircraft
+        self.target = target
         self.contact_estimate_fn = contact_estimate_fn
         self.phase = SPH_EJECT
         self.t = 0.0
@@ -196,10 +198,10 @@ class SamMissile:
         return self.phase in (SPH_BOOST, SPH_MIDCOURSE)
 
     def retarget(self, new_target, new_waypoints=(), contact_estimate_fn=None):
-        """Swap onto ``new_target`` (Aircraft) with a fresh contact-estimate
-        closure (WorldState.retarget_sam builds it). ``new_waypoints`` exists
-        for signature parity with Missile.retarget and is ignored — a SAM
-        flies trackless. Returns False (state untouched) when committed."""
+        """Swap onto ``new_target`` (any duck-typed target) with a fresh
+        contact-estimate closure. ``new_waypoints`` exists for signature parity
+        with Missile.retarget and is ignored — a SAM flies trackless.
+        Returns False (state untouched) when committed."""
         if not self.retargetable:
             return False
         self.target = new_target
@@ -292,7 +294,12 @@ class SamMissile:
     def _fuse_check(self):
         """Proximity fuse: if the segment prev_pos -> pos passes within the
         fuse radius of the TRUE target position, the target is killed and the
-        missile dies at the closest-approach point (direct hits included)."""
+        missile dies at the closest-approach point (direct hits included).
+
+        Duck-typed for both Aircraft (has ``kill()``) and any other targetable
+        object (``Missile``, future drone) — if ``kill`` is absent the fuse
+        sets ``target.alive = False`` directly, which is the common alive-flag
+        contract shared across all sim objects."""
         tp = self.target.pos
         ax, ay, az = self.prev_pos.tolist()
         bx, by, bz = self.pos.tolist()
@@ -314,7 +321,11 @@ class SamMissile:
         my = float(tp[1]) - cy
         mz = float(tp[2]) - cz
         if mx * mx + my * my + mz * mz <= self._fuse_r2:
-            self.target.kill()
+            kill_fn = getattr(self.target, "kill", None)
+            if kill_fn is not None:
+                kill_fn()
+            else:
+                self.target.alive = False
             self.killed_target = True
             self._die(np.array([cx, cy, cz]))
             return True
