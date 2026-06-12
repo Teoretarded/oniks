@@ -31,6 +31,7 @@ from sim.guidance import pn_accel
 from sim.missile import _surface_at
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar)
+from sim.radar import terrain_blocks
 from world.generation import TERRAIN_MAX_HEIGHT
 
 # --- Phase enum (locked: Task S2) ---------------------------------------------
@@ -140,6 +141,16 @@ MULTIPATH_SIGMA_M = 60.0  # m: stationary per-axis RMS error at zero target
 #                           (intercepts happen far above MULTIPATH_ALT_M).
 #                           Locked by tests/test_sm2_statistics.py.
 
+# --- Terminal lock-break on terrain mask (Phase 3 gate) ------------------------
+# While terminal-locked the seeker line of sight is re-checked on a cadence
+# (sim/radar.terrain_blocks samples terrain every 2 km — the cadence, not
+# per-substep checking, is the hot-path budget). SARH rounds (enemy SM-2)
+# check from the LAUNCHING SHIP's illuminator via ``illuminator_pos_fn``;
+# rounds without one (player S-300) check from the missile's own seeker.
+# A blocked check snaps the lock: the last estimate freezes and the missile
+# guides on the frozen point — no reacquire until a later check clears.
+LOS_CHECK_PERIOD_S = 0.5  # s between terminal line-of-sight re-checks
+
 
 def _rotate_toward_scalar(hx, hy, hz, dx, dy, dz, max_angle):
     """Rotate unit (hx,hy,hz) toward unit (dx,dy,dz) by at most max_angle
@@ -187,10 +198,14 @@ class SamMissile:
     rng: optional numpy Generator feeding the low-altitude multipath noise
         (a child generator per launch — sim/enemy_defense.py — keeps battles
         deterministic). None (default) = zero noise, bit-identical guidance.
+    illuminator_pos_fn: optional () -> (x, y, z) | None giving the SARH
+        illuminator position for the terminal LOS check (the SM-2's
+        launching ship; None return = illuminator dead, lock breaks).
+        Default None = the missile's own seeker is the LOS source.
     """
 
     def __init__(self, sam_def, pos_f64, target,
-                 contact_estimate_fn=None, rng=None):
+                 contact_estimate_fn=None, rng=None, illuminator_pos_fn=None):
         self.weapon = sam_def
         self.pos = np.asarray(pos_f64, dtype=np.float64).copy()
         self.prev_pos = self.pos.copy()
@@ -198,8 +213,14 @@ class SamMissile:
         self.target = target
         self.contact_estimate_fn = contact_estimate_fn
         self.rng = rng
+        self.illuminator_pos_fn = illuminator_pos_fn
         # Multipath OU error state (m, world axes) — see MULTIPATH_* above.
         self._mp_x = self._mp_y = self._mp_z = 0.0
+        # Terminal lock state: next LOS re-check time, lock flag, and the
+        # frozen guide point while masked (set at terminal handover).
+        self._los_next_t = 0.0
+        self._lock_ok = True
+        self._lock_pos = None
         self.phase = SPH_EJECT
         self.t = 0.0
         self.propellant = sam_def.propellant_mass
@@ -277,6 +298,21 @@ class SamMissile:
         self._mp_x += -self._mp_x * k + q * rng.standard_normal()
         self._mp_y += -self._mp_y * k + q * rng.standard_normal()
         self._mp_z += -self._mp_z * k + q * rng.standard_normal()
+
+    def _los_masked(self, world):
+        """True when terrain masks the terminal lock. SARH rounds check from
+        the illuminator (a dead/None illuminator IS a masked lock — a
+        sinking ship stops painting the target); rounds without one check
+        from the missile's own seeker. Terrain comes through the world's
+        heightfield so stub worlds exercise the same code path."""
+        if self.illuminator_pos_fn is not None:
+            src = self.illuminator_pos_fn()
+            if src is None:
+                return True
+        else:
+            src = self.pos
+        return terrain_blocks(src, self.target.pos,
+                              height_fn=world.terrain_height_at)
 
     def _aim_direction(self, px, py, pz, vx, vy, vz):
         """Unit direction toward the loft-shaped predicted intercept point:
@@ -421,6 +457,13 @@ class SamMissile:
             rz = float(tp[2]) - pz0
             if (rx * rx + ry * ry + rz * rz
                     < w.terminal_range * w.terminal_range):
+                # Seed the frozen guide point from the midcourse estimate
+                # BEFORE the phase flips (an immediately masked lock coasts
+                # on the honest handover picture), then force an LOS check
+                # on the first terminal step.
+                tx, ty, tz, _, _, _ = self._target_state()
+                self._lock_pos = np.array([tx, ty, tz])
+                self._los_next_t = self.t
                 self.phase = SPH_TERMINAL
 
         # --- forces ---
@@ -463,11 +506,23 @@ class SamMissile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase == SPH_TERMINAL:
-            tp = self.target.pos               # terminal lock: truth + noise
-            tpos = np.array([float(tp[0]) + self._mp_x,
-                             float(tp[1]) + self._mp_y,
-                             float(tp[2]) + self._mp_z])
-            g = pn_accel(self.pos, self.vel, tpos, self.target.velocity())
+            # Terminal lock maintenance: LOS re-check on the cadence; a
+            # blocked check freezes the last estimate (no reacquire until a
+            # later check clears).
+            if self.t >= self._los_next_t:
+                self._los_next_t = self.t + LOS_CHECK_PERIOD_S
+                self._lock_ok = not self._los_masked(world)
+            if self._lock_ok:
+                tp = self.target.pos
+                tpos = np.array([float(tp[0]) + self._mp_x,
+                                 float(tp[1]) + self._mp_y,
+                                 float(tp[2]) + self._mp_z])
+                tvel = np.asarray(self.target.velocity(), dtype=np.float64)
+                self._lock_pos = tpos          # last estimate: frozen on snap
+            else:
+                tpos = self._lock_pos          # coast on the frozen estimate
+                tvel = np.zeros(3)
+            g = pn_accel(self.pos, self.vel, tpos, tvel)
             gx, gy, gz = g.tolist()
             gy += GRAVITY                      # gravity compensation
             gmax = w.max_g * GRAVITY
