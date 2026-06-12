@@ -440,6 +440,38 @@ class TestWinchesterEgress:
             t += dt
         assert f.state == FS_GONE
 
+    def test_winchester_holds_when_both_die_inside_approach(self):
+        """Regression: both bases dying while the fighter is RTB INSIDE the
+        5 km landing-approach gate must still egress (spec 5.1: both
+        destroyed -> map edge), never re-enter LANDING at the dead base.
+        (The RTB handler used to run after the winchester decision and
+        clobbered it via the approach-distance gate.)"""
+        airfield_struct = _make_stub_structure((0.0, 0.0))
+        carrier_ship = Carrier("cv_appr", (100_000.0, 0.0))
+        ab1 = AirBase(airfield_struct)
+        ab2 = AirBase(carrier_ship)
+        bases = [ab1, ab2]
+
+        f = Fighter("f_appr", ab1, (0.0, 50_000.0))
+        f.state = FS_RTB
+        f.pos = np.array([0.0, 3_000.0, 4_000.0])  # 4 km out, on approach
+        f._speed = 240.0
+
+        airfield_struct.alive = False
+        carrier_ship.hp = 0
+        carrier_ship.state = ST_SINKING
+
+        f.update(1.0, bases)
+        assert f.state == FS_WINCHESTER_EGRESS
+
+        t = 0.0
+        while f.state != FS_GONE and t < 10_000.0:
+            f.update(1.0, bases)
+            t += 1.0
+        assert f.state == FS_GONE
+        # Never touched the dead base's ground queue.
+        assert f not in ab1._rearm_queue and f not in ab1.parked
+
 
 # ---------------------------------------------------------------------------
 # 8. nearest_surviving_base switches when airfield dies (integration)

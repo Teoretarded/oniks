@@ -786,7 +786,12 @@ class Fighter:
             # Check that the assigned base is still alive; re-select if not.
             if not self._base.alive and bases:
                 self._rtb(bases)
-            self._update_rtb(dt)
+            # _rtb may have flipped to WINCHESTER_EGRESS (both bases dead);
+            # running the RTB handler anyway would re-enter LANDING at the
+            # dead base when inside the 5 km approach gate, clobbering the
+            # egress decision (spec §5.1: both destroyed -> fly to map edge).
+            if self.state == FS_RTB:
+                self._update_rtb(dt)
         elif self.state == FS_LANDING:
             self._update_landing(dt)
         elif self.state == FS_REARMING:
