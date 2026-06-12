@@ -3,3 +3,4 @@ __pycache__/
 renders/
 sounds/*.wav
 .pytest_cache/
+cache/

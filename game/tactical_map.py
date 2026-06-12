@@ -15,6 +15,8 @@ Screen coords: origin top-left, pixels. World: X = east (right), Z = north
 from __future__ import annotations
 
 import math
+import os
+import threading
 
 import numpy as np
 import pygame
@@ -22,7 +24,7 @@ import pygame
 from engine.text import BODY_SIZE, HEADER_SIZE
 from sim.arsenal import ONIKS, S300, S300_TEL
 from sim.sam import SamMissile
-from world.generation import (BASE_POS, LANES, SAM_SITE_POS, SITES,
+from world.generation import (BASE_POS, LANES, SAM_SITE_POS, SEED, SITES,
                               terrain_height, terrain_height_scalar)
 
 # --- Map texture extent (plan-fixed) ------------------------------------------
@@ -138,6 +140,68 @@ def build_map_pixels(n: int = MAP_TEX_N) -> np.ndarray:
                     -h / SHORE_WATER_DEPTH)[rim]
     img[~water & (h < SAND_HEIGHT)] = SAND
     return np.clip(img + 0.5, 0.0, 255.0).astype(np.uint8)
+
+
+# --- Async map-pixel build with a disk cache ------------------------------------
+#
+# build_map_pixels measures seconds even with the masked terrain_height — far
+# too long to run on the main thread when M is first pressed (the app went
+# "Not Responding" for the whole build: user bug report 2026-06-12). The
+# pixels are world-seed-fixed, so: build ONCE in a daemon thread (kicked off
+# at sandbox construction, while the BUILDING WORLD frame shows), cache the
+# result to disk keyed by seed/size, and have the map draw a BUILDING MAP
+# placeholder on the rare early M press. Module-level so a sandbox restart
+# reuses the array.
+
+_pixels_lock = threading.Lock()
+_pixels: np.ndarray | None = None
+_pixels_thread: threading.Thread | None = None
+
+
+def _map_cache_path() -> str:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "cache",
+                        f"map_pixels_v1_seed{SEED}_{MAP_TEX_N}.npy")
+
+
+def _build_or_load_pixels() -> None:
+    global _pixels
+    path = _map_cache_path()
+    px = None
+    try:
+        arr = np.load(path)
+        if arr.shape == (MAP_TEX_N, MAP_TEX_N, 3) and arr.dtype == np.uint8:
+            px = arr
+    except (OSError, ValueError):
+        px = None                       # missing/corrupt cache: rebuild
+    if px is None:
+        px = build_map_pixels()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            np.save(path, px)
+        except OSError:
+            pass                        # cache is an optimization, never fatal
+    with _pixels_lock:
+        _pixels = px
+
+
+def ensure_map_pixels_async() -> None:
+    """Start (at most one) background build/load of the map pixel array."""
+    global _pixels_thread
+    with _pixels_lock:
+        if _pixels is not None or (
+                _pixels_thread is not None and _pixels_thread.is_alive()):
+            return
+        _pixels_thread = threading.Thread(target=_build_or_load_pixels,
+                                          daemon=True,
+                                          name="map-pixels-build")
+        _pixels_thread.start()
+
+
+def get_map_pixels():
+    """The (n, n, 3) uint8 map array, or None while it is still building."""
+    with _pixels_lock:
+        return _pixels
 
 
 # --------------------------------------------------------------- pure view
@@ -544,11 +608,19 @@ class TacticalMap:
 
     # ------------------------------------------------------ terrain texture
 
-    def _ensure_texture(self) -> None:
+    def _ensure_texture(self) -> bool:
+        """Upload the map texture once the async pixel build is done.
+        Returns False (and kicks the build) while still pending — the
+        terrain quad draws a BUILDING MAP placeholder instead of blocking
+        the main thread for the whole build."""
         if self.tex:
-            return
+            return True
+        pixels = get_map_pixels()
+        if pixels is None:
+            ensure_map_pixels_async()
+            return False
         gl = self._gl
-        pixels = np.ascontiguousarray(build_map_pixels())
+        pixels = np.ascontiguousarray(pixels)
         self.tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex)
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
@@ -560,9 +632,15 @@ class TacticalMap:
                            (gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE),
                            (gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)):
             gl.glTexParameteri(gl.GL_TEXTURE_2D, pname, val)
+        return True
 
     def _draw_terrain_quad(self, w: int, h: int) -> None:
-        self._ensure_texture()
+        if not self._ensure_texture():
+            msg = "BUILDING MAP..."
+            tw = self.text.text_width(msg, HEADER_SIZE)
+            self.text.draw_text((w - tw) * 0.5, (h - 28) * 0.5, msg,
+                                (0.95, 0.85, 0.45), HEADER_SIZE)
+            return
         gl = self._gl
         x0, y0 = self.view.world_to_screen((MAP_X_MIN, MAP_Z_MAX))  # NW corner
         x1, y1 = self.view.world_to_screen((MAP_X_MAX, MAP_Z_MIN))  # SE corner

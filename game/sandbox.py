@@ -45,6 +45,7 @@ from game.cameras import (LAUNCHER_LOOK_UP, CameraRig, StaticSubject,
 from game.controls import SandboxControls
 from game.hud import HUD
 from game.states import GameState
+from game import tactical_map
 from game.tactical_map import TacticalMap
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
@@ -246,6 +247,10 @@ class SandboxState(GameState):
         #                                 StaticSubject or a contact entity
         self.map_open = False           # M toggles the tactical map
         self.tactical_map = TacticalMap(self)
+        # Map texture pixels build in a daemon thread (seconds of numpy):
+        # kicked here, under the BUILDING WORLD frame, so the first M press
+        # never blocks the main thread (it shows BUILDING MAP if early).
+        tactical_map.ensure_map_pixels_async()
         self.active_platform = "bastion"   # TAB toggles bastion <-> s300
         self.hint_text = ""             # transient HUD hint line
         self.hint_left = 0.0            # real seconds the hint stays up

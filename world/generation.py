@@ -105,34 +105,74 @@ def _continent(x, z, signed_dist, height_seed):
     return r * (55.0 + 90.0 * fbm(x, z, 8_000.0, 4, height_seed)) + cliff
 
 
+# Masked-evaluation bounds (vectorized fast path). The final height is a
+# max() of contributions over a floor that is STRICTLY above -140 m
+# (floor = -60 - 80*fbm with fbm < 1), so any contribution provably <= -140
+# can be skipped without changing a single output bit:
+#   - a continent point with r = clip(sd/4000, -3, 1) <= -2.625 contributes
+#     at most r*55 <= -144.4 (cliff term is 0 offshore); r <= -2.625 means
+#     signed_dist <= -10.5 km, i.e. z further than coast_max + 10.5 km from
+#     the coast band — _CONT_BAND_M of margin covers the wiggle:
+_CONT_BAND_M = 13_000.0   # evaluate continent noise only within this band
+#   - an island skirt at m <= -0.35 contributes m*400 <= -140; the lift fbm
+#     matters only strictly inside the shoreline (m >= 0).
+_SKIRT_MIN_M = -0.35
+
+
 def terrain_height(x, z):
     """Vectorized float64 terrain height (m). > 0 is land; < 0 is seabed
-    (ocean surface is rendered at y = 0). THE single source of truth."""
+    (ocean surface is rendered at y = 0). THE single source of truth.
+
+    Noise is evaluated only where it can affect the result (bounds above) —
+    bit-identical to the dense evaluation (tests pin it against the scalar
+    path, including the band/skirt boundaries) but ~10x faster on large
+    mostly-ocean grids (the tactical map build measured 42 s dense)."""
     x = np.asarray(x, dtype=np.float64)
     z = np.asarray(z, dtype=np.float64)
     x, z = np.broadcast_arrays(x, z)
+    shape = x.shape
+    xf = np.ravel(x)
+    zf = np.ravel(z)
 
-    zeros = np.zeros_like(x)
-    # Home continent: coast wiggles in [0, 2500] around z = 0; land rises to the south.
-    home_coast = _COAST_WIGGLE * fbm(x, zeros, 30_000.0, 4, SEED + 1)
-    h = _continent(x, z, home_coast - z, SEED + 2)
+    h = np.full(xf.shape, -1.0e9)   # running max; far below any contribution
 
-    # Enemy continent: mirrored — coast wiggles in [500_000 - 2500, 500_000]; land rises north.
-    enemy_coast = ENEMY_COAST_Z - _COAST_WIGGLE * fbm(x, zeros, 30_000.0, 4, SEED + 3)
-    h = np.maximum(h, _continent(x, z, z - enemy_coast, SEED + 4))
+    # Home continent: coast wiggles in [0, 2500] around z = 0; land to the south.
+    bm = zf < _CONT_BAND_M
+    if bm.any():
+        xs, zs = xf[bm], zf[bm]
+        coast = _COAST_WIGGLE * fbm(xs, np.zeros_like(xs), 30_000.0, 4, SEED + 1)
+        h[bm] = _continent(xs, zs, coast - zs, SEED + 2)
 
-    # Islands: radial smoothstep falloff above water, steep (but continuous)
-    # underwater skirt outside the shoreline so max() stays cliff-free.
+    # Enemy continent: mirrored at ENEMY_COAST_Z; land rises north.
+    bm = zf > ENEMY_COAST_Z - _CONT_BAND_M
+    if bm.any():
+        xs, zs = xf[bm], zf[bm]
+        coast = (ENEMY_COAST_Z
+                 - _COAST_WIGGLE * fbm(xs, np.zeros_like(xs), 30_000.0, 4, SEED + 3))
+        h[bm] = np.maximum(h[bm], _continent(xs, zs, zs - coast, SEED + 4))
+
+    # Islands: noise only inside the shoreline; the underwater skirt only
+    # where it can still beat the ocean floor.
     for k, (cx, cz, radius, peak) in enumerate(ISLANDS):
-        d = np.sqrt((x - cx) ** 2 + (z - cz) ** 2)
-        m = 1.0 - d / radius                    # > 0 inside the island
-        lift = _smoothstep01(m) ** 1.5 * (peak * (0.4 + 0.6 * fbm(x, z, radius * 0.35, 4, SEED + 5 + 17 * k)))
-        h_isl = np.where(m >= 0.0, lift, m * _ISLAND_SHORE_SLOPE)
-        h = np.maximum(h, h_isl)
+        m = 1.0 - np.sqrt((xf - cx) ** 2 + (zf - cz) ** 2) / radius
+        inside = m >= 0.0
+        if inside.any():
+            lift = (_smoothstep01(m[inside]) ** 1.5
+                    * (peak * (0.4 + 0.6 * fbm(xf[inside], zf[inside],
+                                               radius * 0.35, 4,
+                                               SEED + 5 + 17 * k))))
+            h[inside] = np.maximum(h[inside], lift)
+        skirt = (m < 0.0) & (m > _SKIRT_MIN_M)
+        if skirt.any():
+            h[skirt] = np.maximum(h[skirt], m[skirt] * _ISLAND_SHORE_SLOPE)
 
-    # Ocean floor: gently rolling seabed, always well below the surface.
-    floor = -60.0 - 80.0 * fbm(x, z, 20_000.0, 3, SEED + 6)
-    return np.maximum(h, floor)
+    # Ocean floor: gently rolling seabed — only where the running max sits
+    # below the floor's -60 m ceiling can the floor win the max().
+    fm = h < -60.0
+    if fm.any():
+        floor = -60.0 - 80.0 * fbm(xf[fm], zf[fm], 20_000.0, 3, SEED + 6)
+        h[fm] = np.maximum(h[fm], floor)
+    return h.reshape(shape)
 
 
 def is_land(x, z):
