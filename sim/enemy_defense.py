@@ -37,8 +37,10 @@ launch_realtime_lock honors it) and ``launch_platform = <destroyer>``
 (sim/damage.py skips the pair so a deck launch can never OBB-hit its own
 hull on the first substep).
 
-Determinism: all CIWS randomness routes through the injected generator;
-given the same seed and call sequence the battle replays exactly.
+Determinism: all CIWS randomness routes through the injected generator,
+and every SM-2 launch draws ONE integer from it to seed a child Generator
+for that round's multipath noise (sim/sam.py); given the same seed and
+call sequence the battle replays exactly.
 """
 
 from __future__ import annotations
@@ -90,6 +92,7 @@ class ShipDefense:
 
     def __init__(self, ship, rng):
         self.ship = ship
+        self.rng = rng          # shared side rng: CIWS rolls + SM-2 noise seeds
         self.ciws = Ciws(ship.ciws_ammo, rng)
         # id(missile) -> dict(missile, t_next, since, pos, vel, age):
         # the same cadence/sustain gating shape as ContactBoard._vis, plus
@@ -181,8 +184,13 @@ class ShipDefense:
         if best_key is None:
             return
         deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
-        sam = SamMissile(SM2, deck, self._tracks[best_key]["missile"],
-                         contact_estimate_fn=self._estimate(best_key))
+        sam = SamMissile(
+            SM2, deck, self._tracks[best_key]["missile"],
+            contact_estimate_fn=self._estimate(best_key),
+            # One parent draw seeds a child Generator per launch: the
+            # multipath noise stays seeded/deterministic per battle while
+            # each round wanders independently (sim/sam.py MULTIPATH_*).
+            rng=np.random.default_rng(int(self.rng.integers(2 ** 63))))
         sam.launch_cinematic = False    # no 1x time lock for enemy launches
         sam.launch_platform = ship      # damage.py: never self-OBB-hit
         world.missiles.append(sam)

@@ -108,6 +108,38 @@ DIVE_MAX_TAN = math.tan(math.radians(25.0))
 # G-limited together with the gravity compensation.
 MID_GAIN = 2.2                 # 1/s of angle error
 
+# --- Low-altitude multipath tracking noise (Phase 3 gate: physics, not dice) --
+# Against a target down in the sea-clutter/multipath region the surface-
+# reflected return interferes with the direct one and the MEASURED target
+# position wanders — the classic low-elevation problem that makes sea-
+# skimmers the SM-2's hard case (and why Aegis pairs it with CIWS). Modeled
+# as a per-axis Ornstein-Uhlenbeck error added to the position the missile
+# guides on (BOTH the midcourse contact estimate and the terminal lock):
+#     n += (-n / tau) * dt + sigma * sqrt(2 * dt / tau) * randn
+# Time-correlated (tau ~ the lobe-flicker decorrelation scale) so PN chases
+# a coherently wandering point instead of averaging white jitter out; the
+# vertical axis is included because vertical miss is what defeats the 20 m
+# fuse. sigma scales linearly with how deep the target sits below the
+# threshold altitude and is ZERO above it. The proximity fuse always works
+# on truth: misses must EMERGE from guiding on a wandering point, never
+# from a kill roll (user law). No rng wired (the default) = zero noise —
+# the player's S-300 vs aircraft is bit-identical to before.
+MULTIPATH_ALT_M = 150.0   # m: target altitude below which the error grows
+MULTIPATH_TAU_S = 0.5     # s: OU correlation time (multipath lobe flicker)
+MULTIPATH_SIGMA_M = 60.0  # m: stationary per-axis RMS error at zero target
+#                           altitude (~3 mrad of low-elevation angle error
+#                           at 20 km — severe but documented multipath
+#                           territory). MEASURED, not guessed: tuned via
+#                           tools/probe_sm2_batch.py N=20 seeded battles —
+#                           sigma 18 killed the lo-lo Oniks 20/20 (PN low-
+#                           passes the tau=0.5 s wander, so the felt miss is
+#                           well under the raw sigma); the sweep 30/45/50/
+#                           55/60 measured 0.90/0.60/0.60/0.55/0.50
+#                           kill-per-engagement. 60.0 locks lo-lo at 0.50
+#                           (band 0.25-0.60) with hi-lo untouched at 1.00
+#                           (intercepts happen far above MULTIPATH_ALT_M).
+#                           Locked by tests/test_sm2_statistics.py.
+
 
 def _rotate_toward_scalar(hx, hy, hz, dx, dy, dz, max_angle):
     """Rotate unit (hx,hy,hz) toward unit (dx,dy,dz) by at most max_angle
@@ -152,16 +184,22 @@ class SamMissile:
         (the fuse sets ``.alive = False`` directly in that case).
     contact_estimate_fn: optional () -> (pos(3,), vel(3,)) giving the stale
         CONTACT picture; used for boost/midcourse aiming when present.
+    rng: optional numpy Generator feeding the low-altitude multipath noise
+        (a child generator per launch — sim/enemy_defense.py — keeps battles
+        deterministic). None (default) = zero noise, bit-identical guidance.
     """
 
     def __init__(self, sam_def, pos_f64, target,
-                 contact_estimate_fn=None):
+                 contact_estimate_fn=None, rng=None):
         self.weapon = sam_def
         self.pos = np.asarray(pos_f64, dtype=np.float64).copy()
         self.prev_pos = self.pos.copy()
         self.vel = np.zeros(3)
         self.target = target
         self.contact_estimate_fn = contact_estimate_fn
+        self.rng = rng
+        # Multipath OU error state (m, world axes) — see MULTIPATH_* above.
+        self._mp_x = self._mp_y = self._mp_z = 0.0
         self.phase = SPH_EJECT
         self.t = 0.0
         self.propellant = sam_def.propellant_mass
@@ -212,15 +250,33 @@ class SamMissile:
 
     def _target_state(self):
         """(tx, ty, tz, tvx, tvy, tvz): the contact estimate before terminal
-        (when supplied), the true aircraft state otherwise."""
+        (when supplied), the true aircraft state otherwise. The multipath
+        error rides on the position either way — the noise lives in the
+        tracking/illumination chain, not in any one data source."""
         if self.phase < SPH_TERMINAL and self.contact_estimate_fn is not None:
             tpos, tvel = self.contact_estimate_fn()
-            return (float(tpos[0]), float(tpos[1]), float(tpos[2]),
+            return (float(tpos[0]) + self._mp_x, float(tpos[1]) + self._mp_y,
+                    float(tpos[2]) + self._mp_z,
                     float(tvel[0]), float(tvel[1]), float(tvel[2]))
         tp = self.target.pos
         tv = self.target.velocity()
-        return (float(tp[0]), float(tp[1]), float(tp[2]),
+        return (float(tp[0]) + self._mp_x, float(tp[1]) + self._mp_y,
+                float(tp[2]) + self._mp_z,
                 float(tv[0]), float(tv[1]), float(tv[2]))
+
+    def _update_multipath(self, dt):
+        """One OU step of the per-axis tracking error (only called with an
+        rng wired). sigma fades linearly to zero at MULTIPATH_ALT_M and the
+        accumulated error DECAYS on tau once the target climbs out of the
+        multipath region — no discontinuity at the threshold."""
+        f = (MULTIPATH_ALT_M - float(self.target.pos[1])) / MULTIPATH_ALT_M
+        sigma = MULTIPATH_SIGMA_M * min(max(f, 0.0), 1.0)
+        k = dt / MULTIPATH_TAU_S
+        q = sigma * math.sqrt(2.0 * dt / MULTIPATH_TAU_S)
+        rng = self.rng
+        self._mp_x += -self._mp_x * k + q * rng.standard_normal()
+        self._mp_y += -self._mp_y * k + q * rng.standard_normal()
+        self._mp_z += -self._mp_z * k + q * rng.standard_normal()
 
     def _aim_direction(self, px, py, pz, vx, vy, vz):
         """Unit direction toward the loft-shaped predicted intercept point:
@@ -341,6 +397,8 @@ class SamMissile:
             self.vel[1] = w.eject_speed        # catapult: straight up
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
+        if self.rng is not None:               # multipath tracking error
+            self._update_multipath(dt)
 
         px0, alt, pz0 = self.pos.tolist()      # plain floats: scalar-fast math
         vx, vy, vz = self.vel.tolist()
@@ -405,7 +463,10 @@ class SamMissile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase == SPH_TERMINAL:
-            tpos = np.asarray(self.target.pos, dtype=np.float64)
+            tp = self.target.pos               # terminal lock: truth + noise
+            tpos = np.array([float(tp[0]) + self._mp_x,
+                             float(tp[1]) + self._mp_y,
+                             float(tp[2]) + self._mp_z])
             g = pn_accel(self.pos, self.vel, tpos, self.target.velocity())
             gx, gy, gz = g.tolist()
             gy += GRAVITY                      # gravity compensation
