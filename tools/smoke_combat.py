@@ -12,8 +12,9 @@ import numpy as np
 import pygame
 
 from main import App, PHYS_DT
+from sim.enemy_air import (FS_PARKED, FS_REARMING, FS_RTB, Fighter)
 from sim.recon import RWR_LOCK, RWR_SPIKE
-from world.combat import DRONE_RESPAWN_S, CombatWorld
+from world.combat import (AIRFIELD_XZ, DRONE_RESPAWN_S, CombatWorld)
 from world.generation import BASE_POS
 
 
@@ -30,9 +31,15 @@ def main() -> int:
         ok = ok and cond
 
     check("state is CombatState", type(state).__name__ == "CombatState")
-    check("two destroyers, nothing else",
-          [s.ship_type for s in world.ships] == ["destroyer", "destroyer"])
-    check("no aircraft", world.aircraft == [])
+    check("two destroyers + exactly one carrier, nothing else",
+          [s.ship_type for s in world.ships]
+          == ["destroyer", "destroyer", "carrier"])
+    check("no legacy aircraft (enemy air lives in enemy_air)",
+          world.aircraft == [])
+    check("carrier + fighter + awacs + airfield meshes registered",
+          "carrier" in state._ship_meshes
+          and state._mesh_fighter is not None
+          and state._mesh_awacs is not None)
     check("one friendly radar site",
           [s["id"] for s in world.sites] == ["radar_player_00"])
     check("board is gated", world.contacts.visible_fn is not None)
@@ -87,8 +94,10 @@ def main() -> int:
 
     w4 = CombatWorld()
     d4 = w4.drone
-    check("destroyers EMIT at spawn",
-          all(s.radar.emitting for s in w4.ships))
+    check("destroyers EMIT at spawn; carrier runs silent (5a doctrine)",
+          all(s.radar.emitting for s in w4.ships
+              if s.ship_type == "destroyer")
+          and not w4.carrier.radar.emitting)
     # ELINT: a 120 km crossing leg south of the fleet — bearings sweep a
     # wide angle while the hulls stay far past the ground radar horizon.
     d4.pos[0], d4.pos[2] = -60_000.0, 80_000.0
@@ -164,6 +173,47 @@ def main() -> int:
           w5.drone is not None and w5.drone.alive
           and abs(w5.drone.pos[0] - BASE_POS[0]) < 5_000.0
           and w5.drone.route == [])
+
+    # --- Phase 5a: the air war scaffolding (pure sim, coarse DT — no
+    # weapons employment in 5a: fighters fly and rearm, the AWACS senses).
+    w6 = CombatWorld()
+    carriers = [s for s in w6.ships if s.ship_type == "carrier"]
+    check("exactly one carrier, targetable in ships",
+          len(carriers) == 1 and carriers[0].alive
+          and carriers[0] is w6.carrier)
+    for _ in range(int(120.0 / DT4)):           # CAP scheduler spins up
+        w6.step(DT4)
+    airborne = [f for f in w6.enemy_air
+                if isinstance(f, Fighter) and f.alive]
+    check(">=1 fighter airborne after CAP spin-up", len(airborne) >= 1)
+    check("AWACS emitting and the drone ELINT hears it (LOS-honest)",
+          w6.awacs.alive and w6.awacs.radar.emitting
+          and w6.elint.last_heard("awacs_00_radar") is not None)
+    f6 = airborne[0]
+    f6._fuel_s = f6._bingo_s + 1.0              # force bingo
+    f6.pos[1] = min(f6.pos[1], 600.0)           # skip the 5 m/s descent
+    landed = rearmed = False
+    for _ in range(int(2_500.0 / DT4)):
+        w6.step(DT4)
+        landed = landed or f6.state == FS_REARMING
+        if landed and f6.state == FS_PARKED:
+            rearmed = True
+            break
+    check("bingo fighter RTBs, lands and rearms", landed and rearmed)
+    # Airfield killable -> airborne fighters divert to the carrier.
+    w7 = CombatWorld()
+    for _ in range(int(120.0 / DT4)):
+        w7.step(DT4)
+    f7 = next(f for f in w7.enemy_air if isinstance(f, Fighter) and f.alive)
+    f7.pos[0], f7.pos[2] = AIRFIELD_XZ          # overhead its home plate
+    while w7.airfield.alive:
+        w7.airfield.hit()
+    f7._fuel_s = f7._bingo_s + 1.0
+    for _ in range(int(10.0 / DT4)):
+        w7.step(DT4)
+    check("airfield killed -> fighter diverts to the carrier",
+          not w7.air_bases[0].alive and f7.state == FS_RTB
+          and f7._base is w7.air_bases[1])
 
     # --- GL pass over the Phase-4 UI: TAB cycle, drone HUD panel, map
     # overlays (drone diamond/route + ELINT rays/circles) and the [ / ]
