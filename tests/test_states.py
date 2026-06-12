@@ -50,6 +50,9 @@ class FakeApp:
     def start_sandbox(self):
         self.started += 1
 
+    def start_combat(self):
+        self.combat_started = getattr(self, "combat_started", 0) + 1
+
     def open_settings(self, back_to):
         self.settings_from.append(back_to)
 
@@ -76,7 +79,7 @@ def test_move_selection_wraps_both_ways():
 
 
 def test_menu_and_pause_items_per_spec():
-    assert MAIN_ITEMS == ("SANDBOX", "SETTINGS", "QUIT")
+    assert MAIN_ITEMS == ("SANDBOX", "COMBAT", "SETTINGS", "QUIT")
     assert PAUSE_ITEMS == ("RESUME", "SETTINGS", "MAIN MENU")
 
 
@@ -134,9 +137,15 @@ def test_menu_starts_on_sandbox_and_navigates(kb):
     assert tuple(menu.items) == MAIN_ITEMS
     assert menu.sel == 0
     menu.handle_event(key_event(pygame.K_DOWN))
-    assert menu.items[menu.sel] == "SETTINGS"
+    assert menu.items[menu.sel] == "COMBAT"
     menu.handle_event(key_event(pygame.K_UP))
     assert menu.items[menu.sel] == "SANDBOX"
+
+
+def test_menu_combat_item_starts_combat(kb):
+    menu = MenuState(FakeApp(kb))
+    menu._fire("COMBAT")
+    assert menu.app.combat_started == 1
 
 
 def test_menu_press_flash_defers_then_fires(kb):
@@ -154,6 +163,7 @@ def test_menu_settings_and_quit(kb):
     app = FakeApp(kb)
     menu = MenuState(app)
     menu.handle_event(key_event(pygame.K_DOWN))
+    menu.handle_event(key_event(pygame.K_DOWN))   # SANDBOX -> COMBAT -> SETTINGS
     menu.handle_event(key_event(pygame.K_RETURN))
     menu._tick_pending(0.1)
     assert app.settings_from == [menu]

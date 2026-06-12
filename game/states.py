@@ -65,7 +65,7 @@ SUBTITLE_TEXT = "ANTI-SHIP MISSILE SIMULATION"
 FOOTER_LEFT = f"ONIKS PROTO {GAME_VERSION} - {BUILD_DATE}"
 FOOTER_HINTS = "UP/DN SELECT  ENTER OK"
 
-MAIN_ITEMS = ("SANDBOX", "SETTINGS", "QUIT")
+MAIN_ITEMS = ("SANDBOX", "COMBAT", "SETTINGS", "QUIT")
 PAUSE_ITEMS = ("RESUME", "SETTINGS", "MAIN MENU")
 CONFIRM_MAIN_MENU = "MAIN MENU - ENTER AGAIN TO CONFIRM"
 CONFIRM_RESET = "ENTER AGAIN TO CONFIRM"
@@ -338,7 +338,7 @@ class _ListScreen(GameState):
 
 
 class MenuState(_ListScreen):
-    """Main menu: SANDBOX / SETTINGS / QUIT over a flat BG0 field, with the
+    """Main menu: SANDBOX / COMBAT / SETTINGS / QUIT over a flat BG0 field, with the
     corner-ticked title panel and the version footer (ui_reference.md §2.1).
     ESC at the title screen quits the app."""
 
@@ -352,6 +352,8 @@ class MenuState(_ListScreen):
             self.app.running = False
         elif name == "SANDBOX":
             self.app.start_sandbox()    # fresh world
+        elif name == "COMBAT":
+            self.app.start_combat()     # fresh combat session
         elif name == "SETTINGS":
             self.app.open_settings(self)
 
