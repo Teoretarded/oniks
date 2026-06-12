@@ -764,8 +764,15 @@ class TacticalMap:
             self._poly_world(lane, LANE_COL, 1.5)
 
     def _sites(self) -> None:
+        """Land-site squares: the world's own sites plus any DISCOVERED
+        enemy installations (COMBAT Phase 5a fog of war for structures —
+        world/combat.py known_enemy_sites holds the airfield only once a
+        player sensor has imaged it; SANDBOX worlds have no such list)."""
         s = SITE_HALF_PX
-        for site in self.sandbox.world.sites:
+        world = self.sandbox.world
+        sites = list(world.sites) + list(
+            getattr(world, "known_enemy_sites", ()))
+        for site in sites:
             sx, sy = self.view.world_to_screen(site["pos"])
             if not self._on_screen(sx, sy, pad=120.0):
                 continue
