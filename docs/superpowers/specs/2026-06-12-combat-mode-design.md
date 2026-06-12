@@ -268,11 +268,17 @@ Pantsir/S-300 auto-defense covered by their own logic).
    (fixed seed, no setup screen yet).
 3. **Enemy strikes back:** Tomahawk/JASSM/HARM sims, base HP/destruction,
    lose condition, radar silence mechanics.
-4. **Air war:** fighter + AWACS + carrier + airfield models and behaviors,
-   sortie/rearm cycle, commander AI v1.
-5. **Pantsir:** model + auto-engagement vs inbound missiles.
-6. **Recon drone:** ELINT bearings/triangulation, SAR footprint, RWR alerts,
-   stealth detection ranges, intel aging.
+4. **Recon drone:** ELINT bearings/triangulation, SAR footprint, RWR alerts,
+   stealth detection ranges, intel aging. (Pulled forward from 6 — user
+   gate: without it the player has no way to find the fleet that phases
+   2-3 made hostile; until it lands the only recon is Oniks seeker
+   recon-by-fire. ELINT finds ANY emitting ship — a destroyer that
+   defends itself radiates and gives itself away; SAR finds silent hulls;
+   the deep, silent carrier is the hardest SAR target, not the only one.)
+5. **Air war:** fighter + AWACS + carrier + airfield models and behaviors,
+   sortie/rearm cycle, commander AI v1. (Drone risk mechanics become real
+   exactly when interceptors arrive.)
+6. **Pantsir:** model + auto-engagement vs inbound missiles.
 7. **Setup screen + Armory + seeded generation + win/lose screens.**
 8. **Polish (rolling):** a standing backlog accumulated through phases 1-7
    (user feedback, gate critiques, deferred visuals) executed as the final

@@ -52,6 +52,14 @@ Orchestrator gate (balance pass, research-grounded per verifier numbers):
   value (~25 m) at the same time and retire the floor-based regression
   test in favor of the statistical contract. Memory: physics-not-dice.
 
+## Phase reorder (2026-06-12, user gate)
+
+Recon drone pulled forward to Phase 4 (was 6); air war -> 5, Pantsir -> 6.
+Reason: phases 2-3 create a hostile fleet the player cannot locate — the
+only interim recon is Oniks seeker recon-by-fire. ELINT scope clarified:
+finds ANY emitting ship (self-defense = self-revealing), not just the
+carrier; the silent deep carrier is the hardest SAR target.
+
 ## Phase 8 — polish backlog (rolling)
 
 - Destroyer model: bow flare subtle, aft stack indistinct (reference-photo
