@@ -70,8 +70,37 @@ Phase 4 — the recon drone (spec §4.3):
     when it hits) and the replacement spawns at the base with a CLEARED
     route when the timer runs out.
 
-Later phases stack the air war, Pantsir and the commander AI on this
-shell.
+Phase 5a — the air war scaffolding (spec §5.1/5.3/5.4/5.5; weapons
+employment, the commander AI and AIM-9X/JASSM/HARM delivery are 5b):
+
+  * Exactly ONE Carrier (sim/enemy_air.py) joins ``self.ships`` at a FIXED
+    deep anchor inside the spawn-zone carrier band — it is Oniks-targetable,
+    walks the ship damage ladder and feeds the gated contact picture like
+    any hull (full seeded placement via world/spawn_zones.sample_fleet is
+    Phase 7).  Its radar exists but is silent (5a doctrine).
+  * The enemy AIRFIELD is a destructible Structure on the enemy continent
+    in ``self.enemy_structures`` — swept against PLAYER cruise missiles
+    each step (mirror of the hostile-vs-player-base pass; is_hostile keeps
+    the two sides' rounds out of each other's sweep).  Fog of war for
+    fixed installations: the 3D world always shows the real geometry, but
+    the tactical MAP only gains the site marker once a player sensor has
+    actually imaged it (``airfield_known``, latched — installations don't
+    move, so knowledge never ages out like a moving track).
+  * Fighters (2 at the airfield + 2 on the carrier) and one AWACS live in
+    ``self.enemy_air`` — NOT ``self.aircraft``: that list is the legacy
+    sandbox traffic that feeds the LEGACY all-seeing board and several
+    sandbox-only code paths; enemy air is stepped and fed to the gated
+    player picture explicitly here.  A standing-CAP scheduler keeps
+    ~CAP_TARGET_AIRBORNE fighters rotating (launch -> racetrack over the
+    fleet -> bingo RTB to the nearest surviving base -> rearm -> next);
+    the 5b commander replaces it.
+  * Enemy picture symmetry: the AWACS radar is a datalink CUE for every
+    destroyer's fire control (sim/enemy_defense.py cue_radars_fn) — a
+    ship may form and engage a missile/drone track the AWACS holds before
+    its own SPY-1 sees it; terminal SARH illumination stays own-ship.
+  * The drone's ELINT/RWR emitter lists now include the AWACS (always
+    emitting in 5a) and airborne fighters' nose radars — passively
+    locatable by construction.
 
 Pure numpy / GL-free (LOCKED test convention), like world.world.
 """
@@ -82,9 +111,12 @@ import numpy as np
 
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.contacts import ContactBoard, TRACK_DROP_S
+from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
+                           AirBase, Awacs, Carrier, Fighter)
 from sim.enemy_defense import EnemyDefenseController
 from sim.enemy_ships import Destroyer
 from sim.enemy_strikes import EnemyStrikeController
+from sim.missile import Missile
 from sim.radar import Radar, RadarNetwork
 from sim.recon import (DRONE_GONE, ELINT_FIX_ACTIONABLE_M, ElintReceiver,
                        ReconDrone, RwrReceiver, SarSensor)
@@ -121,6 +153,64 @@ DESTROYER_SPAWNS = (
     {"ship_id": "destroyer_01", "anchor_xz": (20_000.0, 170_000.0),
      "heading_deg": 15.0},
 )
+
+# --- Phase 5a: enemy air order of battle ----------------------------------------
+
+# Enemy airfield: probed dry land on the enemy continent near the requested
+# (60 km, 520 km) area.  (60_000, 516_000) measured 138.8-142.9 m of terrain
+# across the full 2.5 km runway footprint (x +-250 m, z +-1400 m) — the
+# flattest on-land candidate of a 20-cell sweep (spread 4.1 m; neighbours
+# ran 12-22 m).  LOCKED by tests/test_phase5a_e2e.py on-land pins — nudge
+# if generation ever changes.
+AIRFIELD_XZ = (60_000.0, 516_000.0)
+
+# Airfield OBB, Structure dims order (length=X, beam=Z, height=Y): the
+# models/airfield.py runway runs along +Z (2 500 m) with the taxiway,
+# hangars and tower spread ~205 m across +X; the box pads both so a
+# terminal-diving Oniks anywhere over the installation registers.  Height
+# 50 m tops the 47 m tower mast.
+AIRFIELD_DIMS = (450.0, 2_600.0, 50.0)
+
+# Airfield HP: a dispersed 2.5 km installation — cratering the runway AND
+# flattening the hangars takes several 250 kg-class warheads (spec §5.5
+# "destroyable"; more than the 2-hit vehicle TELs, under the carrier's 6).
+AIRFIELD_HP = 4
+
+# The map marker shown once the installation has been imaged (same dict
+# shape as COMBAT_SITES/world.generation SITES so the tactical map's site
+# drawing consumes it unchanged).
+AIRFIELD_SITE = {"id": "airfield_enemy_00", "kind": "airfield",
+                 "pos": AIRFIELD_XZ, "name": "ENEMY AIRFIELD"}
+
+# Carrier: FIXED anchor inside the spawn-zone carrier band (spec §5.1b;
+# world/spawn_zones.py CARRIER_RANGE_MIN/MODE/MAX 240-330 km — 280 km IS
+# the band mode).  (0, 280_000) verified open water: terrain -92.5 m at
+# the anchor and spawn_zones.is_open_water (the 9 km clearance disc) True.
+# Seeded placement via sample_fleet lands in Phase 7.
+CARRIER_ANCHOR_XZ = (0.0, 280_000.0)
+CARRIER_HEADING_DEG = 90.0      # east-west racetrack, beam-on to the player
+
+# AWACS: racetrack rectangle around the requested (0, 420_000) deep area —
+# 80 km legs at 9.1 km altitude, 405-435 km from the base: outside the
+# player radar's 350 km 'fighter' range AND the S-300 envelope (it orbits
+# deep and only a 5b 40N6 — or a fled orbit — changes that).
+AWACS_ANCHOR_A_XZ = (-40_000.0, 405_000.0)
+AWACS_ANCHOR_B_XZ = (40_000.0, 435_000.0)
+
+# Standing CAP (5a placeholder for the commander): the racetrack anchor
+# sits over the destroyer screen (anchors at z 150/170 km) so the CAP
+# orbits the fleet it protects.
+FIGHTER_CAP_ANCHOR_XZ = (0.0, 160_000.0)
+CAP_TARGET_AIRBORNE = 2     # fighters kept up (out of the 4 fielded)
+CAP_SCHED_PERIOD_S = 5.0    # s between scheduler checks; also staggers
+#                             launches (at most one fighter rolls per check)
+
+AIRFIELD_FIGHTERS = 2       # parked at the airfield at spawn
+CARRIER_FIGHTERS = 2        # parked on the carrier at spawn
+
+INTEL_CHECK_PERIOD_S = 1.0  # s between fixed-installation intel checks
+#                             (cheap: a range gate rejects the radar path
+#                             instantly; SAR is a hypot)
 
 # --- Phase 4: recon drone ------------------------------------------------------
 
@@ -166,8 +256,13 @@ class CombatWorld(WorldState):
         destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
         # The enemy side's fire control: CIWS randomness derives from the
         # world seed so a battle replays exactly (determinism contract).
+        # The carrier (a Destroyer subclass) is covered too — zero SM-2/
+        # CIWS ammo makes its unit inert in 5a, and the seam is already
+        # right when 5b arms the escorts' picture.  cue_radars_fn is the
+        # AWACS datalink (built below; the closure resolves lazily).
         self.defense = EnemyDefenseController(
-            destroyers, rng=np.random.default_rng(rng_seed))
+            destroyers, rng=np.random.default_rng(rng_seed),
+            cue_radars_fn=self._enemy_cue_radars)
         # Phase 3: ESM localization -> Tomahawk salvos at the radar station.
         self.strikes = EnemyStrikeController(destroyers, self.radar_station)
         # Destructible player base (sim/bases.py). The radar-station
@@ -207,10 +302,47 @@ class CombatWorld(WorldState):
         self._fix_next_t = 0.0
         self._rwr_next_t = 0.0
 
+        # ---- Phase 5a: enemy air order of battle ----
+        ax, az = AIRFIELD_XZ
+        self.airfield = Structure(
+            "airfield_enemy_00", "airfield",
+            np.array([ax, terrain_height_scalar(ax, az), az]),
+            dims=AIRFIELD_DIMS, hp=AIRFIELD_HP)
+        # Enemy fixed installations, swept against PLAYER cruise missiles
+        # (the mirror of self.structures vs hostile rounds) in step().
+        self.enemy_structures = [self.airfield]
+        carrier = next(s for s in self.ships if isinstance(s, Carrier))
+        self.carrier = carrier
+        # Recovery sites in NEAREST-SURVIVING-base priority order is the
+        # fighters' own logic; list order here only seeds the round-robin
+        # launch rotation (airfield first).
+        self.air_bases = [AirBase(self.airfield), AirBase(carrier)]
+        self.enemy_air: list = []
+        roster = ([self.air_bases[0]] * AIRFIELD_FIGHTERS
+                  + [self.air_bases[1]] * CARRIER_FIGHTERS)
+        for i, base in enumerate(roster):
+            fighter = Fighter(f"fighter_{i:02d}", base,
+                              FIGHTER_CAP_ANCHOR_XZ)
+            base.parked.append(fighter)
+            self.enemy_air.append(fighter)
+        self.awacs = Awacs("awacs_00", AWACS_ANCHOR_A_XZ, AWACS_ANCHOR_B_XZ)
+        self.enemy_air.append(self.awacs)
+        self._cap_next_t = 0.0
+        self._cap_base_idx = 0          # round-robin launch base pointer
+        # Fog of war for fixed installations: latched once ANY player
+        # sensor images the airfield (installations don't move — the
+        # marker persists, unlike a moving track that ages out).
+        self.airfield_known = False
+        self._intel_next_t = 0.0
+
     def _spawn_ships(self):
-        return [Destroyer(s["ship_id"], s["anchor_xz"],
-                          heading_deg=s["heading_deg"])
-                for s in DESTROYER_SPAWNS]
+        ships = [Destroyer(s["ship_id"], s["anchor_xz"],
+                           heading_deg=s["heading_deg"])
+                 for s in DESTROYER_SPAWNS]
+        # Always exactly ONE carrier (spec §5.4) at the fixed deep anchor.
+        ships.append(Carrier("carrier_00", CARRIER_ANCHOR_XZ,
+                             heading_deg=CARRIER_HEADING_DEG))
+        return ships
 
     def _spawn_aircraft(self):
         return []
@@ -283,9 +415,17 @@ class CombatWorld(WorldState):
 
     def _emitters(self):
         """(emitter_id, radar) per enemy radar mount, rebuilt every pass
-        from the live ship list so future emitter platforms (AWACS,
-        ground radars — Phase 5) join the ELINT picture by construction."""
-        return [(s.radar.radar_id, s.radar) for s in self.ships]
+        from the live entity lists so emitter platforms join the ELINT
+        picture by construction.  Phase 5a: ship mounts (the carrier's is
+        silent — doctrine flag, never heard) plus every AIRBORNE enemy
+        air radar — the AWACS emits whenever it flies (5a doctrine) and a
+        fighter's nose radar searches only while the jet is up
+        (``alive`` is the airborne flag: parked/rearming/dead airframes
+        radiate nothing)."""
+        ems = [(s.radar.radar_id, s.radar) for s in self.ships]
+        ems.extend((e.radar.radar_id, e.radar)
+                   for e in self.enemy_air if e.alive)
+        return ems
 
     def _step_recon_sensors(self) -> None:
         """ELINT / RWR / fix-injection on their cadences (see the period
@@ -300,7 +440,12 @@ class CombatWorld(WorldState):
             self.elint.update(drone.pos, self._emitters(), sim_time=now)
         if now >= self._rwr_next_t:
             self._rwr_next_t = now + RWR_PERIOD_S
-            self.rwr.update(drone.pos, [s.radar for s in self.ships],
+            # Threat emitters = ship mounts + airborne enemy air radars
+            # (same airborne gate as _emitters): a fighter nose radar
+            # sweeping the drone SPIKEs the RWR like any other radar.
+            radars = [s.radar for s in self.ships]
+            radars.extend(e.radar for e in self.enemy_air if e.alive)
+            self.rwr.update(drone.pos, radars,
                             [m for m in self.missiles
                              if m.alive and isinstance(m, SamMissile)])
         if now >= self._fix_next_t:
@@ -341,6 +486,100 @@ class CombatWorld(WorldState):
                 pos=est.copy(), vel=np.zeros(3), age=age,
                 t_next=now + ELINT_FIX_PERIOD_S, is_air=False)
 
+    # ---------------------------------------------------------------- phase 5a
+
+    def _enemy_cue_radars(self):
+        """Datalink cueing sources beyond own-ship SPY-1 (spec section 3:
+        "enemy ships rely on their own radar or AWACS cueing"): the live
+        AWACS radar.  Resolved lazily — the defense controller is built
+        before the AWACS in __init__ but only calls this from step()."""
+        awacs = getattr(self, "awacs", None)
+        if awacs is not None and awacs.alive:
+            return [awacs.radar]
+        return []
+
+    def _step_enemy_air(self, dt: float) -> None:
+        """Rearm queues, the standing-CAP scheduler, then every enemy
+        airframe; crash events fire exactly when an impact lands (both
+        Fighter and Awacs set impact_pos once, at the spiral's end —
+        winchester egress reaches GONE without an impact, no event)."""
+        for base in self.air_bases:
+            base.update(dt)
+        if self.sim_time >= self._cap_next_t:
+            self._cap_next_t = self.sim_time + CAP_SCHED_PERIOD_S
+            self._schedule_cap()
+        for e in self.enemy_air:
+            had_impact = e.impact_pos is not None
+            if isinstance(e, Fighter):
+                e.update(dt, self.air_bases)
+            else:
+                e.update(dt)
+            if not had_impact and e.impact_pos is not None:
+                kind = ("aircraft_down" if e.impact_pos[1] > 1e-6
+                        else "aircraft_splash")
+                self.events.append((kind, e.impact_pos.copy()))
+
+    def _schedule_cap(self) -> None:
+        """Keep ~CAP_TARGET_AIRBORNE fighters up (5a standing rotation;
+        the 5b commander replaces this).  Outbound states count as
+        airborne; an RTB/landing fighter frees its slot so the next one
+        rolls.  At most ONE launch per check (natural stagger), drawn
+        round-robin across the LIVE bases.  Fighters parked at a dead
+        base never launch (a cratered runway flies no sorties — spec
+        §5.5; recovering those airframes is the 5b commander's call)."""
+        airborne = sum(1 for e in self.enemy_air
+                       if isinstance(e, Fighter)
+                       and e.state in (FS_TAKEOFF, FS_TRANSIT,
+                                       FS_ON_STATION))
+        if airborne >= CAP_TARGET_AIRBORNE:
+            return
+        n = len(self.air_bases)
+        for k in range(n):
+            base = self.air_bases[(self._cap_base_idx + k) % n]
+            if not base.alive:
+                continue
+            for fighter in list(base.parked):
+                if fighter.state == FS_PARKED:
+                    fighter.launch(FIGHTER_CAP_ANCHOR_XZ)
+                    self._cap_base_idx = (self._cap_base_idx + k + 1) % n
+                    return
+
+    def _find_air_entity(self, aircraft_id):
+        """world.world hook override: air contacts in COMBAT are enemy
+        air (fighters/AWACS) or hostile strike rounds — the S-300 launch/
+        retarget lookups and the sandbox camera find them here.  The
+        legacy aircraft list stays empty in COMBAT."""
+        ent = super()._find_air_entity(aircraft_id)
+        if ent is not None:
+            return ent
+        return next((e for e in self.enemy_air
+                     if e.aircraft_id == aircraft_id), None)
+
+    @property
+    def known_enemy_sites(self) -> list:
+        """Enemy fixed installations the player side has actually IMAGED
+        (fog of war for structures): the tactical map draws these as site
+        markers; an unseen installation is simply absent from the map.
+        The 3D scene is not gated — the geometry physically exists."""
+        return [AIRFIELD_SITE] if self.airfield_known else []
+
+    def _update_airfield_intel(self) -> None:
+        """Latch ``airfield_known`` when any player sensor sees the
+        airfield: the drone's SAR strip (the designed path — a surface
+        'structure' is imaged exactly like a silent hull) or, for
+        completeness, the radar net (in practice the 516 km pin sits far
+        past the player radar's range, so SAR overflight is the game)."""
+        if self.airfield_known or self.sim_time < self._intel_next_t:
+            return
+        self._intel_next_t = self.sim_time + INTEL_CHECK_PERIOD_S
+        pos = self.airfield.pos
+        drone = self.drone
+        if (drone is not None and drone.alive
+                and self.sar.detects(drone.pos, pos)):
+            self.airfield_known = True
+        elif self.radar_net.visible(pos, "ship"):
+            self.airfield_known = True
+
     # ---------------------------------------------------------------- phase 3
 
     @property
@@ -377,17 +616,33 @@ class CombatWorld(WorldState):
 
     def step(self, dt: float) -> None:
         """Base step (ships, missiles, damage, contacts), then the drone
-        flight, then the enemy defenses and strikes: rounds launched here
-        join ``self.missiles`` and are flown by the NEXT base step,
-        exactly like a player launch this frame. Finally the hostile
-        rounds are swept against the base structures, the strike rounds
-        are fed to the player picture and the recon sensors run."""
+        flight and the enemy air war, then the enemy defenses and
+        strikes: rounds launched here join ``self.missiles`` and are
+        flown by the NEXT base step, exactly like a player launch this
+        frame. Finally the two structure sweeps run (hostile rounds vs
+        the player base; player cruise missiles vs the enemy airfield),
+        the strike rounds and the enemy air feed the player picture and
+        the recon sensors run."""
         super().step(dt)
         self._step_drones(dt)
+        self._step_enemy_air(dt)
         self.defense.step(self, dt)
         self.strikes.step(self, dt)
         apply_missile_hits_structures(
             [m for m in self.missiles if getattr(m, "is_hostile", False)],
             self.structures, self.events)
+        # The mirror sweep: only PLAYER cruise missiles (sim.missile
+        # Missile — the Oniks; never hostile by construction) demolish
+        # enemy installations.  Interceptors (SamMissile both sides) and
+        # hostile strike rounds are excluded by the isinstance filter.
+        apply_missile_hits_structures(
+            [m for m in self.missiles if isinstance(m, Missile)],
+            self.enemy_structures, self.events)
         self._update_strike_contacts(dt)
+        # Enemy air -> the gated player picture: fighters/AWACS are air
+        # entities (radar_size 'fighter'), tracked once the radar net
+        # physically sees them — horizon math already right for a 9 km
+        # CAP vs the mast-height station.
+        self.contacts.update(self.enemy_air, dt, self.sim_time)
         self._step_recon_sensors()
+        self._update_airfield_intel()

@@ -405,14 +405,15 @@ class SandboxState(GameState):
 
     def _selected_entity(self):
         """The Ship/Aircraft behind the map's selected contact (None when
-        nothing is selected or the entity is gone)."""
+        nothing is selected or the entity is gone). Air contacts resolve
+        through the world's _find_air_entity hook so COMBAT enemy air
+        (fighters/AWACS, world/combat.py) is found like sandbox traffic."""
         sid = self.tactical_map.selected_contact
         track = self.world.contacts.tracks.get(sid) if sid is not None else None
         if track is None:
             return None
         if track.get("is_air"):
-            return next((a for a in self.world.aircraft
-                         if a.aircraft_id == sid), None)
+            return self.world._find_air_entity(sid)
         return next((s for s in self.world.ships if s.ship_id == sid), None)
 
     def cycle_camera_subject(self, step: int = 1):

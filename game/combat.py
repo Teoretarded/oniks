@@ -12,8 +12,18 @@ Phase 4 adds the recon drone: TAB gains the third 'drone' platform
 world's drone + falling wrecks in the aircraft draw pass (same range cull
 and attitude convention — ReconDrone exposes heading/pitch/roll), and the
 [ / ] subject cycle swaps the TEL anchor for the live airframe while the
-drone platform is active. Later phases add the air war, the commander AI
-and the setup screen on top.
+drone platform is active.
+
+Phase 5a adds the enemy air war's bodies: the carrier renders through the
+shared ``_ship_meshes`` routing (ship_type 'carrier'), the enemy airfield
+joins ``_site_draws`` (a static mesh at the structure's terrain pin — the
+3D world always shows the real geometry; only the MAP is fog-gated), and
+``world.enemy_air`` (fighters + AWACS) draws in the aircraft pass with the
+same range cull and attitude convention (both classes expose
+heading/pitch/roll). Parked/rearming fighters are skipped: the airframe
+is conceptually in the hangar / below deck, and at 280+ km it is
+sub-pixel anyway (deck clutter is Phase-7 polish). Later phases add the
+commander AI and the setup screen on top.
 
 GL-touching module (subclasses game/sandbox.py) — never imported by unit
 tests.
@@ -24,9 +34,14 @@ from __future__ import annotations
 from engine.mesh import Mesh
 from game.controls import PLATFORMS_COMBAT
 from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
+from models.airfield import build_airfield
+from models.awacs import build_awacs
+from models.carrier import build_carrier
 from models.common import rot_x, rot_y, rot_z
 from models.destroyer import build_destroyer
 from models.drone import build_recon_drone
+from models.fighter import build_fighter
+from sim.enemy_air import FS_GONE, FS_PARKED, FS_REARMING, Fighter
 from sim.recon import DRONE_GONE
 from world.combat import CombatWorld
 
@@ -44,10 +59,21 @@ class CombatState(SandboxState):
         # Registered into the shared dict so _draw_ships picks it up by
         # ship_type and dispose() frees it with the other ship meshes.
         self._ship_meshes["destroyer"] = Mesh(build_destroyer())
+        self._ship_meshes["carrier"] = Mesh(build_carrier())
         self._mesh_drone = Mesh(build_recon_drone())
+        self._mesh_fighter = Mesh(build_fighter())
+        self._mesh_awacs = Mesh(build_awacs())
+        # Enemy airfield: drawn like the land sites (appended into
+        # _site_draws so the base _draw_scene renders it and dispose()
+        # frees it with the other site meshes). The structure's pos is
+        # already terrain-pinned (world/combat.py).
+        self._site_draws.append((Mesh(build_airfield()),
+                                 self.world.airfield.pos.copy()))
 
     def dispose(self) -> None:
         self._mesh_drone.delete()
+        self._mesh_fighter.delete()
+        self._mesh_awacs.delete()
         super().dispose()
 
     # ------------------------------------------------------------- platform
@@ -89,3 +115,24 @@ class CombatState(SandboxState):
                 continue                        # sub-pixel: skip the draw
             rot = rot_y(d.heading) @ rot_x(-d.pitch) @ rot_z(-d.roll)
             self.renderer.draw_mesh(self._mesh_drone, p, rot)
+        # Phase 5a: enemy air (fighters + AWACS), same cull + attitude
+        # convention. Fighters on the ground (parked/rearming) or out of
+        # the war (GONE) are skipped; a crashed AWACS (impact landed) too.
+        for e in getattr(world, "enemy_air", ()):
+            if isinstance(e, Fighter):
+                if e.state in (FS_PARKED, FS_REARMING, FS_GONE):
+                    continue
+                mesh = self._mesh_fighter
+            else:
+                if e.impact_pos is not None:    # AWACS wreck on the ground
+                    continue
+                mesh = self._mesh_awacs
+            p = e.pos
+            dx = p[0] - eye[0]
+            dy = p[1] - eye[1]
+            dz = p[2] - eye[2]
+            if (dx * dx + dy * dy + dz * dz
+                    > AIRCRAFT_DRAW_RANGE * AIRCRAFT_DRAW_RANGE):
+                continue                        # sub-pixel: skip the draw
+            rot = rot_y(e.heading) @ rot_x(-e.pitch) @ rot_z(-e.roll)
+            self.renderer.draw_mesh(mesh, p, rot)

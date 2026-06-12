@@ -10,12 +10,15 @@ DT = 1.0 / 120.0
 
 
 def test_no_sandbox_traffic():
-    """Phase 2: the only ships are the two enemy destroyers — none of the
-    sandbox lane traffic, no aircraft, only the friendly radar site."""
+    """Phase 2 (extended by Phase 5a): the only ships are the two enemy
+    destroyers plus EXACTLY one carrier (spec 5.4) — none of the sandbox
+    lane traffic, no legacy aircraft (Phase-5a enemy air lives in
+    cw.enemy_air, never here), only the friendly radar site."""
     cw = CombatWorld()
-    assert [s.ship_id for s in cw.ships] == [s["ship_id"]
-                                             for s in DESTROYER_SPAWNS]
+    assert [s.ship_id for s in cw.ships] == [
+        s["ship_id"] for s in DESTROYER_SPAWNS] + ["carrier_00"]
     assert all(isinstance(s, Destroyer) for s in cw.ships)
+    assert [s.ship_type for s in cw.ships].count("carrier") == 1
     assert cw.aircraft == []
     assert cw.sites is COMBAT_SITES
 

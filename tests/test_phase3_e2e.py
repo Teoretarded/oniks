@@ -84,7 +84,13 @@ def test_silenced_radar_is_never_localized_no_strike():
         w.strikes.step(w, 1.0)
     assert w.strikes.progress == 0.0
     assert w.missiles == []
-    assert all(d.tomahawk_ammo == 8 for d in w.ships)
+    # Every magazine untouched: the destroyers still hold their full 8;
+    # the Phase-5a carrier ships none (silent doctrine, zero land-attack
+    # cells) and must stay at zero.
+    assert all(d.tomahawk_ammo == 8 for d in w.ships
+               if d.ship_type == "destroyer")
+    assert all(d.tomahawk_ammo == 0 for d in w.ships
+               if d.ship_type == "carrier")
 
 
 # ---------------------------------------------------------------------------

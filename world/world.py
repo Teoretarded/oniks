@@ -232,8 +232,7 @@ class WorldState:
         track = self.contacts.tracks.get(aircraft_id)
         if track is None or not track.get("is_air"):
             return None
-        target = next((a for a in self.aircraft
-                       if a.aircraft_id == aircraft_id), None)
+        target = self._find_air_entity(aircraft_id)
         if target is None:
             return None
         tube = S300_TEL.ammo - self.sam_ammo
@@ -244,6 +243,15 @@ class WorldState:
         self.sam_ammo -= 1
         self.sam_reload_left = S300_TEL.reload_s
         return m
+
+    def _find_air_entity(self, aircraft_id):
+        """The live air ENTITY behind an air contact id — the S-300 launch
+        and retarget lookups and the sandbox's selected-contact camera all
+        route through this one hook.  The sandbox world only flies
+        ``self.aircraft``; CombatWorld overrides to also search its enemy
+        air list (world/combat.py — fighters/AWACS are S-300 targets)."""
+        return next((a for a in self.aircraft
+                     if a.aircraft_id == aircraft_id), None)
 
     def _contact_estimate(self, aircraft_id):
         """A () -> (pos, vel) closure over the board's dead-reckoned track
@@ -276,8 +284,7 @@ class WorldState:
         track = self.contacts.tracks.get(aircraft_id)
         if track is None or not track.get("is_air"):
             return False
-        target = next((a for a in self.aircraft
-                       if a.aircraft_id == aircraft_id), None)
+        target = self._find_air_entity(aircraft_id)
         if target is None:
             return False
         return missile.retarget(
