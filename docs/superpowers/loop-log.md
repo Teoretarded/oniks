@@ -63,6 +63,17 @@ physics works, game is optimized, models look good."
 
 ## Iterations
 
+- **2026-06-12 turn-dynamics fix (user playtest feedback, controller solo).**
+  User reported missiles cornering instantly at launch (visible trail kink) and the
+  S-300 platform accepting waypoint paths it ignores. Measured: velocity-direction
+  turn rate jumped 0 -> 49 deg/s in one 8 ms tick at the boost handover. Fixed with
+  slewed trapezoidal turn rates (TURN_ACCEL 150 deg/s^2, BRAKE_MARGIN 0.6 arrive-slow
+  braking) on Oniks pitch-over/boost and SAM tip-over, TVC gravity compensation during
+  launch steering, a 0.6 s post-burnout guidance ease-in, and a body_dir attitude state
+  (nose leads the path, AOA clamp 10 deg) that the renderer now uses. Map: S-300
+  refuses waypoint planning with a hint. Verification: probe shows peak exactly 70
+  deg/s with ZERO jump events; 4 new regression tests; full suite green; perf 13.81 ms
+  avg PASS; launch render shows a continuous candy-cane arc with no corner.
 - **2026-06-11 Feel & Polish final verification (controller's own pass, clean machine).**
   Suite: full run exit 0 (~250 tests incl. slow e2e intercepts, retarget, launch timings).
   Perf: 10.82 ms avg / 14.02 p95 vs 16.0 budget — best result yet, gaming load closed.
