@@ -159,6 +159,15 @@ HARM_RELEASE_RANGE_M: float = 100_000.0    # m (10 km inside the max for margin)
 # (8 km) with a comfortable 2 km buffer so the seeker has time to track.
 IR_FIRE_RANGE_M: float = 6_000.0    # m
 
+# Intercept snap-up ceiling: an F/A-18E-class combat ceiling ~15.2-15.5 km
+# (50 000+ ft).  The recon drone cruises at 18 km (sim/recon.py
+# DRONE_ALT_M) — from the 9 km CAP altitude the 6 km IR fire gate is a
+# geometric impossibility (3-D slant >= 9 km forever), so an intercepting
+# fighter CLIMBS toward min(target altitude, this ceiling) and takes the
+# remaining ~2.5 km vertically as an AIM-9X snap-up shot (well inside the
+# seeker/energy envelope measured by the 5b probes).
+FIGHTER_INTERCEPT_CEILING_M: float = 15_500.0
+
 # Default fighter hardpoints per sortie (4 stations):
 # Strike loadout: 2x JASSM (stations 1, 2), 2x AIM-9X (stations 3, 4).
 # SEAD loadout:   2x HARM  (stations 1, 2), 2x AIM-9X (stations 3, 4).
@@ -1237,6 +1246,18 @@ class Fighter:
             self._set_transit_to(np.array([float(tpos[0]), float(tpos[2])]))
             if self.state == FS_ON_STATION:
                 self.state = FS_TRANSIT
+            # Snap-up climb toward the target, capped at the combat
+            # ceiling (FIGHTER_INTERCEPT_CEILING_M doc): without it a
+            # 9 km fighter can never close the IR fire gate on the 18 km
+            # drone.  Altitude is held wherever the hunt ends; the RTB
+            # glide brings it home.
+            climb_to = min(float(tpos[1]), FIGHTER_INTERCEPT_CEILING_M)
+            if self.pos[1] < climb_to:
+                self.pos[1] = min(climb_to,
+                                  self.pos[1] + FIGHTER_CLIMB_RATE_MPS * dt)
+            elif self.pos[1] > climb_to:
+                self.pos[1] = max(climb_to,
+                                  self.pos[1] - FIGHTER_CLIMB_RATE_MPS * dt)
 
         # Sync nose-radar position to the fighter's current pos.
         self.radar.pos[0] = self.pos[0]

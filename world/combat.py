@@ -853,6 +853,13 @@ class CombatWorld(WorldState):
                 break
         if hunter is None:
             return
+        if (hunter._intercept_target is not None
+                and getattr(hunter._intercept_target, "alive", False)):
+            # Already in entity pursuit: the fighter's own tracking beats
+            # a stale 1 Hz vector.  Re-vectoring here would CLEAR the
+            # pursuit every time the overtaking jet's nose cone swings
+            # off the target for a beat (measured in the 5b probes).
+            return
         if hunter.radar.detects(drone.pos, drone.radar_size):
             hunter.execute_order({"type": "intercept", "target": drone})
             return
