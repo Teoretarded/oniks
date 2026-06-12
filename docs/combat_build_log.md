@@ -122,3 +122,44 @@ structures in sim/bases.py), then the integrator.
 - Fighter AIM-9X-class IR pair for the drone hunt (spec 5.1) — Phase 5.
 - Drone respawn-after-cooldown: in spec 4.3 since v1 — re-confirm in the
   Phase 4 brief (user reminder 2026-06-12).
+
+## Phase 3 gate — SM-2 physics pass (2026-06-12)
+
+Both queued mechanisms landed, measured, locked (physics-not-dice):
+
+- **Low-altitude multipath noise** (sim/sam.py MULTIPATH_*): below 150 m
+  the position a SamMissile guides on — midcourse estimate AND terminal
+  lock — carries per-axis OU noise (tau 0.5 s, vertical included), sigma
+  scaling with depth below the threshold. Fuse stays on truth. Enemy
+  launches seed a child Generator per round off the side rng
+  (deterministic battles); rng None (player S-300) = bit-identical.
+- **Terminal lock-break on terrain mask** (sim/sam.py LOS_CHECK_PERIOD_S
+  0.5 s): SM-2 checks SHIP illuminator -> target (SARH; dead ship = lock
+  lost), S-300 checks missile seeker -> target. Blocked check freezes the
+  last estimate, guided until a later check clears — island-hugging
+  routes are now genuine evasion.
+- **SM2 floor 100 m -> 25 m** (sim/arsenal.py): misses now come from
+  physics; the floor regression test retired for the statistical contract
+  (tests/test_sm2_statistics.py).
+
+**Measured** (tools/probe_sm2_batch.py, N=20 seeded CombatWorld battles
+per cell, REAL world.launch Oniks vs destroyer_00, weave in the loop —
+kill-per-engagement of the SM-2 layer):
+
+| config                  | lo-lo (60 m) | hi-lo |
+|-------------------------|--------------|-------|
+| old 100 m floor         | no shot taken| 1.00  |
+| floor 25 m, sigma 0     | 1.00 (20/20) | 1.00  |
+| sigma 18 (first guess)  | 1.00 (20/20) | 1.00  |
+| sigma 30 / 45 / 50 / 55 | 0.90/0.60/0.60/0.55 | 1.00 |
+| **sigma 60 (LOCKED)**   | **0.50 (10/20)** | **1.00 (20/20)** |
+
+Gate contract met: hi-lo >= 0.8 (1.00 — intercepts happen at 14 km, far
+above the noise region), lo-lo in 0.25-0.60 (0.50). Of the 10 lo-lo
+leakers: 3 die to CIWS, 7 hit the destroyer — the gun layer matters
+again. First-guess sigma 18 killed 20/20: PN low-passes the tau 0.5 s
+wander, so the felt miss is well under the raw sigma — the reason the
+value had to be measured, not eyeballed. Locked two-sided in
+tests/test_sm2_statistics.py (60 m 3-round engagement batch 0.458 in
+[0.2, 0.65]; 3 km batch 10/10 >= 0.75; clean control kills every time;
+lock-break coast + reacquire).
