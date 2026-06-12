@@ -79,6 +79,23 @@ RELOAD_COL = (1.00, 0.72, 0.25, 1.0)
 HINT_COL = (0.85, 0.90, 0.85, 0.92)
 PANEL_RGBA = (0.03, 0.06, 0.05, 0.55)
 
+# Phase 4 — recon drone + ELINT overlays. The drone draws at its TRUE
+# position (friendly telemetry, not a contact) in its own cyan family so
+# it can never be misread as a contact or an own missile.
+DRONE_COL = (0.50, 0.95, 1.00, 1.00)         # drone diamond
+DRONE_DEAD_COL = (0.50, 0.95, 1.00, 0.45)    # falling wreck, dimmed
+DRONE_ROUTE_COL = (0.50, 0.95, 1.00, 0.35)   # tasked route polyline
+ELINT_RAY_COL = (0.85, 0.70, 0.95, 0.22)     # faint live bearing rays
+ELINT_CIRCLE_COL = (0.85, 0.70, 0.95, 0.50)  # fix uncertainty circles
+ELINT_RAY_LEN_M = 250_000.0    # ray length: a bearing has no range; long
+#                                enough to cross the whole battlespace
+ELINT_CIRCLE_MAX_M = 30_000.0  # only draw circles once the fix error is
+#                                inside this (else the circle is just noise
+#                                filling the map)
+ELINT_CIRCLE_SEGMENTS = 48
+DRONE_DIAMOND_PX = 7.0
+DRONE_RECON_HINT = "DRONE: RECON ONLY"       # LMB/SPACE with drone active
+
 SITE_HALF_PX = 5.0             # site square icon half-size
 BASE_STAR_PX = 8.0             # base star spoke length
 CONTACT_NOSE_PX = 9.0          # contact triangle: nose ahead of the estimate
@@ -472,12 +489,19 @@ class TacticalMap:
             return True
         return False
 
+    def _live_drone(self):
+        """The world's flying drone, or None (SANDBOX worlds carry none)."""
+        drone = getattr(self.sandbox.world, "drone", None)
+        return drone if drone is not None and drone.alive else None
+
     def _rmb_waypoint(self, wp) -> None:
         """RMB: append to the selected round's remaining route (Task RTG),
         else to the launch plan. A committed round flashes COMMITTED; a full
         route refuses silently (matches the plan-chain behavior). The S-300
         flies no route — with that platform active, planning waypoints is
-        refused with a hint instead of silently lying on the map."""
+        refused with a hint instead of silently lying on the map. The drone
+        platform tasks the LIVE airframe directly (Phase 4): RMB extends
+        its remaining route, capped like the launch plan."""
         m = self.selected_missile
         if m is not None:
             if isinstance(m, SamMissile):
@@ -486,6 +510,11 @@ class TacticalMap:
                 self.sandbox.app.audio.ui_click()
             elif not m.retargetable:
                 self.sandbox.show_hint(COMMITTED_HINT)
+        elif self.sandbox.active_platform == "drone":
+            drone = self._live_drone()
+            if drone is not None and len(drone.route) < MAX_WAYPOINTS:
+                drone.append_waypoint(wp)
+                self.sandbox.app.audio.ui_click()
         elif self.sandbox.active_platform == "s300":
             self.sandbox.show_hint(SAM_NO_WAYPOINTS_HINT)
         elif add_waypoint(self.sandbox.waypoints, wp):
@@ -493,10 +522,17 @@ class TacticalMap:
 
     def _clear_waypoints(self) -> None:
         """X: clear the selected round's remaining waypoints (Task RTG),
-        else the launch plan's."""
+        else the launch plan's — or the drone's tasked route (it breaks
+        off and loiters where it is) when that platform is active."""
         m = self.selected_missile
         if m is not None:
             if not isinstance(m, SamMissile) and m.clear_route_waypoints():
+                self.sandbox.app.audio.ui_click()
+            return
+        if self.sandbox.active_platform == "drone":
+            drone = self._live_drone()
+            if drone is not None:
+                drone.clear_route()
                 self.sandbox.app.audio.ui_click()
             return
         if self.sandbox.active_platform == "s300":
@@ -526,6 +562,11 @@ class TacticalMap:
             return
         if self.selected_missile is not None:
             self._retarget_selected(pos)
+            return
+        if sandbox.active_platform == "drone":
+            # Phase 4: the drone is recon-only — LMB plans no launch.
+            # RMB waypoints are the whole tasking language.
+            sandbox.show_hint(DRONE_RECON_HINT)
             return
         air = sandbox.active_platform == "s300"
         sid = pick_contact(self.view, world.contacts, world.sim_time, pos,
@@ -603,8 +644,10 @@ class TacticalMap:
         self._platform_stars()
         self._plan_chain()
         self._seeker_cone()
+        self._elint_overlay()
         self._contacts()
         self._missiles()
+        self._drone_overlay()
         self._chrome(w, h)
         if self.selected_missile is not None:    # Task RTG: live telemetry
             self.sandbox.hud.draw_flight_block(self.sandbox,
@@ -889,6 +932,77 @@ class TacticalMap:
                                  sy + SELECT_RING_PX * np.sin(ang))),
                         SELECT_COL, 1.5)
 
+    # ----------------------------------------------------- Phase 4 overlays
+
+    def _drone_overlay(self) -> None:
+        """The friendly drone at its TRUE position (telemetry, not a
+        contact): cyan diamond + label + tasked-route polyline; falling
+        wrecks draw dimmed without a route."""
+        world = self.sandbox.world
+        drones = list(getattr(world, "drone_wrecks", ()))
+        drone = getattr(world, "drone", None)
+        if drone is not None:
+            drones.append(drone)
+        d = DRONE_DIAMOND_PX
+        for dr in drones:
+            col = DRONE_COL if dr.alive else DRONE_DEAD_COL
+            if dr.alive:
+                route = dr.route
+                if route:
+                    self._poly_world([(dr.pos[0], dr.pos[2])] + route,
+                                     DRONE_ROUTE_COL, 1.0)
+                    for i, wp in enumerate(route):
+                        sx, sy = self.view.world_to_screen(wp)
+                        wd = WAYPOINT_PX
+                        self.text.draw_lines(
+                            [(sx, sy - wd), (sx + wd, sy), (sx, sy + wd),
+                             (sx - wd, sy), (sx, sy - wd)],
+                            DRONE_ROUTE_COL, 1.5)
+                        self.text.draw_text(sx + wd + 3, sy - 9, str(i + 1),
+                                            DRONE_ROUTE_COL)
+            sx, sy = self.view.world_to_screen((dr.pos[0], dr.pos[2]))
+            if not self._on_screen(sx, sy):
+                continue
+            self.text.draw_lines([(sx, sy - d), (sx + d, sy), (sx, sy + d),
+                                  (sx - d, sy), (sx, sy - d)], col, 2.0)
+            self.text.draw_lines([(sx - d * 0.5, sy), (sx + d * 0.5, sy)],
+                                 col, 1.5)      # center bar: not a missile
+            if dr.alive:
+                self.text.draw_text(sx + d + 4, sy - 9, "DRONE", col)
+
+    def _elint_overlay(self) -> None:
+        """ELINT picture: faint bearing rays from the drone's latest
+        intercept of each RECENTLY-heard emitter, and an uncertainty
+        circle (radius = fix error) around each estimate once the error
+        is inside ELINT_CIRCLE_MAX_M — the circle visibly shrinks as the
+        drone's baseline improves the geometry."""
+        world = self.sandbox.world
+        elint = getattr(world, "elint", None)
+        if elint is None:
+            return
+        from world.combat import ELINT_FRESH_S
+        now = world.sim_time
+        for eid in elint.heard_emitters():
+            heard = elint.last_heard(eid)
+            fresh = heard is not None and now - heard <= ELINT_FRESH_S
+            if fresh:
+                latest = elint.latest_bearing(eid)
+                if latest is not None:
+                    (ox, oz), brg = (latest[0][0], latest[0][1]), latest[1]
+                    end = (ox + ELINT_RAY_LEN_M * math.sin(brg),
+                           oz + ELINT_RAY_LEN_M * math.cos(brg))
+                    self._poly_world([(ox, oz), end], ELINT_RAY_COL, 1.0)
+            err = elint.fix_quality(eid)
+            if not (err < ELINT_CIRCLE_MAX_M):
+                continue
+            est = elint.est_pos(eid)
+            if est is None:
+                continue
+            ang = np.linspace(0.0, 2.0 * np.pi, ELINT_CIRCLE_SEGMENTS + 1)
+            self._poly_world(
+                zip(est[0] + err * np.sin(ang), est[2] + err * np.cos(ang)),
+                ELINT_CIRCLE_COL, 1.0)
+
     # --------------------------------------------------------------- chrome
 
     def _chrome(self, w: int, h: int) -> None:
@@ -901,7 +1015,18 @@ class TacticalMap:
         self.text.draw_rect((w - tw) * 0.5 - 14, 8, tw + 28,
                             head_h + 30, PANEL_RGBA)
         self.text.draw_text((w - tw) * 0.5, 12, title, HEADER_COL, HEADER_SIZE)
-        if sandbox.active_platform == "s300":
+        if sandbox.active_platform == "drone":
+            drone = getattr(world, "drone", None)
+            if drone is not None and drone.alive:
+                line = (f"DRONE AIRBORNE   ALT {drone.pos[1] / 1e3:.1f} km   "
+                        f"WPT {len(drone.route)}   RECON ONLY")
+                col = ARMED_COL
+            else:
+                left = getattr(world, "drone_respawn_left", 0.0)
+                line = (f"DRONE DOWN   RESPAWN "
+                        f"{int(np.ceil(left - 1e-9))} s")
+                col = RELOAD_COL
+        elif sandbox.active_platform == "s300":
             if world.sam_ammo <= 0:
                 status, col = "EMPTY", RELOAD_COL
             elif world.sam_launcher_armed:

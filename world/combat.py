@@ -42,6 +42,34 @@ Phase 3 — the enemy strikes back:
     emit — module docstring of sim/enemy_strikes.py); the property is
     wired now so the Phase-4 commander AI plugs straight in.
 
+Phase 4 — the recon drone (spec §4.3):
+
+  * One ReconDrone (sim/recon.py) lives in ``self.drone`` — NOT in
+    ``self.aircraft``: the aircraft list feeds contact pictures (the
+    player's today, the ENEMY's in Phase 5), and the drone is friendly
+    telemetry on the player side, never a contact.
+  * ELINT: every step (on a cadence) the drone passively listens to every
+    enemy radar — the emitter list is rebuilt from the ships' radars each
+    pass, so future emitters (AWACS, ground radars) join by construction.
+    An ACTIONABLE triangulated fix (quality < 5 km, heard recently)
+    injects/refreshes a track for the matching SHIP in the player picture
+    (emitter_id -> ship via the '{ship_id}_spy1' radar mount), with the
+    estimate error mapped onto track AGE so the map draws it as a fading
+    uncertain contact (mapping documented at ELINT_AGE_MAX_S below).
+    A silenced emitter stops refreshing: the track coasts and drops like
+    any lost track (intel aging).
+  * SAR: the ContactBoard's visibility gate is extended — a SURFACE
+    target is 'seen' when the radar net sees it OR the live drone's SAR
+    strip covers it, so a silent hull overflown by the drone forms a
+    track through the board's normal sustained-detection flow.
+  * RWR: SPIKE when any enemy radar holds the drone, LOCK when an SM-2 is
+    inbound on it (the destroyers engage a detected drone —
+    sim/enemy_defense.py drone channel).
+  * Respawn: a shot-down drone starts DRONE_RESPAWN_S; the falling
+    airframe keeps spiralling in ``self.drone_wrecks`` (crash events fire
+    when it hits) and the replacement spawns at the base with a CLEARED
+    route when the timer runs out.
+
 Later phases stack the air war, Pantsir and the commander AI on this
 shell.
 
@@ -53,11 +81,14 @@ from __future__ import annotations
 import numpy as np
 
 from sim.bases import Structure, apply_missile_hits_structures
-from sim.contacts import ContactBoard
+from sim.contacts import ContactBoard, TRACK_DROP_S
 from sim.enemy_defense import EnemyDefenseController
 from sim.enemy_ships import Destroyer
 from sim.enemy_strikes import EnemyStrikeController
 from sim.radar import Radar, RadarNetwork
+from sim.recon import (DRONE_GONE, ELINT_FIX_ACTIONABLE_M, ElintReceiver,
+                       ReconDrone, RwrReceiver, SarSensor)
+from sim.sam import SamMissile
 from world.generation import BASE_POS, SEED, terrain_height_scalar
 from world.world import SAM_TEL_POS, WorldState
 
@@ -91,6 +122,41 @@ DESTROYER_SPAWNS = (
      "heading_deg": 15.0},
 )
 
+# --- Phase 4: recon drone ------------------------------------------------------
+
+DRONE_COUNT = 1             # drones fielded (spec 4.3 default; the Phase-7
+#                             armory/setup screen exposes this — the wiring
+#                             below is single-drone, multi-drone lands with
+#                             the setup screen)
+DRONE_RESPAWN_S = 300.0     # s from shot-down to the replacement spawning
+#                             at the base ("a replacement arrives after a
+#                             long timer", spec 4.3; armory-configurable in
+#                             Phase 7)
+
+# Sensor cadences: the ELINT terrain-LOS ray (up to ~225 heightfield
+# samples per emitter at the 450 km cap) and the lstsq triangulation are
+# far too heavy for 120 Hz — both run on cadences, like every other sensor
+# in the codebase (ContactBoard VIS_CHECK_PERIOD, enemy_defense
+# VIS_CHECK_PERIOD).
+ELINT_LISTEN_PERIOD_S = 0.5   # s between passive listening passes
+ELINT_FIX_PERIOD_S = 1.0      # s between triangulation + track-injection
+RWR_PERIOD_S = 0.25           # s between RWR threat refreshes (matches the
+#                               destroyers' own fire-control cadence)
+ELINT_FRESH_S = 5.0           # s since last heard for a fix to count as
+#                               LIVE intel: a silenced emitter stops
+#                               refreshing the picture within seconds and
+#                               its track ages out (intel aging)
+
+# ELINT error -> track age mapping: the board/map have ONE staleness axis
+# (track age: alpha fade on the map, TRACK_DROP_S drop) so the fix error
+# is expressed on it. A freshly-ACTIONABLE 5 km fix injects as an almost-
+# stale track (ELINT_AGE_MAX_S, just under the 90 s drop so it lives), a
+# razor 500 m fix as a ~8 s fresh one — the map contact visibly sharpens
+# as the geometry improves, and if injection stops the track is already
+# deep into its coast-out.
+ELINT_AGE_MAX_S = TRACK_DROP_S - 10.0   # 80 s: error == actionable bound
+#                                         -> nearly-dropped track
+
 
 class CombatWorld(WorldState):
     """WorldState variant: destroyers at sea, radar-gated contact picture."""
@@ -123,6 +189,24 @@ class CombatWorld(WorldState):
         # ghost contact can coast forever after a kill.
         self._strike_board: dict[str, object] = {}
 
+        # ---- Phase 4: the recon drone + its sensor suite ----
+        # Sensors are SIDE-level intel and persist across respawns (bearing
+        # pairs already collected keep triangulating); the drone is the
+        # disposable platform. All sensor randomness comes from one child
+        # generator off the world seed (SeedSequence [seed, 4] — phase tag
+        # — so it can never collide with the defense controller's stream).
+        self._recon_rng = np.random.default_rng([rng_seed, 4])
+        recon_rng = self._recon_rng
+        self.drone = self._spawn_drone(recon_rng)
+        self.drone_wrecks: list[ReconDrone] = []   # falling airframes
+        self.elint = ElintReceiver(rng=recon_rng)
+        self.sar = SarSensor()
+        self.rwr = RwrReceiver(drone_id=self.drone.aircraft_id)
+        self._drone_respawn_left = 0.0
+        self._elint_next_t = 0.0
+        self._fix_next_t = 0.0
+        self._rwr_next_t = 0.0
+
     def _spawn_ships(self):
         return [Destroyer(s["ship_id"], s["anchor_xz"],
                           heading_deg=s["heading_deg"])
@@ -141,7 +225,121 @@ class CombatWorld(WorldState):
             RADAR_ANTENNA_M, PLAYER_RADAR_RANGES)
         self.radar_net = RadarNetwork([self.radar_station])
         return ContactBoard((BASE_POS[0], BASE_POS[2]),
-                            visible_fn=self.radar_net.visible)
+                            visible_fn=self._player_visible)
+
+    def _player_visible(self, pos, size_class: str) -> bool:
+        """The player picture's visibility gate: the radar net, OR (Phase
+        4) the live drone's SAR strip for SURFACE targets — every surface
+        entity rates 'ship' today, and SAR never images air targets, so a
+        silent hull overflown by the drone enters the picture through the
+        board's normal sustained-detection flow. Guarded with getattr:
+        the board is built in super().__init__ before the drone exists."""
+        if self.radar_net.visible(pos, size_class):
+            return True
+        drone = getattr(self, "drone", None)
+        return (size_class == "ship" and drone is not None
+                and drone.alive and self.sar.detects(drone.pos, pos))
+
+    # ---------------------------------------------------------------- phase 4
+
+    def _spawn_drone(self, rng) -> ReconDrone:
+        """A fresh drone at the base: cruise altitude, empty route (it
+        loiters over the base until tasked). DRONE_COUNT is 1 until the
+        Phase-7 setup screen; the id stays 'drone_00' so the side-level
+        RWR filter survives respawns."""
+        return ReconDrone(aircraft_id="drone_00",
+                          spawn_xz=(BASE_POS[0], BASE_POS[2]), rng=rng)
+
+    @property
+    def drone_respawn_left(self) -> float:
+        """s until the replacement drone arrives (0 while one is up)."""
+        return self._drone_respawn_left
+
+    def _step_drones(self, dt: float) -> None:
+        """Fly the active drone and the falling wrecks; start the respawn
+        timer when the active one is shot down; spawn the replacement at
+        the base (route cleared by construction) when it runs out."""
+        # Wrecks first, so a drone killed THIS step is not double-stepped.
+        for wreck in self.drone_wrecks:
+            wreck.update(dt)
+            if wreck.state == DRONE_GONE and wreck.impact_pos is not None:
+                kind = ("aircraft_down" if wreck.impact_pos[1] > 1e-6
+                        else "aircraft_splash")
+                self.events.append((kind, wreck.impact_pos.copy()))
+        self.drone_wrecks = [w for w in self.drone_wrecks
+                             if w.state != DRONE_GONE]
+        drone = self.drone
+        if drone is not None:
+            drone.update(dt)
+            if not drone.alive:             # SM-2 fuse called kill()
+                self.drone_wrecks.append(drone)
+                self.drone = None
+                self._drone_respawn_left = DRONE_RESPAWN_S
+        elif self._drone_respawn_left > 0.0:
+            self._drone_respawn_left = max(
+                0.0, self._drone_respawn_left - dt)
+            if self._drone_respawn_left <= 0.0:
+                self.drone = self._spawn_drone(self._recon_rng)
+
+    def _emitters(self):
+        """(emitter_id, radar) per enemy radar mount, rebuilt every pass
+        from the live ship list so future emitter platforms (AWACS,
+        ground radars — Phase 5) join the ELINT picture by construction."""
+        return [(s.radar.radar_id, s.radar) for s in self.ships]
+
+    def _step_recon_sensors(self) -> None:
+        """ELINT / RWR / fix-injection on their cadences (see the period
+        constants above) — only while a drone is up: a dead platform
+        hears nothing, and the intel it already produced ages out."""
+        drone = self.drone
+        if drone is None or not drone.alive:
+            return
+        now = self.sim_time
+        if now >= self._elint_next_t:
+            self._elint_next_t = now + ELINT_LISTEN_PERIOD_S
+            self.elint.update(drone.pos, self._emitters(), sim_time=now)
+        if now >= self._rwr_next_t:
+            self._rwr_next_t = now + RWR_PERIOD_S
+            self.rwr.update(drone.pos, [s.radar for s in self.ships],
+                            [m for m in self.missiles
+                             if m.alive and isinstance(m, SamMissile)])
+        if now >= self._fix_next_t:
+            self._fix_next_t = now + ELINT_FIX_PERIOD_S
+            self._inject_elint_tracks(now)
+
+    def _inject_elint_tracks(self, now: float) -> None:
+        """Actionable ELINT fixes -> player-picture tracks.
+
+        The emitter is a ship mount ('{ship_id}_spy1'), so the fix maps
+        onto the SHIP's contact id — the same track the radar net or SAR
+        would feed, and a valid Oniks target. The estimate error rides
+        the track's AGE (ELINT_AGE_MAX_S mapping above): the map draws a
+        faded, uncertain contact that sharpens as the geometry improves.
+        Gates: the fix must be actionable, the emitter heard within
+        ELINT_FRESH_S (silence = the track coasts out and drops — intel
+        aging), and a FRESHER existing fix (younger age, e.g. live SAR
+        imaging) is never overwritten with a worse one."""
+        by_emitter = {s.radar.radar_id: s for s in self.ships}
+        for eid in self.elint.heard_emitters():
+            ship = by_emitter.get(eid)
+            if ship is None or not ship.alive:
+                continue
+            heard = self.elint.last_heard(eid)
+            if heard is None or now - heard > ELINT_FRESH_S:
+                continue
+            quality = self.elint.fix_quality(eid)
+            if quality >= ELINT_FIX_ACTIONABLE_M:
+                continue
+            est = self.elint.est_pos(eid)
+            if est is None:
+                continue
+            age = ELINT_AGE_MAX_S * quality / ELINT_FIX_ACTIONABLE_M
+            track = self.contacts.tracks.get(ship.ship_id)
+            if track is not None and track["age"] < age:
+                continue
+            self.contacts.tracks[ship.ship_id] = dict(
+                pos=est.copy(), vel=np.zeros(3), age=age,
+                t_next=now + ELINT_FIX_PERIOD_S, is_air=False)
 
     # ---------------------------------------------------------------- phase 3
 
@@ -178,15 +376,18 @@ class CombatWorld(WorldState):
     # ------------------------------------------------------------------ step
 
     def step(self, dt: float) -> None:
-        """Base step (ships, missiles, damage, contacts), then the enemy
-        defenses and strikes: rounds launched here join ``self.missiles``
-        and are flown by the NEXT base step, exactly like a player launch
-        this frame. Finally the hostile rounds are swept against the base
-        structures and fed to the player picture."""
+        """Base step (ships, missiles, damage, contacts), then the drone
+        flight, then the enemy defenses and strikes: rounds launched here
+        join ``self.missiles`` and are flown by the NEXT base step,
+        exactly like a player launch this frame. Finally the hostile
+        rounds are swept against the base structures, the strike rounds
+        are fed to the player picture and the recon sensors run."""
         super().step(dt)
+        self._step_drones(dt)
         self.defense.step(self, dt)
         self.strikes.step(self, dt)
         apply_missile_hits_structures(
             [m for m in self.missiles if getattr(m, "is_hostile", False)],
             self.structures, self.events)
         self._update_strike_contacts(dt)
+        self._step_recon_sensors()

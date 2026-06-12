@@ -33,6 +33,23 @@ from game.cameras import FREE_SPEEDS
 # Time-acceleration ladder stepped by - / = (plan-fixed).
 TIME_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0)
 
+# TAB platform cycles (Phase 4): SANDBOX keeps the original two-platform
+# toggle; COMBAT adds the recon drone as a third tasking platform
+# (bastion -> s300 -> drone -> ...). Pure data + helper so the cycle is
+# unit-testable headless (game/sandbox.py is GL-touching).
+PLATFORMS_SANDBOX = ("bastion", "s300")
+PLATFORMS_COMBAT = ("bastion", "s300", "drone")
+
+
+def next_platform(current: str, platforms) -> str:
+    """The next platform in the TAB cycle (wraps; an unknown current —
+    never expected — lands on the first entry rather than crashing)."""
+    try:
+        i = platforms.index(current)
+    except ValueError:
+        return platforms[0]
+    return platforms[(i + 1) % len(platforms)]
+
 
 def _pressed(keys, key: int | None) -> bool:
     """Held-state of a bindable key (False for an unbound action)."""

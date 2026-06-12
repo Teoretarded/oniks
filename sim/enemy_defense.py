@@ -44,6 +44,26 @@ Determinism: all CIWS randomness routes through the injected generator,
 and every SM-2 launch draws ONE integer from it to seed a child Generator
 for that round's multipath noise (sim/sam.py); given the same seed and
 call sequence the battle replays exactly.
+
+COMBAT Phase 4 — the recon drone as an SM-2 target:
+
+  * A destroyer that radar-DETECTS the player's stealth drone (its
+    'stealth' range, ~30 km, with the same sustained-detection gating as
+    inbound missiles) treats it as an SM-2 target.  The drone cruises at
+    18 km — inside the SM-2 intercept band — and at most
+    DRONE_SM2_MAX_INFLIGHT rounds fly against one drone at a time.
+    Self-defense outranks the drone hunt: the missile channel is offered
+    targets first each step (the shared 3 s fire-control reload then
+    naturally delays the drone shot).
+  * Stealth low-SNR tracking noise (user law: physics, never dice) —
+    StealthTargetSam below: against a 'stealth'-class target the position
+    the round guides on (midcourse fix AND terminal illumination) carries
+    a second per-axis OU error whose sigma scales UP with the fraction of
+    the detection range the target sits at.  At the ~30 km detection edge
+    the return is at the noise floor and the track wanders; close in the
+    SNR climbs and the track cleans up — long shots miss because the
+    guidance chased a dirty point, exactly like the multipath mechanism
+    against sea-skimmers.  The proximity fuse stays on truth.
 """
 
 from __future__ import annotations
@@ -67,6 +87,95 @@ ILLUMINATOR_M = 20.0        # m, SPY-1/director illuminator above the
 #                             waterline (matches the SPY-1 antenna height in
 #                             sim/enemy_ships.py): the SARH LOS source for
 #                             the SM-2 terminal lock-break check
+
+# --- Phase 4: drone engagement -------------------------------------------------
+DRONE_SM2_MAX_INFLIGHT = 2  # rounds in flight per drone (spec 4.3 brief:
+#                             shoot-shoot-look vs one slow target — the full
+#                             4-round raid cap stays reserved for missiles)
+
+# Stealth low-SNR tracking noise (the multipath analog for tiny targets,
+# user law: outcomes emerge from guidance physics, never kill rolls).
+# Same OU process shape as sim/sam.py MULTIPATH_* — time-correlated so PN
+# chases a coherently wandering point — but sigma scales with the SHIP ->
+# target ground range as a fraction of the radar's stealth detection
+# range, CUBED: thermal-noise-limited angle tracking has sigma_angle ~
+# 1/sqrt(SNR) ~ R^2 (radar SNR ~ R^-4), and position error = angle error
+# x range ~ R^3.  At the detection edge the track sits at the noise
+# floor; halfway in the error has already dropped 8x.  Values MEASURED,
+# not guessed (tools/probe_drone_sm2.py seeded batches, methodology of
+# the Phase-3 probe_sm2_batch sweep — see docs/combat_build_log.md):
+# sigma_max 60 m / tau 0.7 s vs the 160 m/s drone measured kill-per-shot
+# 14/15 (0.93) at 10 km, 10/15 (0.67) at 20 km, 4/15 (0.27) at 28 km of
+# the 30 km detect range — matching spec §4.3 "~35% at envelope edge,
+# near-certain up close".  The sigma 40/80 sweep neighbours moved the
+# edge cell to 7/15 and 3/15 with the close cell pinned ~0.93-1.0.
+# Clean-guidance control kills at all three ranges (the misses ARE the
+# noise).  Locked two-sided by tests/test_phase4_e2e.py.
+STEALTH_SNR_SIGMA_MAX_M = 60.0   # m per-axis OU RMS at the detection edge
+STEALTH_SNR_RANGE_EXP = 3.0      # sigma ~ (R / R_detect)^3 (see above)
+STEALTH_SNR_TAU_S = 0.7          # s correlation (scintillation/track loop)
+
+
+class StealthTargetSam(SamMissile):
+    """SM-2 engaging a 'stealth'-class target (the recon drone).
+
+    Adds the low-SNR tracking error on top of the inherited multipath
+    process: a second, independent per-axis OU error whose sigma is
+    STEALTH_SNR_SIGMA_MAX_M scaled by (illuminator->target ground range /
+    detection range), clamped to 1.  Both error processes ride the same
+    ``_mp_*`` components the guidance reads (midcourse estimate AND
+    terminal lock — sim/sam.py _target_state / terminal block), so a long
+    shot chases a wandering point through its whole flight while a
+    close-in shot tracks nearly clean.  The fuse stays on truth: misses
+    EMERGE from guiding on the dirty track (user law).
+
+    Implementation note: the parent's OU state lives in ``_mp_x/y/z`` and
+    integrates in place, so each step restores the saved multipath base,
+    advances it via super(), then adds this class's own OU state on top —
+    two independent processes, one summed guidance error.
+    """
+
+    def __init__(self, *args, detection_range_m: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._detect_range = float(detection_range_m)
+        self._mp_base = (0.0, 0.0, 0.0)   # parent multipath OU state
+        self._sn = [0.0, 0.0, 0.0]        # stealth low-SNR OU state
+
+    def _snr_fraction(self) -> float:
+        """(range / detection range)^STEALTH_SNR_RANGE_EXP from the
+        ILLUMINATOR (the launching ship's director — SNR lives in the
+        illumination chain), clamped to 1.  A dead/None illuminator rates
+        1.0: with no painter the track is pure noise floor (the lock-break
+        check kills the shot anyway)."""
+        src = (self.illuminator_pos_fn()
+               if self.illuminator_pos_fn is not None else None)
+        if src is None:
+            return 1.0
+        tp = self.target.pos
+        rng_ground = math.hypot(float(tp[0]) - float(src[0]),
+                                float(tp[2]) - float(src[2]))
+        return min(rng_ground / self._detect_range, 1.0) \
+            ** STEALTH_SNR_RANGE_EXP
+
+    def _update_multipath(self, dt):
+        # 1) the inherited multipath term on its own saved state (zero for
+        #    a high-flying drone, live for any future low stealth target).
+        self._mp_x, self._mp_y, self._mp_z = self._mp_base
+        super()._update_multipath(dt)
+        self._mp_base = (self._mp_x, self._mp_y, self._mp_z)
+        # 2) the stealth low-SNR term: OU with range-scaled sigma.
+        sigma = STEALTH_SNR_SIGMA_MAX_M * self._snr_fraction()
+        k = dt / STEALTH_SNR_TAU_S
+        q = sigma * math.sqrt(2.0 * dt / STEALTH_SNR_TAU_S)
+        rng = self.rng
+        sn = self._sn
+        sn[0] += -sn[0] * k + q * rng.standard_normal()
+        sn[1] += -sn[1] * k + q * rng.standard_normal()
+        sn[2] += -sn[2] * k + q * rng.standard_normal()
+        # Guidance reads the SUM of both processes.
+        self._mp_x += sn[0]
+        self._mp_y += sn[1]
+        self._mp_z += sn[2]
 
 
 class _RelTarget:
@@ -106,6 +215,11 @@ class ShipDefense:
         # the last radar fix (pos/vel/age) the SM-2 dead-reckons against.
         self._tracks: dict[int, dict] = {}
         self._inflight: list[tuple] = []    # (SamMissile, target track key)
+        # Phase 4: the drone hunt — aircraft_id -> the same track dict shape
+        # (keyed by id string: a respawned drone reuses the id, the track
+        # store re-binds to the new airframe each step).
+        self._drone_tracks: dict[str, dict] = {}
+        self._drone_inflight: list[tuple] = []  # (SamMissile, aircraft_id)
 
     # -------------------------------------------------------------- tracking
 
@@ -134,14 +248,49 @@ class ShipDefense:
         for key in [k for k in self._tracks if k not in live_keys]:
             del self._tracks[key]               # missile died / was pruned
 
+    def _update_drone_tracks(self, drones, now, dt):
+        """The drone hunt's track store: identical cadence + sustained-
+        detection gating as the missile store above, but checked at the
+        radar's 'stealth'-class range (the drone's own size class).  Keyed
+        by aircraft_id; re-binds to the live airframe each pass so a
+        respawned drone (same id, new object) tracks cleanly."""
+        live = set()
+        for d in drones:
+            if not d.alive:
+                continue
+            did = d.aircraft_id
+            live.add(did)
+            st = self._drone_tracks.get(did)
+            if st is None:
+                st = self._drone_tracks[did] = dict(
+                    drone=d, t_next=-1.0, since=None,
+                    pos=None, vel=None, age=0.0)
+            st["drone"] = d
+            if st["pos"] is not None:
+                st["age"] += dt
+            if now >= st["t_next"]:
+                st["t_next"] = now + VIS_CHECK_PERIOD
+                if self.ship.radar.detects(d.pos, d.radar_size):
+                    if st["since"] is None:
+                        st["since"] = now
+                    st["pos"] = d.pos.copy()    # fresh fire-control fix
+                    st["vel"] = d.velocity().copy()
+                    st["age"] = 0.0
+                else:
+                    st["since"] = None          # sustain clock resets
+        for key in [k for k in self._drone_tracks if k not in live]:
+            del self._drone_tracks[key]         # shot down / despawned
+
     def _tracked(self, st, now):
         return st["since"] is not None and now - st["since"] >= TRACK_FORM_S
 
-    def _estimate(self, key):
+    def _estimate(self, key, tracks=None):
         """() -> (pos, vel) dead-reckoning closure over this track, frozen
         at the last fix if the track drops (mirrors WorldState's
-        _contact_estimate: plain-float tuples, no per-call temporaries)."""
-        tracks = self._tracks
+        _contact_estimate: plain-float tuples, no per-call temporaries).
+        ``tracks`` selects the store (default: the missile store; the
+        drone hunt passes its own)."""
+        tracks = self._tracks if tracks is None else tracks
         st = tracks[key]
         px, py, pz = st["pos"].tolist()
         vx, vy, vz = st["vel"].tolist()
@@ -222,6 +371,49 @@ class ShipDefense:
         ship.sm2_reload_timer = ship.sm2_reload_s
         self._inflight.append((sam, best_key))
 
+    def _try_sm2_drone_launch(self, world, now):
+        """One SM-2 at a tracked drone when the channel is free (called
+        AFTER the missile launch attempt: self-defense outranks the hunt —
+        the shared fire-control reload then spaces the drone shot).  Caps
+        at DRONE_SM2_MAX_INFLIGHT rounds per drone; the round is a
+        StealthTargetSam so the low-SNR physics rides the guidance."""
+        ship = self.ship
+        if ship.sm2_ammo <= 0 or ship.sm2_reload_timer > 0.0:
+            return
+        sx, sz = float(ship.pos[0]), float(ship.pos[2])
+        detect_range = ship.radar.ranges.get("stealth", 0.0)
+        for did, st in self._drone_tracks.items():
+            drone = st["drone"]
+            if not self._tracked(st, now) or not drone.alive:
+                continue
+            if sum(1 for _, k in self._drone_inflight
+                   if k == did) >= DRONE_SM2_MAX_INFLIGHT:
+                continue
+            # Envelope on the PICTURE (dead-reckoned estimate), like the
+            # missile channel above.
+            ex = float(st["pos"][0]) + float(st["vel"][0]) * st["age"]
+            ey = float(st["pos"][1]) + float(st["vel"][1]) * st["age"]
+            ez = float(st["pos"][2]) + float(st["vel"][2]) * st["age"]
+            rng_ground = math.hypot(ex - sx, ez - sz)
+            if not SM2_MIN_RANGE_M <= rng_ground <= SM2.max_range:
+                continue
+            if not SM2.min_intercept_alt <= ey <= SM2.max_intercept_alt:
+                continue
+            deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
+            sam = StealthTargetSam(
+                SM2, deck, drone,
+                contact_estimate_fn=self._estimate(did, self._drone_tracks),
+                rng=np.random.default_rng(int(self.rng.integers(2 ** 63))),
+                illuminator_pos_fn=self._illuminator(),
+                detection_range_m=detect_range)
+            sam.launch_cinematic = False    # no 1x time lock (enemy launch)
+            sam.launch_platform = ship      # damage.py: never self-OBB-hit
+            world.missiles.append(sam)
+            ship.sm2_ammo -= 1
+            ship.sm2_reload_timer = ship.sm2_reload_s
+            self._drone_inflight.append((sam, did))
+            return                          # one round per free channel
+
     # ----------------------------------------------------------------- CIWS
 
     def _run_ciws(self, world, now, dt):
@@ -260,6 +452,8 @@ class ShipDefense:
         if not ship.alive:
             self._tracks.clear()
             self._inflight.clear()
+            self._drone_tracks.clear()
+            self._drone_inflight.clear()
             return
         now = world.sim_time
         # Hostiles = player cruise missiles. SamMissile is a separate type
@@ -271,6 +465,15 @@ class ShipDefense:
         self._inflight = [(sam, key) for sam, key in self._inflight
                           if sam.alive]
         self._try_sm2_launch(world, now)
+        # Phase 4: the drone hunt — AFTER the missile channel (self-defense
+        # priority; a launch above set the reload timer, spacing this one).
+        # Worlds without a drone (SANDBOX WorldState) duck out via getattr.
+        drone = getattr(world, "drone", None)
+        self._update_drone_tracks(
+            [drone] if drone is not None else [], now, dt)
+        self._drone_inflight = [(sam, key) for sam, key in
+                                self._drone_inflight if sam.alive]
+        self._try_sm2_drone_launch(world, now)
         self._run_ciws(world, now, dt)
 
 

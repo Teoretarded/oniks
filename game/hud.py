@@ -27,6 +27,7 @@ from game.states import (ACCENT_DIM, BG0, MUTED, TEXT_COL, draw_header_rule,
                          draw_panel)
 from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
 from sim.physics import mach
+from sim.recon import RWR_LOCK
 from world.generation import BASE_POS, SAM_SITE_POS
 
 # Phase text comes from the missiles' duck-typed ``phase_label`` property
@@ -92,6 +93,42 @@ def radar_status_row(world):
     if radar.emitting:
         return ("RADAR", RADAR_EMITTING, ARMED_COL)
     return ("RADAR", RADAR_SILENT, RELOAD_COL)
+
+
+def drone_panel_rows(world) -> list[tuple]:
+    """The recon-drone platform's panel rows (Phase 4) — pure, GL-free,
+    unit-testable. (label, value, color) tuples:
+
+      STATUS   AIRBORNE / DOWN (red)
+      RESPAWN  countdown, only while down
+      ALT/SPD  flight telemetry, only while up
+      SENSORS  'ELINT n' heard-emitter count + 'SAR UP'
+      RWR      highest-priority alert: 'LOCK brg' (red) > 'SPIKE brg'
+               (amber) > 'CLEAR' (green)
+    """
+    drone = getattr(world, "drone", None)
+    if drone is None or not drone.alive:
+        left = getattr(world, "drone_respawn_left", 0.0)
+        return [
+            ("STATUS", "DOWN", DANGER_COL),
+            ("RESPAWN", f"{int(np.ceil(left - 1e-9))} s", RELOAD_COL),
+        ]
+    speed = float(np.hypot(drone.vel[0], drone.vel[2]))
+    rows = [
+        ("STATUS", "AIRBORNE", ARMED_COL),
+        ("ALT", f"{drone.pos[1]:,.0f} m", VALUE_COL),
+        ("SPD", f"{speed:,.0f} m/s", VALUE_COL),
+        ("SENSORS",
+         f"ELINT {len(world.elint.heard_emitters())}  SAR UP", VALUE_COL),
+    ]
+    alerts = world.rwr.alerts()
+    if alerts:
+        level, brg = alerts[0]              # LOCK sorts before SPIKE
+        col = DANGER_COL if level == RWR_LOCK else RELOAD_COL
+        rows.append(("RWR", f"{level} {int(round(brg)) % 360:03d}", col))
+    else:
+        rows.append(("RWR", "CLEAR", ARMED_COL))
+    return rows
 
 
 def overlay_rows(keybinds) -> list[tuple]:
@@ -247,10 +284,23 @@ class HUD:
 
     def _launcher_block(self, sandbox) -> None:
         """Active platform's launcher status while nothing is followed."""
-        if sandbox.active_platform == "s300":
+        if sandbox.active_platform == "drone":
+            self._drone_block(sandbox)
+        elif sandbox.active_platform == "s300":
             self._s300_block(sandbox)
         else:
             self._bastion_block(sandbox)
+
+    def _drone_block(self, sandbox) -> None:
+        """Recon-drone platform panel (Phase 4): flight/sensor/RWR rows
+        from the pure helper, plus the shared TIME/CLOCK footer."""
+        world = sandbox.world
+        rows = drone_panel_rows(world)
+        rows += [
+            ("TIME", self._scale_text(sandbox), VALUE_COL),
+            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
+        ]
+        self._block("RECON DRONE", rows)
 
     def _bastion_block(self, sandbox) -> None:
         world = sandbox.world

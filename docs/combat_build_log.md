@@ -123,6 +123,73 @@ structures in sim/bases.py), then the integrator.
 - Drone respawn-after-cooldown: in spec 4.3 since v1 — re-confirm in the
   Phase 4 brief (user reminder 2026-06-12).
 
+## Phase 4 — recon drone (integration, 2026-06-12)
+
+Workflow `combat-phase4`: 2 parallel implementers (sim/recon.py drone +
+ELINT/SAR/RWR sensor suite, 45 tests; models/drone.py RQ-4-class mesh,
+12 tests), then the integrator.
+
+- world/combat.py: one ReconDrone in `self.drone` (NOT self.aircraft —
+  that list feeds contact pictures; the drone is friendly telemetry).
+  DRONE_COUNT=1 / DRONE_RESPAWN_S=300 constants for the Phase-7 armory.
+  ELINT emitter list rebuilt each pass from the ships' radars (future
+  emitters join by construction); actionable fixes inject tracks for the
+  matching SHIP (emitter '{ship_id}_spy1' -> ship) with the estimate
+  error mapped onto track AGE (5 km fix = ~80 s faded track, sharpening
+  as geometry improves); silence stops the refresh and the track coasts
+  out (intel aging). ContactBoard gate extended: surface targets are
+  seen by the radar net OR the live drone's SAR strip — a silent hull
+  overflown forms a track through the normal sustained-detection flow.
+  Respawn: shot down -> wreck spirals in `drone_wrecks` (crash events on
+  impact) -> replacement at the base, route cleared.
+- sim/enemy_defense.py: the drone hunt — same cadence/sustain tracking
+  as the missile store at the radar's 'stealth' range, SM-2 launches
+  capped at 2 in flight per drone, self-defense outranks the hunt (the
+  shared 3 s fire-control reload spaces the shots). StealthTargetSam:
+  low-SNR tracking noise (user law: physics, never dice) — a second OU
+  error on the guidance point with sigma ~ (R/R_detect)^3 (thermal-noise
+  angle tracking: sigma_angle ~ 1/sqrt(SNR) ~ R^2, position = angle x R).
+  **Measured** (tools/probe_drone_sm2.py, N=15 seeded engagements/cell):
+  sigma_max 60 m / tau 0.7 s gives kill-per-shot 14/15 at 10 km, 10/15
+  at 20 km, 4/15 at 28 km of the 30 km detect range — spec §4.3 "~35% at
+  envelope edge, near-certain up close". A LINEAR range law was measured
+  first and rejected: 3-4/15 even close in (PN cannot low-pass sigma 40
+  at tau 0.7 vs a 20 m fuse). Clean control kills at all three ranges.
+  Locked two-sided in tests/test_phase4_e2e.py.
+- **Integrator-caught (measured, not guessed): the triangulation quality
+  metric lied.** The delivered residual-RMS proxy reported 'sub-5-km'
+  fixes from a base-loitering drone against emitters 150 km out (true
+  error 19-125+ km): near-parallel bearing lines agree with each other
+  (residual ~ 0) while the along-bearing position is unconstrained, and
+  lstsq's min-norm solution collapses next to the drone. Rebuilt
+  sim/recon.py quality as layered physics: Cramer-Rao covariance from
+  the observation GEOMETRY (noise cannot fake angular diversity),
+  angle-domain self-consistency (2 sigma), a true-baseline geometry gate
+  (0.25 rad subtense) and a range-observability likelihood test (the fix
+  counts only if 0.5x/2x range alternatives break consistency). Swept 12
+  seeds x 128 windows of the degenerate loiter: zero false actionables;
+  honest geometry still converges (60 km leg vs 80 km emitter: quality
+  1.7-2.1 km vs true 1.0-4.5 km).
+- **Integrator-caught: FIFO baseline starvation.** 64 pairs at the 0.5 s
+  listen cadence spanned ~5 km of track — never enough geometry. Fix:
+  ELINT_MIN_PAIR_SPACING_M 800 m (sub-noise parallax is redundant); the
+  retained window now spans ~51 km and a 120 km crossing leg goes
+  actionable in ~138 s sim.
+- ELINT-is-LOS rule (queued Phase-3): satisfied by construction —
+  ElintReceiver gates on radar_horizon_m + terrain_blocks, the RWR SPIKE
+  reuses Radar.detects itself.
+- UI: TAB cycle gains 'drone' (COMBAT only — sandbox keeps 2 platforms,
+  locked by test), map RMB tasks the live drone route / X breaks off to
+  loiter / LMB flashes DRONE: RECON ONLY, drone draws at TRUE position
+  (cyan, never a contact) with route, faint ELINT bearing rays + fix
+  uncertainty circles that shrink with quality; HUD RECON DRONE panel
+  (ALT/SPD/SENSORS/RWR SPIKE-LOCK with bearing/respawn countdown); the
+  RQ-4 mesh flies in the aircraft pass with the falling-spiral attitude;
+  [ / ] cycles onto the airframe while the platform is active.
+- Gate: full suite 504 green (incl. 12 new e2e), smoke_combat 30/30
+  (pure-sim ELINT/SAR/engagement/respawn chains + a GL pass over the new
+  UI), screenshot renders/screenshot_032.png.
+
 ## Phase 3 gate — SM-2 physics pass (2026-06-12)
 
 Both queued mechanisms landed, measured, locked (physics-not-dice):
