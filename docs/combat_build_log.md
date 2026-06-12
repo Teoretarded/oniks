@@ -51,6 +51,14 @@ Orchestrator gate (balance pass, research-grounded per verifier numbers):
   sea-skim ~0.25-0.55 per shot). Revert the 100 m SM2 floor to a realistic
   value (~25 m) at the same time and retire the floor-based regression
   test in favor of the statistical contract. Memory: physics-not-dice.
+- **Terminal lock-break on terrain mask** (QUEUED, same gate, user ask
+  2026-06-12): SAM terminal seekers (SM-2 SARH illumination, S-300) must
+  re-check terrain LOS while locked — target ducks behind an island ->
+  lock snaps -> coast on last prediction (usually a miss). Makes
+  island-hugging Oniks waypoint routes a genuine evasion tactic.
+- **ELINT/ESM is LOS too** (Phase 4 brief): passive intercepts (destroyer
+  ESM vs the player radar, drone ELINT vs ship emitters) require the same
+  terrain LOS + horizon test as active radar — no hearing through hills.
 
 ## Phase reorder (2026-06-12, user gate)
 
