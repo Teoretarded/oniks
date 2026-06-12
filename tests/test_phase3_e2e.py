@@ -244,6 +244,7 @@ def test_tomahawk_kills_radar_station_and_blinds_the_picture():
             break
     assert kill_time is not None, "Tomahawk never killed the radar station"
     assert 370.0 < kill_time < 970.0                  # ~670 s +- 300 s
+    assert saw_strike_track                           # picture saw it coming
     assert base_destroyed
     assert not station.alive                          # structure dead ...
     assert not radar.alive                            # ... cleared the Radar
