@@ -114,6 +114,24 @@ def test_lo_skimmer_at_100km_is_under_the_horizon():
     assert d.sm2_ammo == 24
 
 
+def test_lo_cruise_above_horizon_is_below_sm2_floor():
+    """Lo-lo at its 60 m cruise altitude, 40 km out: DETECTED (inside the
+    ~50 km mast horizon) but never SM-2 engaged — the envelope floor
+    (SM2.min_intercept_alt = 100 m) sits above the 60 m cruise, so lo-lo
+    is king per spec §5.2 and only CIWS can touch it. Two-sided with
+    test_hi_oniks_draws_sm2_launch: hi-lo must stay engageable."""
+    d = Destroyer("dd_floor", ANCHOR)
+    ctrl = EnemyDefenseController([d])
+    w = _StubWorld()
+    cruiser = _oniks((ANCHOR[0], 60.0, ANCHOR[1] - 40_000.0),
+                     (0.0, 0.0, 680.0), profile="lo-lo")
+    w.missiles.append(cruiser)
+    assert d.radar.detects(cruiser.pos, "missile")    # seen over the curve
+    _run(ctrl, w, d, 5.0)
+    assert _sams(w) == []                             # but under the floor
+    assert d.sm2_ammo == 24
+
+
 def test_track_needs_sustained_detection():
     """No launch before TRACK_FORM_S of continuous visibility."""
     d = Destroyer("dd_delay", ANCHOR)

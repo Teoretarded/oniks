@@ -122,7 +122,13 @@ SM2 = SamDef(
     max_g=25.0, fuse_radius=20.0,
     terminal_range=20_000.0, max_range=150_000.0,
     self_destruct_t=180.0, self_destruct_speed=250.0,
-    min_intercept_alt=30.0, max_intercept_alt=24_000.0,
+    # Engagement floor 100 m: semi-active illumination against a sea-skimmer
+    # in clutter is the SM-2's hard problem (why CIWS exists as the inner
+    # layer) — and the spec's profile contract (§5.2 "lo-lo becomes king")
+    # requires the Oniks 60 m lo cruise to fly UNDER this floor. Matches the
+    # modeled S-300 floor. Two-sided regression:
+    # tests/test_enemy_defense.py::test_lo_cruise_above_horizon_is_below_sm2_floor
+    min_intercept_alt=100.0, max_intercept_alt=24_000.0,
 )
 
 

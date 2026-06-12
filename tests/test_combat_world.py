@@ -47,9 +47,9 @@ def test_contact_board_is_radar_gated():
 
 
 def test_picture_stays_empty_and_s300_has_no_targets():
-    """The destroyers sit 335+ km out at sea level — far past the player
-    radar's horizon against a hull — so no track may ever form (fog of
-    war end-to-end), and the S-300 stays blind."""
+    """The destroyers sit 160+ km out at sea level — far past the player
+    radar's ~50-75 km horizon against a hull — so no track may ever form
+    (fog of war end-to-end), and the S-300 stays blind."""
     cw = CombatWorld()
     for _ in range(120):
         cw.step(DT)

@@ -9,9 +9,10 @@ engage what the station does not see.
 Phase 2 adds two Destroyers (sim/enemy_ships.py) loitering at sea off the
 enemy coast. They live in ``self.ships``, so the player's gated
 ContactBoard, the tactical-map targeting and the Oniks OBB damage ladder
-all apply unchanged — and because their hulls sit ~330+ km from the
+all apply unchanged — and because their hulls sit 160+ km from the
 player's mast-height radar, fog of war hides them until something flies
-high enough to look over the horizon. Their SM-2/CIWS defenses are stepped
+high enough to look over the horizon (while staying inside the lo-lo
+Oniks fuel range, so both attack profiles can genuinely reach them). Their SM-2/CIWS defenses are stepped
 by the EnemyDefenseController (sim/enemy_defense.py) right after the base
 world step, so enemy interceptors join ``self.missiles`` and the effects
 event stream like any other round. Later phases stack strikes, Pantsir,
@@ -46,15 +47,18 @@ COMBAT_SITES = [
      "pos": RADAR_STATION_XZ, "name": "RADAR STN (FRIENDLY)"},
 ]
 
-# Enemy destroyers: anchors verified open water (terrain < -80 m across the
-# whole 9 km patrol box around each anchor — re-run the sweep if generation
-# ever changes). Both sit 335+ km from the player radar station, far past
-# its ~53 km horizon against a hull at sea level: the player picture stays
+# Enemy destroyers: anchors verified open water (terrain < -74 m across an
+# 18x18 km box around each anchor — re-run the sweep if generation ever
+# changes). Placement contract (Phase 2 balance pass): both anchors sit
+# 150-175 km from the base, INSIDE the lo-lo Oniks fuel range (~230 km
+# flown — beyond it the spec's "lo-lo is king" profile could never reach
+# them), yet still 160+ km from the player radar station, far past its
+# ~50-75 km horizon against a hull at sea level: the player picture stays
 # empty until something looks down over the curve (smoke_combat asserts it).
 DESTROYER_SPAWNS = (
-    {"ship_id": "destroyer_00", "anchor_xz": (-40_000.0, 320_000.0),
+    {"ship_id": "destroyer_00", "anchor_xz": (-20_000.0, 150_000.0),
      "heading_deg": 120.0},
-    {"ship_id": "destroyer_01", "anchor_xz": (80_000.0, 368_000.0),
+    {"ship_id": "destroyer_01", "anchor_xz": (20_000.0, 170_000.0),
      "heading_deg": 15.0},
 )
 
