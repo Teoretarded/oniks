@@ -293,3 +293,58 @@ commander AI / JASSM/HARM delivery / AIM-9X / 40N6 are 5b.
   backlog. 5b must take the verifier OPEN list (fuel math vs airfield
   geometry, dead-base rearm queue, descent profile, field-elevation
   landing, sinking-carrier queue, SM-2 ammo waste on far drone cues).
+
+## Phase 5b — the commander runs the war (integration, 2026-06-12)
+
+Workflow `combat-phase5`: 2 parallel implementers (sim/commander.py
+EnemyCommander/EnemyPicture brain, 25 tests; sim/a2a.py AIM-9X + 40N6 +
+fighter employment, 23 tests), then the integrator.
+
+- world/combat.py: the commander ticks at 1 Hz on a SENSOR-ONLY picture
+  fed at the 0.25 s defense cadence — ESM accrual on the emitting player
+  radar, player missile tracks (with first-seen metadata) from whichever
+  SPY-1/AWACS/nose radar physically detects them, drone tracks at
+  stealth-class ranges. Orders execute here: HARM/JASSM packages roll
+  PARKED jets silent-ingress (HARMs home on the actual EMITTER object —
+  silence degrades to the seeded 150-400 m CEP offset and the radar
+  SURVIVES), Tomahawk salvos at back-plotted clusters, AWACS flee/resume,
+  ship silence with a sector-quiet gate (a drone track inside the 22 km
+  engagement window keeps/raises the radar — spec 4.3 "silent ships may
+  light up"), drone-hunt vectoring (fly to last-known; entity pursuit
+  only after an own-nose-radar reacquire, and never re-vectored off it).
+  Commander-managed CAP replaces the 5a scheduler (same rotation, gated
+  off while a strike package owns the flight line). HARM BDA: a finished
+  package believes the emitter dead until it is heard again.
+- Terminal scene-matching (JASSM IIR / TLAM DSMAC class): a believed aim
+  point within SEEKER_BASKET_M = 1 km of a live player structure acquires
+  it at OBB mid-height; the measured 3-launch back-plot lands 264 m off
+  the base, so strike accuracy emerges from sensor geometry, never dice.
+- Kill-chain physics fixed by probe (tools/probe_5b_*): the air-launch
+  descent ramp realized only kp/kd*30 ~ 9.5 m/s (JASSMs arrived terminal
+  km-high and splashed) — the PD now gets its true 30 m/s equilibrium
+  offset; the terminal commit line grazed the coastal rise under the
+  cliff-top base (1.3 km short, measured) — stage 1 now also rides the
+  deck while BELOW the aim point altitude (radar-station TLAM geometry
+  bit-unchanged); fighters at 9 km could never close the 6 km 3-D IR
+  gate on the 18 km drone — intercepts snap-up to the 15.5 km F/A-18E
+  combat ceiling.
+- 5a OPEN list closed: dynamic bingo reserve from the ACTUAL leg to the
+  nearest surviving base (endurance 2 400 -> 3 600 s for the measured 5b
+  strike legs); RTB descends en route on a 4 deg glide (the 30 min
+  hover-down is gone); touchdown at field elevation; a dead/sinking base
+  aborts in-progress rearms (fighters strand PARKED, launch refuses);
+  SM-2 drone shots held inside DRONE_ENGAGE_RANGE_M = 22 km (the
+  phase-4-measured 0.27-Pk waste zone beyond it).
+- Player 40N6: V (rebindable `sam_round`) toggles 48N6 <-> 40N6; HUD
+  panel/map strip show the selection + both stocks; the map ring swaps
+  envelopes; 4 km floor + empty-stock hints. world.victorious (spec 2.2:
+  all enemy ships + airfield; enemy ground radars join in Phase 7) drives
+  a VICTORY banner mirroring the defeat one.
+- Updated-to-new-truth (not weakened): 5a CAP e2e runs the radar silent
+  (emitting now correctly draws a HARM package on top of the CAP);
+  phase-4 drone-hunt e2e grounds the air wing to keep isolating the SM-2
+  channel it pins.
+- Gate: 664 tests green (25 commander + 23 weapons + 8 5b e2e incl.
+  defeat-reachable: 3 Oniks -> cluster -> JASSM package -> Bastion dead
+  -> DEFEAT; 40N6 kills the AWACS at 265 km; IR kill with ZERO RWR LOCK
+  events), smoke 47/47.

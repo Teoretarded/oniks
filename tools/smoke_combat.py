@@ -12,10 +12,17 @@ import numpy as np
 import pygame
 
 from main import App, PHYS_DT
-from sim.enemy_air import (FS_PARKED, FS_REARMING, FS_RTB, Fighter)
+from sim.a2a import IrMissile
+from sim.commander import (AIRFIELD_HARM, AIRFIELD_JASSM, CARRIER_HARM,
+                           CARRIER_JASSM)
+from sim.enemy_air import (FIGHTER_ALT_M, FS_PARKED, FS_REARMING, FS_RTB,
+                           Fighter)
 from sim.recon import RWR_LOCK, RWR_SPIKE
-from world.combat import (AIRFIELD_XZ, DRONE_RESPAWN_S, CombatWorld)
+from sim.strike import HarmMissile, StrikeMissile
+from world.combat import (AIRFIELD_XZ, DRONE_RESPAWN_S, SEEKER_BASKET_M,
+                          CombatWorld)
 from world.generation import BASE_POS
+from world.world import SAM_TEL_POS
 
 
 def main() -> int:
@@ -214,6 +221,168 @@ def main() -> int:
     check("airfield killed -> fighter diverts to the carrier",
           not w7.air_bases[0].alive and f7.state == FS_RTB
           and f7._base is w7.air_bases[1])
+
+    # --- Phase 5b: the commander runs the war (pure sim; coarse DT where
+    # nothing ballistic flies; tests/test_phase5b_e2e.py carries the full
+    # assertion set — this is the cockpit-check version).
+    PHYS_DT_120 = PHYS_DT
+
+    # BLIND: the ESM fix generates a HARM mission while the radar emits.
+    w8 = CombatWorld()
+    for _ in range(int(120.0 / DT4)):
+        w8.step(DT4)
+        if any(m["kind"] == "harm_package" for m in w8._cmd_missions):
+            break
+    mission = next((m for m in w8._cmd_missions
+                    if m["kind"] == "harm_package"), None)
+    check("commander schedules a HARM mission off the 90 s ESM fix",
+          mission is not None and w8.sim_time < 100.0
+          and w8.commander.stock.total_harm
+          == AIRFIELD_HARM + CARRIER_HARM - 4)
+    jets = mission["fighters"] if mission else []
+    check("SEAD jets armed with 2 HARM each, silent ingress",
+          len(jets) == 2 and all(f.hardpoints.count("harm") == 2
+                                 and not f.radar.emitting for f in jets))
+    rp = w8.radar_station.pos
+    for f in jets:                       # forcing: climb done, 99 km out
+        f.pos[1] = FIGHTER_ALT_M
+    w8.step(DT4)
+    for f in jets:
+        dx, dz = float(f.pos[0] - rp[0]), float(f.pos[2] - rp[2])
+        d = float(np.hypot(dx, dz))
+        f.pos[0] = rp[0] + dx / d * 99_000.0
+        f.pos[2] = rp[2] + dz / d * 99_000.0
+    for _ in range(int(4.0 / DT4)):
+        w8.step(DT4)
+    harms = [m for m in w8.missiles if isinstance(m, HarmMissile)]
+    check("4 HARMs in flight homing on the radar EMITTER",
+          len(harms) == 4
+          and all(m.target_radar is w8.radar_station for m in harms))
+    for _ in range(int(40.0 / PHYS_DT_120)):
+        w8.step(PHYS_DT_120)
+    w8.radar_station.emitting = False    # SILENT mid-ingress
+    for _ in range(int(150.0 / PHYS_DT_120)):
+        w8.step(PHYS_DT_120)
+        if (all(not m.alive for m in harms)
+                and mission not in w8._cmd_missions):
+            break
+    rid = w8.radar_station.radar_id
+    check("silence degrades every HARM to its CEP offset; radar survives",
+          all(not m.alive for m in harms)
+          and all(m._miss_offset is not None for m in harms)
+          and w8.radar_station.alive)
+    check("BDA: emitter believed dead after the package",
+          w8.commander.picture.emitters[rid].alive is False)
+    w8.radar_station.emitting = True
+    for _ in range(int(2.0 / DT4)):
+        w8.step(DT4)
+    check("re-emission flips the believed-alive state back",
+          w8.commander.picture.emitters[rid].alive is True)
+
+    # FIND -> KILL: 3 Oniks launches back-plot the Bastion; JASSM + TLAM
+    # missions are scheduled at the cluster.
+    w9 = CombatWorld()
+    w9.radar_station.emitting = False    # never located: KILL ungated
+    for s in w9.ships:
+        s.sm2_ammo = 0
+        s.ciws_ammo = 0
+    tlam0 = sum(s.tomahawk_ammo for s in w9.ships)
+    tgt9 = w9.ships[0].pos.copy()
+    tgt9[1] = 0.0
+    for _ in range(3):
+        w9.reload_left = 0.0
+        m9 = w9.launch("hi-lo", tgt9)
+        for _ in range(int(40.0 / PHYS_DT_120)):
+            w9.step(PHYS_DT_120)
+        m9.alive = False
+        for _ in range(4):
+            w9.step(PHYS_DT_120)
+    clusters = w9.commander.picture.targetable_clusters()
+    err9 = (float("inf") if not clusters else float(
+        np.hypot(clusters[0].centre[0] - BASE_POS[0],
+                 clusters[0].centre[1] - BASE_POS[2])))
+    check("3 Oniks launches -> bastion cluster targetable inside the basket",
+          len(clusters) == 1 and err9 < SEEKER_BASKET_M)
+    for _ in range(int(10.0 / DT4)):
+        w9.step(DT4)
+        if any(m["kind"] == "jassm_package" for m in w9._cmd_missions):
+            break
+    bastion9 = next(s for s in w9.structures if s.kind == "bastion_tel")
+    jm9 = next((m for m in w9._cmd_missions
+                if m["kind"] == "jassm_package"), None)
+    check("JASSM mission scheduled, aim refined onto the TEL",
+          jm9 is not None
+          and w9.commander.stock.total_jassm
+          == AIRFIELD_JASSM + CARRIER_JASSM - 4
+          and all(np.allclose(f._strike_target_xz,
+                              [bastion9.pos[0], bastion9.pos[2]])
+                  for f in jm9["fighters"]))
+    check("Tomahawk salvo drawn from the destroyer magazines",
+          any(m["kind"] == "tomahawk_salvo" for m in w9._cmd_missions)
+          and sum(s.tomahawk_ammo for s in w9.ships) < tlam0)
+
+    # DEFEND: the AIM-9X drone hunt — kill with NO RWR LOCK beforehand.
+    w10 = CombatWorld()
+    for s in w10.ships:
+        s.sm2_ammo = 0                  # isolate the passive IR channel
+        s.ciws_ammo = 0
+    d10 = w10.drone
+    d10.pos[0], d10.pos[2] = -40_000.0, 128_000.0
+    d10.set_route([(60_000.0, 128_000.0)])
+    f10 = w10._fighter_list[0]
+    f10.launch((0.0, 160_000.0))
+    f10.pos[1] = FIGHTER_ALT_M
+    w10.step(DT4)
+    f10.pos[0], f10.pos[1], f10.pos[2] = -50_000.0, 15_000.0, 128_000.0
+    saw_lock10 = False
+    ir10 = None
+    for _ in range(int(240.0 / DT4)):
+        w10.step(DT4)
+        saw_lock10 = saw_lock10 or any(a[0] == RWR_LOCK
+                                       for a in w10.rwr.alerts())
+        ir10 = next((m for m in w10.missiles
+                     if isinstance(m, IrMissile)), None)
+        if ir10 is not None:
+            break
+    killed10 = False
+    if ir10 is not None:
+        for _ in range(int(60.0 / PHYS_DT_120)):
+            w10.step(PHYS_DT_120)
+            saw_lock10 = saw_lock10 or any(a[0] == RWR_LOCK
+                                           for a in w10.rwr.alerts())
+            if w10.drone is None:
+                killed10 = True
+                break
+    check("drone IR-killed with NO RWR LOCK warning at any point",
+          killed10 and not saw_lock10
+          and "sam_kill" in [k for k, _ in w10.drain_events()])
+
+    # 40N6: the AWACS dies beyond 200 km on a forced ELINT-grade track.
+    w11 = CombatWorld()
+    a11 = w11.awacs
+    a11._corners = ((-20_000.0, 240_000.0), (-20_000.0, 280_000.0),
+                    (20_000.0, 280_000.0), (20_000.0, 240_000.0))
+    a11._wp = 1
+    a11.pos[0], a11.pos[2] = -20_000.0, 240_000.0
+    w11.radar_station.emitting = False  # the forced fix is the ONLY source
+    rng11 = float(np.hypot(a11.pos[0] - SAM_TEL_POS[0],
+                           a11.pos[2] - SAM_TEL_POS[2]))
+
+    def _track11():
+        w11.contacts.tracks["awacs_00"] = dict(
+            pos=a11.pos.copy(), vel=a11.velocity(), age=5.0,
+            t_next=w11.sim_time + 1.0, is_air=True)
+
+    _track11()
+    sam11 = w11.launch_sam("awacs_00", round_id="40n6")
+    for _ in range(int(400.0 / PHYS_DT_120)):
+        w11.step(PHYS_DT_120)
+        _track11()
+        if sam11 is None or not sam11.alive:
+            break
+    check("40N6 kills the AWACS beyond 200 km on the forced track",
+          rng11 > 200_000.0 and sam11 is not None
+          and sam11.killed_target and not a11.alive)
 
     # --- GL pass over the Phase-4 UI: TAB cycle, drone HUD panel, map
     # overlays (drone diamond/route + ELINT rays/circles) and the [ / ]
