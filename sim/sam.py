@@ -46,26 +46,34 @@ PHASE_LABELS = {SPH_EJECT: "EJECT", SPH_BOOST: "BOOST",
 # --- Tuning constants ----------------------------------------------------------
 
 # Boost: thrust runs pure vertical for this long after ignition before the
-# tilt toward the predicted intercept point begins (locked).
-BOOST_VERTICAL_TIME = 1.0      # s
+# tilt toward the predicted intercept point begins. Footage-derived
+# (docs/research/s300_tipover_physics.md §3: the declination is visibly
+# under way well inside the first second after ignition).
+BOOST_VERTICAL_TIME = 0.3      # s
 
-# Tip-over dynamics: the gas-vane TVC slews the path rotation rate under an
-# angular-acceleration limit — violent (the footage's 30-deg kink in the
-# first 100 m) but CONTINUOUS. The old code commanded the full g-limited
-# rate in a single 120 Hz tick (a 1.8 t missile cornering instantly — user
-# feedback 2026-06-11); now the rate trapezoids up at TILT_ACCEL, is capped
-# at TILT_RATE_MAX, and brakes onto the aim direction.
-TILT_ACCEL = math.radians(160.0)     # rad/s^2
-TILT_RATE_MAX = math.radians(120.0)  # rad/s
+# Tip-over dynamics (normative: docs/research/s300_tipover_physics.md).
+# Frame-timed S-300P war-shot footage: ~30 deg from vertical 1.0 s after
+# ignition, ~60 deg at 2.0 s — average ~30 deg/s, peak 40-45 deg/s, rate
+# ramp ~80-100 deg/s^2. The autopilot PROGRAM is the limiter (vane torque
+# over ~6,500 kg*m^2 could pitch far faster), so the body rate is capped at
+# the researched 45 deg/s, the ramp at 100 deg/s^2, and the PATH bends no
+# faster than the physically available sideforce allows:
+#   omega_path <= a_lat / v,  a_lat = thrust * sin(AoA_max) / mass
+# (~40 m/s^2 at 18 deg AoA — the old 120 deg/s cap implied an impossible
+# 21 g of lateral at 100 m/s; user feel report confirmed by the math).
+TILT_ACCEL = math.radians(100.0)     # rad/s^2 (footage ramp)
+TILT_RATE_MAX = math.radians(45.0)   # rad/s (footage peak body rate)
+BOOST_AOA_SIN = math.sin(math.radians(18.0))   # max boost angle of attack
 BRAKE_MARGIN = 0.6   # braking-curve accel budget: arrive with the rate
 #                      already bled off (see sim/missile.py _slewed_rate)
 
 # Body attitude (render feel): the airframe slews ahead of the flight path
 # (TVC turns the body; the path follows), clamped to AOA_MAX off the
-# velocity vector. Mirrors sim/missile.py's body model.
+# velocity vector. AOA_MAX matches the researched 18 deg boost AoA — the
+# visible nose-lead IS the sideforce generator.
 BODY_RATE_LEAD = 1.6
-BODY_RATE_MIN = math.radians(35.0)   # rad/s attitude tracking floor
-AOA_MAX = math.radians(10.0)
+BODY_RATE_MIN = math.radians(20.0)   # rad/s attitude tracking floor
+AOA_MAX = math.radians(18.0)
 AOA_COS = math.cos(AOA_MAX)
 
 # Predicted-intercept time-to-go: t_go = range / max(closing_speed, FLOOR)
@@ -354,8 +362,10 @@ class SamMissile:
             if self.t >= w.eject_time + BOOST_VERTICAL_TIME and speed > 1e-9:
                 dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
                 c = min(max(hx * dx + hy * dy + hz * dz, -1.0), 1.0)
-                omega_cap = min(w.max_g * GRAVITY / max(speed, 1.0),
-                                TILT_RATE_MAX)
+                # Physical path-rate ceiling: sideforce from thrust at the
+                # researched max boost AoA, divided by current speed.
+                a_lat = w.motor_thrust * BOOST_AOA_SIN / self.mass
+                omega_cap = min(a_lat / max(speed, 1.0), TILT_RATE_MAX)
                 cmd = min(omega_cap,
                           math.sqrt(2.0 * BRAKE_MARGIN * TILT_ACCEL
                                     * math.acos(c)))

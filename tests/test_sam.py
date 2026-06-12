@@ -107,13 +107,20 @@ def test_cold_launch_vertical_no_lateral_drift():
     assert m.pos[0] == LAUNCH_POS[0] and m.pos[2] == LAUNCH_POS[2]
     assert m.pos[1] > LAUNCH_POS[1]
     assert 0.0 < m.vel[1] < S300.eject_speed     # gravity only: decelerating
-    # ignition at eject_time; the first 1.0 s of boost stays pure vertical
-    for _ in range(int(1.0 / DT)):
+    # Ignition shortly after the hang; BOOST stays pure vertical only for
+    # BOOST_VERTICAL_TIME (researched: the declination is visibly under way
+    # inside the first second after ignition - s300_tipover_physics.md).
+    while m.phase == SPH_EJECT:
+        m.update(DT, w)
+    for _ in range(int(0.25 / DT)):              # inside the vertical window
         m.update(DT, w)
     assert m.phase == SPH_BOOST
     assert m.pos[0] == LAUNCH_POS[0] and m.pos[2] == LAUNCH_POS[2]
     assert m.vel[0] == 0.0 and m.vel[2] == 0.0
-    assert m.vel[1] > S300.eject_speed           # the motor is burning
+    assert m.vel[1] > 0.0                        # the motor is burning
+    for _ in range(int(1.0 / DT)):               # ... and by +1.25 s the
+        m.update(DT, w)                          # programmed turn has begun
+    assert m.vel[0] != 0.0 or m.vel[2] != 0.0
 
 
 def test_eject_hang_apex_and_ignition_delay():
@@ -140,26 +147,34 @@ def test_eject_hang_apex_and_ignition_delay():
     assert 1.0 <= t_ignition <= 1.55             # the pause is sacred
 
 
-def test_tipover_kinks_within_first_150m():
-    """Gas-vane tip-over: the column kinks 30 deg+ off vertical within
-    ~150 m of the ignition point (s300_reference.md signature #3)."""
+def test_tipover_rate_matches_footage():
+    """Gas-vane tip-over, frame-timed footage contract (normative:
+    s300_tipover_physics.md - S-300P war shot: ~30 deg off vertical ~1 s
+    after ignition, ~60 deg at ~2 s, declination complete in 1.5-2.5 s).
+    The PATH (smoke column) lags the body slightly, so the path must reach
+    30 deg between 0.8 and 2.4 s after ignition - the lower bound guards
+    against the old instant-corner regime (which got there in ~0.4 s), the
+    upper against a sluggish autopilot. Supersedes the first research
+    pass's eyeballed 'within 150 m' bound."""
     ac = _crossing_patrol(60_000.0)
     m = SamMissile(S300, np.array([0.0, 9.0, 0.0]), ac)
     w = _World()
-    ignition_alt = None
+    t_ignition = None
+    tilt = 0.0
     while m.t < 8.0:
         ac.update(DT)
         m.update(DT, w)
-        if ignition_alt is None and m.phase == SPH_BOOST:
-            ignition_alt = float(m.pos[1])
+        if t_ignition is None and m.phase == SPH_BOOST:
+            t_ignition = m.t
         speed = float(np.linalg.norm(m.vel))
         if speed > 1e-6 and m.phase == SPH_BOOST:
             tilt = math.degrees(math.acos(min(float(m.vel[1]) / speed, 1.0)))
             if tilt >= 30.0:
                 break
-    assert ignition_alt is not None
-    assert tilt >= 30.0                          # the kink happened
-    assert float(m.pos[1]) - ignition_alt <= 150.0   # ... and happened LOW
+    assert t_ignition is not None
+    assert tilt >= 30.0                              # the kink happened
+    dt_30 = m.t - t_ignition
+    assert 0.8 <= dt_30 <= 2.4, f"path hit 30 deg {dt_30:.2f} s after ignition"
 
 
 def test_boost_reaches_mach4_by_burnout_and_lofts_above_8km():
