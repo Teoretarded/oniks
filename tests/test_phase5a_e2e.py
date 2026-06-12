@@ -130,10 +130,15 @@ def test_carrier_anchor_open_water_inside_band():
 
 @pytest.mark.slow
 def test_cap_scheduler_keeps_two_airborne():
-    """The 5a scheduler launches one fighter per check until
+    """The commander-managed CAP (5b: replaces the 5a scheduler with the
+    same rotation rules) launches one fighter per check until
     CAP_TARGET_AIRBORNE are up (round-robin across the live bases), and
-    never overshoots."""
+    never overshoots.  Updated to the 5b truth: the player radar runs
+    SILENT here so the commander generates no strike packages — with the
+    radar emitting it correctly launches a HARM package at the 90 s ESM
+    fix on top of the CAP (the war starts; covered by the 5b e2e)."""
     w = CombatWorld()
+    w.radar_station.emitting = False
     max_up = 0
     for _ in range(int(600.0 / DT_COARSE)):
         w.step(DT_COARSE)
