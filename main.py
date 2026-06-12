@@ -81,11 +81,28 @@ class App:
     def start_sandbox(self) -> None:
         """Menu SANDBOX item: start a fresh game session."""
         from game.sandbox import SandboxState   # after the GL context exists
+        self._draw_loading_frame()          # world build takes ~2 s: show it
         if self.sandbox is not None:
             self.sandbox.dispose()          # free the replaced session's GL
         self.paused = False
         self.sandbox = SandboxState(self)
         self.states.switch(self.sandbox)
+
+    def _draw_loading_frame(self) -> None:
+        """One immediate 'BUILDING WORLD...' frame so the SANDBOX click never
+        reads as a hang while terrain/models/audio construct (~2 s)."""
+        from OpenGL import GL as gl
+        from engine.text import HEADER_SIZE
+        from game.states import ACCENT, BG0
+        gl.glClearColor(BG0[0], BG0[1], BG0[2], 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        text = self.ui_text()
+        w, h = self.window.size()
+        msg = "BUILDING WORLD..."
+        tw = text.text_width(msg, HEADER_SIZE)
+        text.draw_text((w - tw) * 0.5, (h - 28) * 0.5, msg, ACCENT, HEADER_SIZE)
+        text.flush(w, h)
+        self.window.swap()
 
     def open_pause(self) -> None:
         """ESC in the sandbox: pause menu over the frozen frame."""
