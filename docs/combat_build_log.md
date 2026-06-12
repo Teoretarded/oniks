@@ -230,3 +230,51 @@ value had to be measured, not eyeballed. Locked two-sided in
 tests/test_sm2_statistics.py (60 m 3-round engagement batch 0.458 in
 [0.2, 0.65]; 3 km batch 10/10 >= 0.75; clean control kills every time;
 lock-break coast + reacquire).
+
+## Phase 5a — air war scaffolding (integration, 2026-06-12)
+
+Workflow `combat-phase5`: 2 parallel implementers (sim/enemy_air.py
+Fighter/Awacs/Carrier/AirBase state machines, 54 tests; models
+fighter/awacs/carrier/airfield, 32 tests), then the integrator. NO
+weapons employment in 5a — fighters fly and rearm, the AWACS senses;
+commander AI / JASSM/HARM delivery / AIM-9X / 40N6 are 5b.
+
+- world/combat.py: exactly ONE Carrier joins `self.ships` at the FIXED
+  deep anchor (0, 280 km) — open-water verified, the spawn-zone carrier
+  band's mode range (seeded sample_fleet placement is Phase 7). Enemy
+  AIRFIELD Structure pinned at (60 km, 516 km): probed dry land, 4.1 m
+  height spread across the full 2.5 km runway footprint (flattest of a
+  20-cell sweep); swept against PLAYER cruise missiles (mirror of the
+  hostile-vs-base pass), hp 4. 2 fighters at the airfield + 2 on the
+  carrier + 1 AWACS in `self.enemy_air` (NOT self.aircraft — that list
+  is legacy sandbox traffic). Standing-CAP scheduler keeps 2 airborne
+  (round-robin launches, bingo RTB to nearest surviving base, 90 s
+  rearm queue); the 5b commander replaces it.
+- Enemy picture symmetry: sim/enemy_defense.py gains `cue_radars_fn` —
+  the AWACS radar contributes to track FORMATION for every destroyer
+  (remote cue, local illumination: SARH terminal lock-break still runs
+  from the launching ship's own director, the documented CEC seam).
+- Drone ELINT/RWR emitter lists now include the AWACS (always emitting,
+  5a doctrine) + airborne fighter nose radars; the carrier's mount is
+  silent. Fixed-installation fog of war: the airfield reaches the map
+  only after SAR images it (`airfield_known` latches; the 3D scene
+  always shows the geometry).
+- Integrator-caught seams: FighterRadar lacked the `antenna_alt`
+  passthrough ELINT reads (AttributeError on first listen pass);
+  Fighter/Awacs had no pitch/roll render attitude (draw pass needs
+  them — added, sharing the spiral constants); the inherited ship burn
+  ladder made ANY single hit terminal, voiding spec 5.4 "multiple Oniks
+  hits" — Carrier damage control contains a burn while hp > 0 (only hp
+  exhaustion sinks her; 6 real OBB hits to sink, locked by e2e).
+- Updated-to-new-truth assertions (not weakened): test_combat_world
+  ship roster now pins destroyers + exactly one carrier; phase-3 e2e
+  silent-radar test pins per-class magazines (carrier ships 0 TLAM).
+- Gate: 607 tests green (17 new e2e incl. a real 281 km Oniks hit on
+  the carrier), smoke_combat 36/36 incl. CAP spin-up, bingo
+  RTB-land-rearm, airfield-kill divert, ELINT hears the AWACS.
+- 5b notes: fighter landing descends at 5 m/s from 9 km (a ~30 min
+  approach — works, reads slow; RTB should descend en route), fighters
+  land at y=0 even at the 140 m-elevation airfield (sub-pixel at range;
+  parked airframes are not drawn), fighters stranded PARKED at a dead
+  base need the commander's call, Fighter.hardpoints loadout dicts land
+  with employment.
