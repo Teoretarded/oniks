@@ -64,6 +64,10 @@ _SPY1_RANGES = {
 _SM2_AMMO_DEFAULT  = 24
 _CIWS_AMMO_DEFAULT = 1500     # rounds; CIWS is a gun, not missiles
 _SM2_RELOAD_S      = 3.0      # seconds between SM-2 launches (fire-control limit)
+# Phase 3 land-attack magazine: 8 of the 90 Mk 41 cells loaded with TLAM —
+# a typical mixed strike/air-defense loadout for a Burke on station (the
+# rest of the magazine is the 24 SM-2s above plus unmodeled VLA/ESSM).
+_TOMAHAWK_AMMO_DEFAULT = 8
 
 # Racetrack geometry: the two legs run along the patrol heading ±patrol_radius
 # from the anchor, and the turn waypoints are offset perpendicular by
@@ -119,6 +123,9 @@ class Destroyer(Ship):
         Initial SM-2 magazine count.
     ciws_ammo : int
         Initial CIWS ammunition (rounds).
+    tomahawk_ammo : int
+        Initial Tomahawk land-attack magazine (Phase 3; fired by
+        sim/enemy_strikes.py, never by the ship itself).
     """
 
     # Not airborne — ContactBoard duck-typing; explicit False avoids getattr
@@ -128,7 +135,8 @@ class Destroyer(Ship):
     def __init__(self, ship_id, anchor_xz, heading_deg=0.0,
                  patrol_radius_m=8_000.0,
                  sm2_ammo=_SM2_AMMO_DEFAULT,
-                 ciws_ammo=_CIWS_AMMO_DEFAULT):
+                 ciws_ammo=_CIWS_AMMO_DEFAULT,
+                 tomahawk_ammo=_TOMAHAWK_AMMO_DEFAULT):
 
         # Build a minimal one-segment «lane» so the Ship superclass can
         # initialise its lane-following state from it.  We place the ship at
@@ -165,6 +173,7 @@ class Destroyer(Ship):
         # --- Magazine state ---
         self.sm2_ammo        = int(sm2_ammo)
         self.ciws_ammo       = int(ciws_ammo)
+        self.tomahawk_ammo   = int(tomahawk_ammo)
         # sm2_reload_s is a class-level constant; the per-instance timer counts
         # down from it each time the integration layer fires a round.
         self.sm2_reload_s    = _SM2_RELOAD_S

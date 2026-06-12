@@ -53,6 +53,16 @@ HEADER_COL = (0.95, 0.85, 0.45, 1.0)         # amber headline
 ARMED_COL = (0.45, 1.00, 0.55, 1.0)          # status green
 RELOAD_COL = (1.00, 0.72, 0.25, 1.0)         # status amber
 TERMINAL_COL = (1.00, 0.55, 0.40, 1.0)       # TERMINAL phase pops red-ish
+DANGER_COL = (1.00, 0.36, 0.24, 1.0)         # destroyed / defeat (states.py DANGER)
+
+# COMBAT Phase 3: radar-silence readout + the lose-condition banner.
+RADAR_EMITTING = "EMITTING"
+RADAR_SILENT = "SILENT"
+RADAR_DESTROYED = "DESTROYED"
+DEFEAT_TEXT = "BASTION DESTROYED - DEFEAT"
+DEFEAT_Y_FRAC = 0.24        # banner center height as a fraction of the screen
+DEFEAT_PAD_X = 28           # px panel padding around the banner text
+DEFEAT_PAD_Y = 18
 
 F1_LABEL = "F1 CONTROLS"    # the HUD's entire permanent hint footprint
 OVERLAY_W = 460             # px, F1 overlay panel width
@@ -68,6 +78,20 @@ BRACKET_MAX_PX = 220.0      # px, never engulfs the screen
 BRACKET_CORNER_FRAC = 0.38  # corner leg length as a fraction of the half-size
 BRACKET_LINE_W = 2.0        # px stroke
 BRACKET_TEXT_GAP = 6.0      # px between the bracket and the range text
+
+
+def radar_status_row(world):
+    """The COMBAT radar-emissions row for the launcher blocks, or None when
+    the session world has no radar station (SANDBOX) — pure, unit-testable.
+    Returns ("RADAR", status, color)."""
+    radar = getattr(world, "radar_station", None)
+    if radar is None:
+        return None
+    if not radar.alive:
+        return ("RADAR", RADAR_DESTROYED, DANGER_COL)
+    if radar.emitting:
+        return ("RADAR", RADAR_EMITTING, ARMED_COL)
+    return ("RADAR", RADAR_SILENT, RELOAD_COL)
 
 
 def overlay_rows(keybinds) -> list[tuple]:
@@ -157,6 +181,8 @@ class HUD:
                 self._target_bracket(sandbox, m, tgt, w, h)
         else:
             self._launcher_block(sandbox)
+        if getattr(sandbox.world, "defeated", False):
+            self._defeat_banner(w, h)
         self._hint_flash(sandbox, w, h)
         self._corner_labels(sandbox, w, h)
         if sandbox.controls_overlay:
@@ -228,7 +254,11 @@ class HUD:
 
     def _bastion_block(self, sandbox) -> None:
         world = sandbox.world
-        if world.launcher_armed:
+        if getattr(world, "defeated", False):
+            # COMBAT lose condition: the TEL structure is rubble — the
+            # launcher can never arm again (world.launch returns None).
+            status, col = "DESTROYED", DANGER_COL
+        elif world.launcher_armed:
             status, col = "ARMED", ARMED_COL
         else:
             # Epsilon: fixed-step decrements leave reload_left ~1e-13 above
@@ -240,6 +270,11 @@ class HUD:
             ("WEAPON", ONIKS.display_name.upper(), VALUE_COL),
             ("PROFILE", sandbox.profile.upper(), VALUE_COL),
             ("TARGET", self._target_summary(sandbox, BASE_POS), VALUE_COL),
+        ]
+        radar = radar_status_row(world)
+        if radar is not None:
+            rows.append(radar)
+        rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
@@ -261,6 +296,11 @@ class HUD:
             ("AMMO", f"{world.sam_ammo}/{S300_TEL.ammo}", VALUE_COL),
             ("TARGET", self._target_summary(sandbox, SAM_SITE_POS),
              VALUE_COL),
+        ]
+        radar = radar_status_row(world)
+        if radar is not None:
+            rows.append(radar)
+        rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
@@ -283,6 +323,18 @@ class HUD:
         if eff != sandbox.controls.requested_scale:
             txt += " (launch)"      # accel locked to 1x through the cinematic
         return txt
+
+    def _defeat_banner(self, w: int, h: int) -> None:
+        """COMBAT lose condition (spec 2.2): a centered corner-ticked panel
+        in the menu chrome over the still-running sim — the player watches
+        the aftermath; full end-screens come in Phase 7."""
+        lh = self.text.line_height(HEADER_SIZE)
+        tw = self.text.text_width(DEFEAT_TEXT, HEADER_SIZE)
+        x = (w - tw) * 0.5
+        y = h * DEFEAT_Y_FRAC - lh * 0.5
+        draw_panel(self.text, x - DEFEAT_PAD_X, y - DEFEAT_PAD_Y,
+                   tw + 2 * DEFEAT_PAD_X, lh + 2 * DEFEAT_PAD_Y, alpha=0.92)
+        self.text.draw_text(x, y, DEFEAT_TEXT, DANGER_COL, HEADER_SIZE)
 
     # ----------------------------------------------- hints + corner labels
 

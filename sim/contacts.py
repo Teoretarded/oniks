@@ -55,7 +55,12 @@ class ContactBoard:
         if st is None:
             st = self._vis[cid] = dict(t_next=-1.0, since=None, seen=False)
         if sim_time >= st["t_next"]:
-            size = "fighter" if getattr(ent, "is_air", False) else "ship"
+            # Size class for the radar gate: entities may carry an explicit
+            # radar_size (strike missiles: "missile" — sim/strike.py), else
+            # air entities rate "fighter" and surface entities "ship".
+            size = getattr(ent, "radar_size",
+                           "fighter" if getattr(ent, "is_air", False)
+                           else "ship")
             seen = bool(self.visible_fn(ent.pos, size))
             if seen and st["since"] is None:
                 st["since"] = sim_time

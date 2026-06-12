@@ -16,8 +16,9 @@ Doctrine per step (spec §5.2):
     sight-line ray is the expensive part of Radar.detects.
   * SM-2 launch: against the highest-priority tracked missile inside the
     weapon envelope (ground range within [SM2_MIN_RANGE_M, max_range],
-    estimate altitude within the intercept band — a sea-skimmer under
-    min_intercept_alt CANNOT be engaged: lo-lo is king, spec §5.2), gated
+    estimate altitude within the intercept band — the 25 m floor reaches
+    sea-skimmers; what keeps lo-lo king per spec §5.2 is the low-altitude
+    multipath noise PHYSICS in sim/sam.py, not an engagement gate), gated
     on sm2_ammo, the 3 s fire-control reload (Destroyer.sm2_reload_timer)
     and at most SM2_MAX_INFLIGHT simultaneous rounds per destroyer.
     Priority: fewest SM-2s already assigned, then nearest — a raid gets
@@ -25,7 +26,9 @@ Doctrine per step (spec §5.2):
   * The SM-2 flies on the CONTACT picture: boost/midcourse aim at a
     dead-reckoned closure over this controller's track (mirrors
     world.world.WorldState._contact_estimate); only the terminal seeker
-    sees truth.
+    sees truth — through the multipath error against low targets, and
+    only while the SHIP's illuminator holds terrain line of sight (SARH:
+    the lock-break check in sim/sam.py runs ship antenna -> target).
   * CIWS: the nearest tracked hostile missile inside its 2 km envelope is
     engaged every substep; kills set the missile dead with impact
     bookkeeping and the burst/kill events are forwarded into world.events.
@@ -37,8 +40,10 @@ launch_realtime_lock honors it) and ``launch_platform = <destroyer>``
 (sim/damage.py skips the pair so a deck launch can never OBB-hit its own
 hull on the first substep).
 
-Determinism: all CIWS randomness routes through the injected generator;
-given the same seed and call sequence the battle replays exactly.
+Determinism: all CIWS randomness routes through the injected generator,
+and every SM-2 launch draws ONE integer from it to seed a child Generator
+for that round's multipath noise (sim/sam.py); given the same seed and
+call sequence the battle replays exactly.
 """
 
 from __future__ import annotations
@@ -58,6 +63,10 @@ SM2_MAX_INFLIGHT = 4        # simultaneous SM-2s per destroyer (raid cap)
 SM2_MIN_RANGE_M = 5_000.0   # inside this the SM-2 cannot arm/turn: CIWS work
 VLS_DECK_M = 10.0           # m, Mk 41 deck above the waterline (launch pos)
 CIWS_MOUNT_M = 12.0         # m, gun mount above the waterline (slant ranges)
+ILLUMINATOR_M = 20.0        # m, SPY-1/director illuminator above the
+#                             waterline (matches the SPY-1 antenna height in
+#                             sim/enemy_ships.py): the SARH LOS source for
+#                             the SM-2 terminal lock-break check
 
 
 class _RelTarget:
@@ -90,6 +99,7 @@ class ShipDefense:
 
     def __init__(self, ship, rng):
         self.ship = ship
+        self.rng = rng          # shared side rng: CIWS rolls + SM-2 noise seeds
         self.ciws = Ciws(ship.ciws_ammo, rng)
         # id(missile) -> dict(missile, t_next, since, pos, vel, age):
         # the same cadence/sustain gating shape as ContactBoard._vis, plus
@@ -151,6 +161,22 @@ class ShipDefense:
 
         return contact_estimate
 
+    def _illuminator(self):
+        """() -> SARH illuminator position for the SM-2 terminal lock-break
+        LOS check (sim/sam.py): the SPY-1 antenna of the LAUNCHING ship,
+        tracked live. Returns None once the ship dies — a sinking ship
+        stops illuminating and every round it was guiding goes stupid."""
+        ship = self.ship
+
+        def illuminator_pos():
+            if not ship.alive:
+                return None
+            return (float(ship.pos[0]),
+                    float(ship.pos[1]) + ILLUMINATOR_M,
+                    float(ship.pos[2]))
+
+        return illuminator_pos
+
     # ----------------------------------------------------------------- SM-2
 
     def _try_sm2_launch(self, world, now):
@@ -181,8 +207,14 @@ class ShipDefense:
         if best_key is None:
             return
         deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
-        sam = SamMissile(SM2, deck, self._tracks[best_key]["missile"],
-                         contact_estimate_fn=self._estimate(best_key))
+        sam = SamMissile(
+            SM2, deck, self._tracks[best_key]["missile"],
+            contact_estimate_fn=self._estimate(best_key),
+            # One parent draw seeds a child Generator per launch: the
+            # multipath noise stays seeded/deterministic per battle while
+            # each round wanders independently (sim/sam.py MULTIPATH_*).
+            rng=np.random.default_rng(int(self.rng.integers(2 ** 63))),
+            illuminator_pos_fn=self._illuminator())
         sam.launch_cinematic = False    # no 1x time lock for enemy launches
         sam.launch_platform = ship      # damage.py: never self-OBB-hit
         world.missiles.append(sam)

@@ -401,7 +401,10 @@ class TacticalMap:
         point tracking the selected contact's dead-reckoned position."""
         live = set()
         for m in world.missiles:
-            if not m.alive:
+            # Hostile strike rounds (Phase 3) are fog-of-war gated: they
+            # reach the map only through the contact picture, never as
+            # truth-position trails/diamonds like the player's own rounds.
+            if not m.alive or getattr(m, "is_hostile", False):
                 continue
             key = id(m)
             live.add(key)
@@ -510,7 +513,9 @@ class TacticalMap:
         back to a plain coordinate target."""
         sandbox = self.sandbox
         world = sandbox.world
-        m = pick_missile(self.view, world.missiles, pos)
+        m = pick_missile(self.view,
+                         [mm for mm in world.missiles
+                          if not getattr(mm, "is_hostile", False)], pos)
         if m is not None:
             if m is self.selected_missile:
                 self.selected_missile = None     # toggle off: back to planning
@@ -861,6 +866,8 @@ class TacticalMap:
         d = MISSILE_DIAMOND_PX
         t = TRAIL_DOT_PX
         for m in self.sandbox.world.missiles:
+            if getattr(m, "is_hostile", False):
+                continue        # fog of war: hostile rounds show as contacts
             for tx, tz in self._trails.get(id(m), ()):
                 sx, sy = self.view.world_to_screen((tx, tz))
                 if self._on_screen(sx, sy, pad=2.0):

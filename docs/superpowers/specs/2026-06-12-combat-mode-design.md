@@ -133,6 +133,21 @@ player-tasked with waypoints on the tactical map.
   estimates like any lost track.
 - If shot down, a replacement arrives after a long timer (configurable).
 
+### 4.3b Long-range additions (designed 2026-06-12, user request)
+
+- **3M22 Zircon-class hypersonic anti-ship (player, Phase 7):** Bastion-
+  family land launch, ~600+ km (covers the whole spawn zone + carrier
+  band), Mach 8 cruise ~20 km alt, Mach 5+ terminal dive. LAUNCH GATE:
+  requires a live located surface fix (drone ELINT/SAR track) — no
+  recon-by-fire; the drone enables the Zircon. Tiny magazine, long
+  reload, armory-configurable. SM-2 windows collapse vs it purely via
+  closing-speed physics (no special rules).
+- **40N6-class very-long-range SAM (player, Phase 5):** S-300 battery
+  upgrade round, ~380 km vs HIGH-altitude targets, high-loft + active
+  terminal seeker (over-horizon vs high targets only — the radar horizon
+  still rules low flyers). Purpose: threaten AWACS/standoff aircraft,
+  forcing low ingress where detection ranges shrink.
+
 ### 4.4 Existing systems
 
 - **Oniks:** unchanged flight logic (preset profile/waypoints + terminal
@@ -160,19 +175,48 @@ airfield + ground radars on the enemy continent, AWACS orbit deep.
     radar goes silent.
   - *(Designed but not enabled in v1: Harpoon-class anti-ship — for the future
     friendly-ships update.)*
+  - **2 × AIM-9X-class IR missiles** (Phase 5): the drone-hunt armament.
+    IR seekers ignore radar stealth — rear-aspect lock vs the subsonic
+    drone at ~8 km. Hunt loop: AWACS/ship sniff → vector to last-known →
+    nose radar reacquire inside ~11 km (every sweep heard by the drone's
+    RWR) → IR lock → kill. A fighter hunting the drone is a fighter not
+    striking the base.
 - Behavior loop: `PARKED → TAKEOFF → INGRESS (low when player radar net is
   up) → LAUNCH at standoff range → EGRESS → LAND → REARM (timer) → repeat`.
 - Rearm at the **nearest surviving base** (airfield or carrier). Both
   destroyed → airborne fighters fight until winchester, then are effectively
   out of the war (fly to map edge / ditch).
 
+### 5.1b Fleet placement (seeded spawn zone)
+
+One zone, one mechanism (`world/spawn_zones.py`, wired into generation in
+Phase 7): ships spawn in an ocean sector fanning from the player base
+toward the enemy coast, range 110-300 km, half-angle 50°. Range is drawn
+from a **triangular distribution peaking at 180 km** — anywhere in the
+zone is possible, the middle band is most likely. Hulls keep >= 25 km
+separation and verified open water (9 km clearance disc). The **carrier
+samples a deeper 240-330 km band** (usually beyond lo-lo Oniks fuel,
+~230 km flown) with up to two destroyers escorting 20-35 km off it; the
+rest screen forward. Longer-range player weapons to contest the deep band
+are future scope (post-Phase-8 candidate).
+
 ### 5.2 Arleigh Burke-class destroyers
 
 - **SPY-1-class radar:** ~300 km vs high targets, horizon-limited vs
   sea-skimmers (lo-lo Oniks gets inside ~30–40 km before detection).
 - **SM-2-class SAMs:** ~150 km vs aircraft/high missiles. Engages hi-flying
-  Oniks at long range — hi-lo profile becomes risky, lo-lo becomes king.
-  Finite magazine.
+  Oniks at long range — hi-lo profile becomes risky. Sea-skimmers ARE
+  engageable (real Aegis doctrine), but intercepts are **simulated physics,
+  never probability rolls** (LOCKED, user direction): against targets below
+  ~150 m the SM-2's target track carries time-correlated multipath/clutter
+  noise; PN guidance chases the jittering aim point under its real max-g
+  limit and the hit/miss outcome is whether closest approach falls inside
+  the 20 m proximity fuse. The Oniks's existing terminal weave genuinely
+  stresses the interceptor. Outcome statistics are measured by seeded probe
+  batches and locked as two-sided statistical regression bands (target:
+  high-altitude kill ~0.85+, sea-skim kill roughly 0.25-0.55 per shot —
+  tuned via the physical noise parameter, not the outcome). Saturation
+  salvos overwhelm fire-control channels naturally. Finite magazine.
 - **Phalanx CIWS:** 20 mm, ~2 km auto-engage vs leakers, probabilistic kill.
 - **Tomahawk-class land-attack missiles:** long-range (effectively whole-map),
   subsonic, low-flying strikes on located player bases. Finite magazine.
@@ -245,12 +289,22 @@ Pantsir/S-300 auto-defense covered by their own logic).
    (fixed seed, no setup screen yet).
 3. **Enemy strikes back:** Tomahawk/JASSM/HARM sims, base HP/destruction,
    lose condition, radar silence mechanics.
-4. **Air war:** fighter + AWACS + carrier + airfield models and behaviors,
-   sortie/rearm cycle, commander AI v1.
-5. **Pantsir:** model + auto-engagement vs inbound missiles.
-6. **Recon drone:** ELINT bearings/triangulation, SAR footprint, RWR alerts,
-   stealth detection ranges, intel aging.
+4. **Recon drone:** ELINT bearings/triangulation, SAR footprint, RWR alerts,
+   stealth detection ranges, intel aging. (Pulled forward from 6 — user
+   gate: without it the player has no way to find the fleet that phases
+   2-3 made hostile; until it lands the only recon is Oniks seeker
+   recon-by-fire. ELINT finds ANY emitting ship — a destroyer that
+   defends itself radiates and gives itself away; SAR finds silent hulls;
+   the deep, silent carrier is the hardest SAR target, not the only one.)
+5. **Air war:** fighter + AWACS + carrier + airfield models and behaviors,
+   sortie/rearm cycle, commander AI v1. (Drone risk mechanics become real
+   exactly when interceptors arrive.)
+6. **Pantsir:** model + auto-engagement vs inbound missiles.
 7. **Setup screen + Armory + seeded generation + win/lose screens.**
+8. **Polish (rolling):** a standing backlog accumulated through phases 1-7
+   (user feedback, gate critiques, deferred visuals) executed as the final
+   phase — and kept open afterward as the live feedback loop. Backlog lives
+   in `docs/combat_build_log.md`.
 
 (Phases 5–7 order can flex; 1–4 are sequential.)
 

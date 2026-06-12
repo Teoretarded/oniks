@@ -3,7 +3,7 @@
 Default bindings (rebind in SETTINGS; persisted to %APPDATA%\\ONIKS):
 
     ESC pause menu | M map | C camera | TAB platform (Bastion <-> S-300)
-    SPACE launch | 1/2 profile hi-lo/lo-lo
+    SPACE launch | 1/2 profile hi-lo/lo-lo | R radar emissions (COMBAT)
     P pause | N frame-step | - / = time accel down/up (1,2,4,8,16) | F2 screenshot
     [ / ] camera subject cycle (missiles -> active TEL -> selected contact)
     F1 controls overlay (generated live from the binding table)
@@ -162,6 +162,8 @@ class SandboxControls:
             sandbox.profile = "hi-lo"
         elif action == "profile_lo_lo":
             sandbox.profile = "lo-lo"
+        elif action == "radar_toggle":
+            sandbox.toggle_radar()
         elif action == "pause":
             app.paused = not app.paused
         elif action == "frame_step":

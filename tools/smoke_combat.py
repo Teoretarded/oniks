@@ -41,6 +41,31 @@ def main() -> int:
     check("picture stays empty (hulls below the horizon)",
           world.contacts.tracks == {})
     check("S-300 refuses blind shot", world.launch_sam("x") is None)
+
+    # --- Phase 3: ESM localization -> Tomahawk strikes (pure sim steps,
+    # no rendering — the world is GL-free; the GL parts stay above/below).
+    check("radar station starts EMITTING",
+          world.radar_station.alive and world.radar_station.emitting)
+    check("base structures standing",
+          all(s.alive for s in world.structures))
+    ammo0 = sum(d.tomahawk_ammo for d in world.ships)
+    for _ in range(int(120.0 / PHYS_DT)):   # 90 s fix + launch margin
+        world.step(PHYS_DT)
+    world.drain_events()
+    check("ESM full fix after 90 s of emission",
+          world.strikes.progress >= 1.0)
+    fired = ammo0 - sum(d.tomahawk_ammo for d in world.ships)
+    toms = [m for m in world.missiles if getattr(m, "is_hostile", False)]
+    check(">=1 Tomahawk in flight after the fix",
+          fired >= 1 and len(toms) >= 1)
+    world.radar_station.emitting = False    # radar silence = the counter
+    for _ in range(int(130.0 / PHYS_DT)):   # past the 120 s salvo period
+        world.step(PHYS_DT)
+    world.drain_events()
+    check("radar silence halts further salvos",
+          ammo0 - sum(d.tomahawk_ammo for d in world.ships) == fired)
+    world.radar_station.emitting = True     # leave it on for the screenshot
+
     state.render(PHYS_DT)
     print(f"[smoke] screenshot {app._save_screenshot()}")
     pygame.quit()
