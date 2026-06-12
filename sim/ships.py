@@ -16,9 +16,14 @@ import math
 import numpy as np
 
 SHIP_TYPES = {  # length, beam, height(above water), speed_mps, hp
-    "cargo":   dict(length=180.0, beam=28.0, height=22.0, speed=7.5, hp=2),
-    "tanker":  dict(length=240.0, beam=40.0, height=20.0, speed=8.5, hp=3),
-    "warship": dict(length=150.0, beam=19.0, height=24.0, speed=13.0, hp=2),
+    "cargo":      dict(length=180.0, beam=28.0, height=22.0, speed=7.5,  hp=2),
+    "tanker":     dict(length=240.0, beam=40.0, height=20.0, speed=8.5,  hp=3),
+    "warship":    dict(length=150.0, beam=19.0, height=24.0, speed=13.0, hp=2),
+    # Arleigh Burke-class destroyer (combat mode enemy unit, Phase 2).
+    # height=30 is mast-top; SPY-1 antenna_m=20 adds 20 m above the waterline
+    # so horizon math sees the mast at +20 m. OBB dims come from these three
+    # values automatically via Ship (damage.py does not need to be touched).
+    "destroyer":  dict(length=155.0, beam=20.0, height=30.0, speed=15.0, hp=3),
 }
 
 ST_ALIVE, ST_BURNING, ST_SINKING, ST_GONE = range(4)

@@ -26,14 +26,20 @@ def main() -> int:
         ok = ok and cond
 
     check("state is CombatState", type(state).__name__ == "CombatState")
-    check("no ships", world.ships == [])
+    check("two destroyers, nothing else",
+          [s.ship_type for s in world.ships] == ["destroyer", "destroyer"])
     check("no aircraft", world.aircraft == [])
     check("one friendly radar site",
           [s["id"] for s in world.sites] == ["radar_player_00"])
     check("board is gated", world.contacts.visible_fn is not None)
+    check("destroyer mesh registered", "destroyer" in state._ship_meshes)
     for _ in range(240):                      # 2 s of sim
         state.sim_step(PHYS_DT)
-    check("picture stays empty", world.contacts.tracks == {})
+    check("destroyers alive after 2 s", all(s.alive for s in world.ships))
+    # Fog of war end-to-end: the hulls sit ~330+ km out at sea level, far
+    # past the mast-height radar's ~53 km horizon — no track may form.
+    check("picture stays empty (hulls below the horizon)",
+          world.contacts.tracks == {})
     check("S-300 refuses blind shot", world.launch_sam("x") is None)
     state.render(PHYS_DT)
     print(f"[smoke] screenshot {app._save_screenshot()}")

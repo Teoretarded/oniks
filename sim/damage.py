@@ -76,6 +76,9 @@ def apply_missile_hits(missiles, ships, effects_out):
                 continue                          # provably out of reach
             if ship.state not in (ST_ALIVE, ST_BURNING):
                 continue                          # sunk by an earlier missile
+            if ship is getattr(m, "launch_platform", None):
+                continue        # a deck-launched SAM starts INSIDE its own
+                #                 ship's OBB — never a self-hit (Phase 2)
             center, half, rot = ship.obb()
             if not segment_hits_obb(m.prev_pos, m.pos, center, half, rot):
                 continue

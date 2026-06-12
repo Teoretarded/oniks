@@ -92,6 +92,45 @@ S300 = SamDef(
     min_intercept_alt=100.0, max_intercept_alt=25_000.0,
 )
 
+# SM-2 Block IIIB / Mk 41 VLS — ship-launched interceptor
+# --------------------------------------------------------
+# Derivation notes (calibrated against S-300 as reference):
+#   Real SM-2ER: mass ~1340 kg, 4-fin, Mach 3.5 class, ~150 km range.
+#   Motor: we need the missile to reach ≥Mach 3.5 and fly ~150 km.
+#   S-300 calibration: 200 000 N thrust, 1900 kg, 12 s burn →
+#     burnout at ~Mach 5.2; that gives a 150 km coast because it leaves
+#     boost at high speed + high alt. SM-2 is lighter (1340 kg) but its
+#     single-stage motor must also coast the 150 km at Mach 3.5 cruise.
+#   Working backward from a lofted 150 km shot needing ~120 s total:
+#     thrust = 130 000 N, burn = 15 s, isp = 240 s (same propellant type).
+#     mdot = 130 000 / (240 * 9.81) = 55.2 kg/s; 15 s consumes 828 kg ≈
+#     propellant_mass 830 kg (confirmed: leaves 510 kg structural + seeker).
+#     Burnout Mach (sea level): delta-v ~ thrust*burn/avg_mass ~1780 m/s →
+#     Mach ≈ 5.2 at burnout alt (~4 km) then decelerates coasting to
+#     terminal at Mach ~3.5, consistent with the real SM-2 cruise Mach.
+#   VLS eject: Mk 41 cold-launch gas ejector pops the round 10-20 m clear
+#     of the deck at ~20 m/s in ~0.5 s, then the motor lights immediately.
+#     eject_time = 0.5 s (much shorter than S-300's 1.5 s hanging hang;
+#     the deck ejector is a brief gas pulse, not a ballistic free-flight).
+SM2 = SamDef(
+    weapon_id="sm2", display_name="SM-2 Block IIIB",
+    length=6.55, diameter=0.343, launch_mass=1340.0, propellant_mass=830.0,
+    # VLS cold-gas eject: ~20 m/s deck-clear in 0.5 s, motor lights instantly.
+    eject_speed=20.0, eject_time=0.5,
+    motor_thrust=130_000.0, motor_time=15.0, isp=240.0,
+    ref_area=0.0924,   # pi * (0.343/2)^2
+    max_g=25.0, fuse_radius=20.0,
+    terminal_range=20_000.0, max_range=150_000.0,
+    self_destruct_t=180.0, self_destruct_speed=250.0,
+    # Engagement floor 100 m: semi-active illumination against a sea-skimmer
+    # in clutter is the SM-2's hard problem (why CIWS exists as the inner
+    # layer) — and the spec's profile contract (§5.2 "lo-lo becomes king")
+    # requires the Oniks 60 m lo cruise to fly UNDER this floor. Matches the
+    # modeled S-300 floor. Two-sided regression:
+    # tests/test_enemy_defense.py::test_lo_cruise_above_horizon_is_below_sm2_floor
+    min_intercept_alt=100.0, max_intercept_alt=24_000.0,
+)
+
 
 @dataclass(frozen=True)
 class LauncherDef:
@@ -106,7 +145,11 @@ class LauncherDef:
 BASTION = LauncherDef("bastion", "Bastion-P TEL", ("oniks",), 18.0)
 S300_TEL = LauncherDef("s300_tel", "5P85 TEL", ("s300",), 8.0,
                        tubes=4, ammo=4)
+# Mk 41 VLS cell on an Arleigh Burke: 90-cell magazine, each SM-2 occupies
+# one cell; reload at sea is not modelled (finite stock, no reload timer).
+SM2_VLS = LauncherDef("sm2_vls", "Mk 41 VLS", ("sm2",), 0.0,
+                      tubes=8, ammo=24)
 
 WEAPONS = {"oniks": ONIKS}
-SAMS = {"s300": S300}
-LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL}
+SAMS = {"s300": S300, "sm2": SM2}
+LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS}
