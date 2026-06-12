@@ -42,7 +42,8 @@ from engine.particles import Effects, ParticleRenderer
 from engine.text import TextRenderer
 from game.cameras import (LAUNCHER_LOOK_UP, CameraRig, StaticSubject,
                           next_subject, subject_cycle_order)
-from game.controls import SandboxControls
+from game.controls import (PLATFORMS_SANDBOX, SandboxControls,
+                           next_platform)
 from game.hud import HUD
 from game.states import GameState
 from game import tactical_map
@@ -180,6 +181,9 @@ HINT_ONIKS_SURFACE = "ONIKS: SELECT SURFACE TARGET"
 HINT_RADAR_EMITTING = "RADAR: EMITTING"
 HINT_RADAR_SILENT = "RADAR: SILENT"
 HINT_RADAR_DESTROYED = "RADAR: DESTROYED"
+HINT_DRONE_RECON = tactical_map.DRONE_RECON_HINT   # SPACE with the drone
+#                              platform active fires nothing (Phase 4);
+#                              one string, shared with the map's LMB hint
 
 _UP = np.array([0.0, 1.0, 0.0])
 
@@ -223,6 +227,10 @@ class _FallingPart:
 
 class SandboxState(GameState):
     """The playable game: launch Oniks strikes from the Bastion battery."""
+
+    # TAB cycle (game/controls.py): CombatState overrides with the
+    # three-platform COMBAT cycle that includes the recon drone.
+    PLATFORMS = PLATFORMS_SANDBOX
 
     def __init__(self, app):
         super().__init__(app)
@@ -339,14 +347,28 @@ class SandboxState(GameState):
     # --------------------------------------------------------------- intent
 
     def cycle_platform(self) -> str:
-        """TAB: toggle the active platform; the launcher cam re-anchors."""
-        self.active_platform = ("s300" if self.active_platform == "bastion"
-                                else "bastion")
-        anchor = (self._sam_tel_pos if self.active_platform == "s300"
-                  else self._tel_pos)
-        self.rig.set_launcher_pos(anchor)
+        """TAB: the next platform in the class's cycle; the launcher cam
+        re-anchors (the drone platform anchors at the Bastion base — its
+        ground control station; the airframe itself is a camera SUBJECT
+        via [ / ], not a launcher anchor)."""
+        self.active_platform = next_platform(self.active_platform,
+                                             self.PLATFORMS)
+        self.rig.set_launcher_pos(self._platform_anchor())
         self.app.audio.ui_click()
         return self.active_platform
+
+    def _platform_anchor(self):
+        """Launcher-cam ground anchor for the active platform."""
+        return (self._sam_tel_pos if self.active_platform == "s300"
+                else self._tel_pos)
+
+    def _platform_subject(self):
+        """The active platform's [ / ] cycle entry: a TEL StaticSubject
+        here; CombatState returns the flying drone for the drone
+        platform."""
+        return self._tel_subjects[
+            self.active_platform if self.active_platform
+            in self._tel_subjects else "bastion"]
 
     def show_hint(self, text: str, seconds: float = HINT_SECONDS) -> None:
         """Flash a one-line HUD hint (invalid launch selection etc.)."""
@@ -403,7 +425,7 @@ class SandboxState(GameState):
         horizon. SANDBOX rounds never carry is_hostile: behavior unchanged."""
         order = subject_cycle_order([m for m in self.world.missiles
                                      if not getattr(m, "is_hostile", False)],
-                                    self._tel_subjects[self.active_platform],
+                                    self._platform_subject(),
                                     self._selected_entity())
         subj = next_subject(order, self.followed, step)
         if subj is not None and subj is not self.followed:
@@ -415,7 +437,11 @@ class SandboxState(GameState):
     def request_launch(self):
         """SPACE, routed by the active platform with target-type validation:
         the Oniks takes ship contacts / surface points, the S-300 takes air
-        contacts only — anything else flashes a HUD hint and does not fire."""
+        contacts only, the recon drone fires nothing — anything else
+        flashes a HUD hint and does not fire."""
+        if self.active_platform == "drone":
+            self.show_hint(HINT_DRONE_RECON)
+            return None
         if self.active_platform == "s300":
             return self._request_sam_launch()
         if self._selected_air_track() is not None:
