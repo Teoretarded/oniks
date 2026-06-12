@@ -486,12 +486,23 @@ class SandboxState(GameState):
             elif kind in ("splash", "aircraft_splash"):
                 self.effects.splash(pos, scale=SPLASH_SCALE)
                 self.app.audio.play("splash", pos=pos)
-            elif kind == "sam_kill":        # air burst: no water spray
+            elif kind in ("sam_kill", "oniks_intercepted", "ciws_kill"):
+                # Air burst, no water spray: a fuse kill on an aircraft, an
+                # interceptor downing an Oniks and a CIWS kill all read as
+                # the same mid-air explosion (COMBAT Phase 2 event kinds).
                 self.effects.explosion(pos, EXPLOSION_SCALE_AIR)
                 self.app.audio.play("boom_far", pos=pos)
             elif kind == "sam_self_destruct":
                 self.effects.explosion(pos, EXPLOSION_SCALE_SELFD)
                 self.app.audio.play("boom_far", pos=pos)
+            elif kind == "ciws_burst":
+                # Shell burst near the target: a few grey flak puffs, no
+                # audio (the gun is kilometers away from any camera that
+                # is not already deafened by the explosion that follows).
+                self.effects.smoke.emit(
+                    3, pos, 6.0, (0.0, 2.0, 0.0), 5.0, (0.4, 0.9),
+                    (1.5, 5.0), ((0.55, 0.55, 0.57), (0.40, 0.40, 0.42)),
+                    self.effects.rng)
             else:                           # ground_hit / aircraft_down
                 self.effects.explosion(pos, EXPLOSION_SCALE_GROUND)
                 self.app.audio.boom(pos)

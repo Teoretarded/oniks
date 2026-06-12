@@ -12,6 +12,9 @@ numpy-only). The render/effects side lives in game/sandbox.py, which drains
     ("aircraft_splash", pos)  falling aircraft hit the sea (pos[1] == 0)
     ("sam_kill", pos)         SAM proximity fuse downed an aircraft (altitude)
     ("sam_self_destruct", pos)  SAM timed/slowed out — air burst, no kill
+    ("oniks_intercepted", pos)  an interceptor fuse killed a cruise missile
+    ("ciws_burst", pos)       enemy CIWS burst fired (sim/enemy_defense.py)
+    ("ciws_kill", pos)        enemy CIWS burst downed an inbound missile
 
 All positions float64, SI units, axes per LOCKED CONVENTIONS.
 """
@@ -71,8 +74,11 @@ def launch_realtime_lock(missiles) -> bool:
     IGNITION/RIDE-OUT/PITCH-OVER/BOOST; the S-300's eject/boost ints alias
     into the same set): time accel is forced to 1x so the launch always plays
     real-time (requested rate auto-restores once every missile reaches
-    CLIMB/CRUISE — the caller re-evaluates each frame)."""
-    return any(m.alive and m.phase in LAUNCH_PHASES for m in missiles)
+    CLIMB/CRUISE — the caller re-evaluates each frame). Enemy-launched
+    rounds carry ``launch_cinematic = False`` (sim/enemy_defense.py) and
+    never lock the player's time accel."""
+    return any(m.alive and m.phase in LAUNCH_PHASES
+               and getattr(m, "launch_cinematic", True) for m in missiles)
 
 
 class WorldState:
@@ -170,6 +176,12 @@ class WorldState:
                 kind = "sam_kill"
             elif getattr(m, "self_destructed", False):
                 kind = "sam_self_destruct"
+            elif m.impact_pos is None:
+                # Killed mid-air by an interceptor fuse (COMBAT: an SM-2
+                # downing an Oniks): no surface was ever touched, so this
+                # must not classify as a terrain strike or splash.
+                m.impact_pos = m.pos.copy()
+                kind = "oniks_intercepted"
             elif m.impact_pos[1] > 1e-6:
                 kind = "ground_hit"
             else:

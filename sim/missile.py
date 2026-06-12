@@ -343,6 +343,13 @@ class Missile:
         """HUD phase text (duck-typed across Missile and SamMissile)."""
         return PHASE_LABELS.get(self.phase, "---")
 
+    def velocity(self):
+        """World-space velocity (3,) float64 — the shared targetable
+        duck-type (Ship/Aircraft expose the same): an interceptor's PN and
+        proximity fuse (sim/sam.py) read the target through it, which is
+        how an SM-2 engages an Oniks in COMBAT mode."""
+        return self.vel
+
     # --- mid-flight retargeting (Task RTG) -------------------------------------
 
     @property
