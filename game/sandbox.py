@@ -57,6 +57,7 @@ from models.ships_models import build_cargo, build_tanker, build_warship
 from models.structures import (build_fuel_depot, build_harbor,
                                build_radar_station)
 from sim.aircraft import AC_FALLING, AC_GONE
+from sim.arsenal import N40N6
 from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
                          PH_PITCHOVER, PH_RIDEOUT, PH_TERMINAL)
 from sim.physics import GRAVITY
@@ -177,6 +178,12 @@ HARBOR_SEAWARD_OFFSET = -260.0
 HINT_SECONDS = 2.5             # HUD flash time for invalid-launch hints
 HINT_S300_AIR = "S-300: SELECT AIR TARGET"
 HINT_S300_EMPTY = "S-300: BATTERY EMPTY"
+# Phase 5b round select (V): the 40N6 very-long-range round shares the TEL
+# with the 48N6 (sim/arsenal.py N40N6; separate 2-round stock).
+HINT_ROUND_48N6 = "S-300: 48N6 SELECTED"
+HINT_ROUND_40N6 = "S-300: 40N6 SELECTED (HIGH TARGETS, 380 KM)"
+HINT_40N6_LOW = "40N6: TARGET BELOW 4 KM ENGAGEMENT FLOOR"
+HINT_40N6_EMPTY = "40N6: ROUNDS EXPENDED"
 HINT_ONIKS_SURFACE = "ONIKS: SELECT SURFACE TARGET"
 HINT_RADAR_EMITTING = "RADAR: EMITTING"
 HINT_RADAR_SILENT = "RADAR: SILENT"
@@ -264,6 +271,7 @@ class SandboxState(GameState):
         # never blocks the main thread (it shows BUILDING MAP if early).
         tactical_map.ensure_map_pixels_async()
         self.active_platform = "bastion"   # TAB toggles bastion <-> s300
+        self.sam_round = "48n6"         # V toggles the S-300 round (5b)
         self.hint_text = ""             # transient HUD hint line
         self.hint_left = 0.0            # real seconds the hint stays up
 
@@ -397,6 +405,17 @@ class SandboxState(GameState):
                        else HINT_RADAR_SILENT)
         self.app.audio.ui_click()
 
+    def cycle_sam_round(self) -> str:
+        """V (sam_round binding): toggle the round the next S-300 launch
+        uses — 48N6 (default, 4 rounds) <-> 40N6 (very-long-range vs HIGH
+        targets, 2 rounds, ACTIVE terminal seeker; sim/arsenal.py).  The
+        HUD/map S-300 readouts show the selection and both stocks."""
+        self.sam_round = "40n6" if self.sam_round == "48n6" else "48n6"
+        self.show_hint(HINT_ROUND_40N6 if self.sam_round == "40n6"
+                       else HINT_ROUND_48N6)
+        self.app.audio.ui_click()
+        return self.sam_round
+
     def _selected_air_track(self):
         """The selected contact's track if it is a live air track, else None."""
         sid = self.tactical_map.selected_contact
@@ -465,13 +484,26 @@ class SandboxState(GameState):
         return m
 
     def _request_sam_launch(self):
-        if self._selected_air_track() is None:
+        track = self._selected_air_track()
+        if track is None:
             self.show_hint(HINT_S300_AIR)
             return None
-        if self.world.sam_ammo <= 0:
+        if self.sam_round == "40n6":
+            # Round-specific gates surfaced as hints BEFORE the launch
+            # call (launch_sam returns a bare None for every refusal):
+            # empty 40N6 stock, and the 4 km engagement floor checked on
+            # the CONTACT picture — the player acts on what they know.
+            if self.world.sam_ammo_40n6 <= 0:
+                self.show_hint(HINT_40N6_EMPTY)
+                return None
+            if float(track["pos"][1]) < N40N6.min_intercept_alt:
+                self.show_hint(HINT_40N6_LOW)
+                return None
+        elif self.world.sam_ammo <= 0:
             self.show_hint(HINT_S300_EMPTY)
             return None
-        m = self.world.launch_sam(self.tactical_map.selected_contact)
+        m = self.world.launch_sam(self.tactical_map.selected_contact,
+                                  round_id=self.sam_round)
         if m is not None:                   # None while the tube reloads
             self.followed = m
             self.rig.retarget()             # smooth swing onto the new round

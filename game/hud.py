@@ -25,7 +25,7 @@ from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.keybinds import ACTIONS
 from game.states import (ACCENT_DIM, BG0, MUTED, TEXT_COL, draw_header_rule,
                          draw_panel)
-from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
+from sim.arsenal import BASTION, N40N6, N40N6_AMMO, ONIKS, S300, S300_TEL
 from sim.physics import mach
 from sim.recon import RWR_LOCK
 from world.generation import BASE_POS, SAM_SITE_POS
@@ -57,10 +57,14 @@ TERMINAL_COL = (1.00, 0.55, 0.40, 1.0)       # TERMINAL phase pops red-ish
 DANGER_COL = (1.00, 0.36, 0.24, 1.0)         # destroyed / defeat (states.py DANGER)
 
 # COMBAT Phase 3: radar-silence readout + the lose-condition banner.
+# Phase 5b adds the mirrored win banner (spec 2.2: all enemy ships + the
+# airfield destroyed — world/combat.py ``victorious``).  Defeat outranks
+# victory if both somehow latch in one frame (losing the Bastion is final).
 RADAR_EMITTING = "EMITTING"
 RADAR_SILENT = "SILENT"
 RADAR_DESTROYED = "DESTROYED"
 DEFEAT_TEXT = "BASTION DESTROYED - DEFEAT"
+VICTORY_TEXT = "ENEMY FORCE DESTROYED - VICTORY"
 DEFEAT_Y_FRAC = 0.24        # banner center height as a fraction of the screen
 DEFEAT_PAD_X = 28           # px panel padding around the banner text
 DEFEAT_PAD_Y = 18
@@ -129,6 +133,38 @@ def drone_panel_rows(world) -> list[tuple]:
     else:
         rows.append(("RWR", "CLEAR", ARMED_COL))
     return rows
+
+
+def s300_round_panel(world, sam_round: str):
+    """S-300 readout with the Phase-5b round select — pure, unit-testable
+    (shared by the HUD panel and the tactical-map strip).
+
+    Returns ``(status, color, weapon_name, ammo_text)``: status reflects
+    the SELECTED round's readiness (its own stock + the shared tube
+    reload timer — both rounds index through the same 5P85 reload cycle,
+    world/world.py launch_sam doc); ammo_text always shows BOTH stocks so
+    the player sees the whole magazine at a glance.
+    """
+    if sam_round == "40n6":
+        ammo = world.sam_ammo_40n6
+        armed = world.sam_40n6_launcher_armed
+        name = N40N6.display_name.upper()
+    else:
+        ammo = world.sam_ammo
+        armed = world.sam_launcher_armed
+        name = S300.display_name.upper()
+    if ammo <= 0:
+        status, col = "EMPTY", RELOAD_COL
+    elif armed:
+        status, col = "ARMED", ARMED_COL
+    else:
+        # Epsilon: fixed-step decrements leave the timer ~1e-13 above the
+        # exact second, which would ceil one second too high.
+        status = f"RELOADING {int(np.ceil(world.sam_reload_left - 1e-9))} s"
+        col = RELOAD_COL
+    ammo_text = (f"48N6 {world.sam_ammo}/{S300_TEL.ammo} "
+                 f"40N6 {world.sam_ammo_40n6}/{N40N6_AMMO}")
+    return status, col, name, ammo_text
 
 
 def overlay_rows(keybinds) -> list[tuple]:
@@ -219,7 +255,9 @@ class HUD:
         else:
             self._launcher_block(sandbox)
         if getattr(sandbox.world, "defeated", False):
-            self._defeat_banner(w, h)
+            self._banner(w, h, DEFEAT_TEXT, DANGER_COL)
+        elif getattr(sandbox.world, "victorious", False):
+            self._banner(w, h, VICTORY_TEXT, ARMED_COL)
         self._hint_flash(sandbox, w, h)
         self._corner_labels(sandbox, w, h)
         if sandbox.controls_overlay:
@@ -332,18 +370,12 @@ class HUD:
 
     def _s300_block(self, sandbox) -> None:
         world = sandbox.world
-        if world.sam_ammo <= 0:
-            status, col = "EMPTY", RELOAD_COL
-        elif world.sam_launcher_armed:
-            status, col = "ARMED", ARMED_COL
-        else:
-            status = ("RELOADING "
-                      f"{int(np.ceil(world.sam_reload_left - 1e-9))} s")
-            col = RELOAD_COL
+        sam_round = getattr(sandbox, "sam_round", "48n6")
+        status, col, name, ammo_text = s300_round_panel(world, sam_round)
         rows = [
             ("STATUS", status, col),
-            ("WEAPON", S300.display_name.upper(), VALUE_COL),
-            ("AMMO", f"{world.sam_ammo}/{S300_TEL.ammo}", VALUE_COL),
+            ("WEAPON", name, VALUE_COL),
+            ("AMMO", ammo_text, VALUE_COL),
             ("TARGET", self._target_summary(sandbox, SAM_SITE_POS),
              VALUE_COL),
         ]
@@ -374,17 +406,18 @@ class HUD:
             txt += " (launch)"      # accel locked to 1x through the cinematic
         return txt
 
-    def _defeat_banner(self, w: int, h: int) -> None:
-        """COMBAT lose condition (spec 2.2): a centered corner-ticked panel
-        in the menu chrome over the still-running sim — the player watches
-        the aftermath; full end-screens come in Phase 7."""
+    def _banner(self, w: int, h: int, text: str, color) -> None:
+        """COMBAT outcome banner (spec 2.2 — DEFEAT red / VICTORY green):
+        a centered corner-ticked panel in the menu chrome over the
+        still-running sim — the player watches the aftermath; full
+        end-screens come in Phase 7."""
         lh = self.text.line_height(HEADER_SIZE)
-        tw = self.text.text_width(DEFEAT_TEXT, HEADER_SIZE)
+        tw = self.text.text_width(text, HEADER_SIZE)
         x = (w - tw) * 0.5
         y = h * DEFEAT_Y_FRAC - lh * 0.5
         draw_panel(self.text, x - DEFEAT_PAD_X, y - DEFEAT_PAD_Y,
                    tw + 2 * DEFEAT_PAD_X, lh + 2 * DEFEAT_PAD_Y, alpha=0.92)
-        self.text.draw_text(x, y, DEFEAT_TEXT, DANGER_COL, HEADER_SIZE)
+        self.text.draw_text(x, y, text, color, HEADER_SIZE)
 
     # ----------------------------------------------- hints + corner labels
 

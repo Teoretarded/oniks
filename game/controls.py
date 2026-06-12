@@ -181,6 +181,8 @@ class SandboxControls:
             sandbox.profile = "lo-lo"
         elif action == "radar_toggle":
             sandbox.toggle_radar()
+        elif action == "sam_round":
+            sandbox.cycle_sam_round()
         elif action == "pause":
             app.paused = not app.paused
         elif action == "frame_step":

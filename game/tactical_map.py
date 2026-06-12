@@ -22,7 +22,7 @@ import numpy as np
 import pygame
 
 from engine.text import BODY_SIZE, HEADER_SIZE
-from sim.arsenal import ONIKS, S300, S300_TEL
+from sim.arsenal import ONIKS, S300
 from sim.sam import SamMissile
 from world.generation import (BASE_POS, LANES, SAM_SITE_POS, SEED, SITES,
                               terrain_height, terrain_height_scalar)
@@ -746,18 +746,25 @@ class TacticalMap:
                                     RING_TEXT_COL)
 
     def _sam_ring(self) -> None:
-        """The S-300's 150 km guided envelope around the SAM site, shown
-        while the platform is active (Task S4: it teaches what's in range)."""
+        """The SELECTED round's guided envelope around the SAM site, shown
+        while the platform is active (Task S4: it teaches what's in range;
+        Phase 5b: the V round select swaps the ring — 48N6 150 km vs the
+        40N6's 380 km high-target reach)."""
         if self.sandbox.active_platform != "s300":
             return
+        from sim.arsenal import N40N6
+        sam_round = getattr(self.sandbox, "sam_round", "48n6")
+        weapon = N40N6 if sam_round == "40n6" else S300
         cx, cz = SAM_SITE_POS[0], SAM_SITE_POS[2]
         ang = np.linspace(0.0, 2.0 * np.pi, RING_SEGMENTS + 1)
-        r = S300.max_range
+        r = weapon.max_range
         self._poly_world(zip(cx + r * np.sin(ang), cz + r * np.cos(ang)),
                          SAM_RING_COL, 1.5)
         lx, ly = self.view.world_to_screen((cx, cz + r))
         if self._on_screen(lx, ly):
-            self.text.draw_text(lx + 4, ly - 18, "S-300 150 km", SAM_RING_COL)
+            self.text.draw_text(lx + 4, ly - 18,
+                                f"{sam_round.upper()} {r / 1e3:.0f} km",
+                                SAM_RING_COL)
 
     def _lanes(self) -> None:
         for lane in LANES:
@@ -1034,17 +1041,14 @@ class TacticalMap:
                         f"{int(np.ceil(left - 1e-9))} s")
                 col = RELOAD_COL
         elif sandbox.active_platform == "s300":
-            if world.sam_ammo <= 0:
-                status, col = "EMPTY", RELOAD_COL
-            elif world.sam_launcher_armed:
-                status, col = "ARMED", ARMED_COL
-            else:
-                status = ("RELOADING "
-                          f"{int(np.ceil(world.sam_reload_left - 1e-9))} s")
-                col = RELOAD_COL
-            line = (f"S-300 {status}   "
-                    f"AMMO {world.sam_ammo}/{S300_TEL.ammo}   "
-                    f"{self._target_text()}")
+            # Phase 5b round select: the strip shows the SELECTED round's
+            # readiness + both stocks (game/hud.py pure helper).
+            from game.hud import s300_round_panel
+            sam_round = getattr(sandbox, "sam_round", "48n6")
+            status, col, _name, ammo_text = s300_round_panel(world,
+                                                             sam_round)
+            line = (f"S-300 {status}   RND {sam_round.upper()}   "
+                    f"{ammo_text}   {self._target_text()}")
         else:
             if world.launcher_armed:
                 status, col = "ARMED", ARMED_COL

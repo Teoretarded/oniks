@@ -73,6 +73,9 @@ ACTIONS: tuple[ActionDef, ...] = (
     # emissions. R is unclaimed by every other default; in SANDBOX (no
     # radar station) the action is a graceful no-op.
     ActionDef("radar_toggle", "RADAR EMISSIONS", "ENGAGEMENT", pygame.K_r),
+    # S-300 round select (Phase 5b): toggles the 48N6 <-> 40N6 round the
+    # next SAM launch uses. V is unclaimed by every other default.
+    ActionDef("sam_round", "S-300 ROUND SELECT", "ENGAGEMENT", pygame.K_v),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),
