@@ -204,11 +204,18 @@ class _RelTarget:
 
 
 class ShipDefense:
-    """One destroyer's fire control: track store + SM-2 channel + CIWS."""
+    """One destroyer's fire control: track store + SM-2 channel + CIWS.
 
-    def __init__(self, ship, rng):
+    ``cue_radars_fn`` (COMBAT Phase 5a, spec section 3 "enemy ships rely
+    on their own radar or AWACS cueing"): an optional () -> [Radar]
+    closure of EXTERNAL datalinked detectors (the AWACS) that contribute
+    to track FORMATION only — see _detects below for the SARH seam.
+    None (the default) preserves Phase-2/3/4 behavior exactly."""
+
+    def __init__(self, ship, rng, cue_radars_fn=None):
         self.ship = ship
         self.rng = rng          # shared side rng: CIWS rolls + SM-2 noise seeds
+        self._cue_radars_fn = cue_radars_fn
         self.ciws = Ciws(ship.ciws_ammo, rng)
         # id(missile) -> dict(missile, t_next, since, pos, vel, age):
         # the same cadence/sustain gating shape as ContactBoard._vis, plus
@@ -222,6 +229,26 @@ class ShipDefense:
         self._drone_inflight: list[tuple] = []  # (SamMissile, aircraft_id)
 
     # -------------------------------------------------------------- tracking
+
+    def _detects(self, pos, size_class):
+        """Track-formation detection: the ship's own SPY-1, OR any
+        datalinked cueing radar (Phase 5a: the AWACS — spec section 3).
+
+        The cue feeds DETECTION only.  A destroyer may launch an SM-2 on
+        a track the AWACS holds before its own radar ever sees the
+        target (the midcourse flies on this controller's dead-reckoned
+        picture regardless of which sensor refreshed it), but the SARH
+        terminal phase is untouched: sim/sam.py's lock-break check still
+        runs from the LAUNCHING SHIP's illuminator (_illuminator below),
+        so a round whose own ship never gains line of sight by terminal
+        goes stupid exactly as before.  That is the real Aegis/CEC seam:
+        remote cue, local illumination."""
+        if self.ship.radar.detects(pos, size_class):
+            return True
+        if self._cue_radars_fn is None:
+            return False
+        return any(r.detects(pos, size_class)
+                   for r in self._cue_radars_fn())
 
     def _update_tracks(self, hostiles, now, dt):
         live_keys = set()
@@ -237,7 +264,7 @@ class ShipDefense:
                 st["age"] += dt
             if now >= st["t_next"]:
                 st["t_next"] = now + VIS_CHECK_PERIOD
-                if self.ship.radar.detects(m.pos, "missile"):
+                if self._detects(m.pos, "missile"):
                     if st["since"] is None:
                         st["since"] = now
                     st["pos"] = m.pos.copy()    # fresh fire-control fix
@@ -270,7 +297,7 @@ class ShipDefense:
                 st["age"] += dt
             if now >= st["t_next"]:
                 st["t_next"] = now + VIS_CHECK_PERIOD
-                if self.ship.radar.detects(d.pos, d.radar_size):
+                if self._detects(d.pos, d.radar_size):
                     if st["since"] is None:
                         st["since"] = now
                     st["pos"] = d.pos.copy()    # fresh fire-control fix
@@ -479,11 +506,13 @@ class ShipDefense:
 
 class EnemyDefenseController:
     """All destroyers' defenses, stepped after the base world step
-    (world/combat.py CombatWorld.step)."""
+    (world/combat.py CombatWorld.step).  ``cue_radars_fn`` fans the
+    shared datalink cue (the AWACS) into every ship's fire control."""
 
-    def __init__(self, destroyers, rng=None):
+    def __init__(self, destroyers, rng=None, cue_radars_fn=None):
         rng = np.random.default_rng(0) if rng is None else rng
-        self.units = [ShipDefense(d, rng) for d in destroyers]
+        self.units = [ShipDefense(d, rng, cue_radars_fn=cue_radars_fn)
+                      for d in destroyers]
 
     def step(self, world, dt):
         for unit in self.units:
