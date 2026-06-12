@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import math
 import collections
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import numpy as np
 
@@ -78,14 +78,31 @@ FIGHTER_ALT_M: float = 9_000.0
 # Real F/A-18 sustained turn is ~6 deg/s at sea-level; at altitude ~3 deg/s.
 FIGHTER_TURN_RATE: float = math.radians(3.0)   # rad/s
 
-# Fighter endurance: 2 400 s (~40 min) of airborne time before bingo.
-# Rationale: combat radius ~740 km at cruise gives ~2×740/240 ≈ 3 700 s
-# for a full round trip, so 2 400 s is a conservative internal-fuel fraction
-# ensuring a fighter RTBs with reserve before true fuel exhaustion.
-FIGHTER_ENDURANCE_S: float = 2_400.0
+# Fighter endurance: 3 600 s (60 min) of airborne time before dry tanks.
+# Rationale: real F/A-18E interdiction combat radius is ~720-740 km — a
+# 1 440+ km round trip ≈ 6 000 s at the 240 m/s cruise — so 3 600 s
+# (~864 km of total track) is still a conservative internal-fuel fraction.
+# The 5a value (2 400 s) was sized for the CAP-only war at the 160 km
+# anchor; the 5b strike geometry measured longer legs (airfield -> HARM
+# standoff ~100 km off the player radar -> carrier recovery ≈ 620 km
+# ≈ 2 580 s of track), which 2 400 s could never cover with reserve.
+FIGHTER_ENDURANCE_S: float = 3_600.0
 
 # Bingo fuel threshold: 20 % of total endurance remaining forces RTB.
+# This static floor is the OUTER bound; the live bingo check also computes
+# the ACTUAL reserve needed for the RTB leg (distance to the nearest
+# surviving base — 5a verifier OPEN item: a constant fraction can strand a
+# deep-strike fighter dry short of home) and RTBs on whichever bites first.
 FIGHTER_BINGO_FRAC: float = 0.20
+
+# Dynamic RTB reserve model (5b, replaces "hope 20 % is enough"):
+# reserve_s = (distance to nearest surviving base / cruise speed)
+#             × RTB_RESERVE_FACTOR + RTB_RESERVE_FIXED_S.
+# Factor 1.15 covers the rate-limited turn-in and routing slack; the fixed
+# 120 s covers approach + landing pattern (descent runs at cruise speed on
+# the 4 deg glide, so it is already inside the distance/speed term).
+RTB_RESERVE_FACTOR: float = 1.15
+RTB_RESERVE_FIXED_S: float = 120.0
 
 # Takeoff/climb speed (slower while in ground effect climbing out).
 FIGHTER_CLIMB_SPEED_MPS: float = 120.0
@@ -94,7 +111,17 @@ FIGHTER_CLIMB_SPEED_MPS: float = 120.0
 FIGHTER_CLIMB_RATE_MPS: float = 30.0
 
 # Landing descent rate: gentle 5 m/s (300 ft/min), carrier/airfield compatible.
+# Only the FINAL approach uses this — the RTB leg flies a glide profile
+# (RTB_GLIDE_TAN below), so the airframe arrives at the 5 km gate already
+# at pattern altitude instead of hovering down from 9 km (5a OPEN item:
+# the old constant-altitude RTB + 5 m/s descent read as a ~30 min landing).
 FIGHTER_DESCENT_RATE_MPS: float = 5.0
+
+# RTB en-route descent: a 4 deg glide (the 3-5 deg airliner/fighter descent
+# band) — the fighter holds cruise altitude until the glide profile to the
+# base intersects it, then rides the profile down at cruise speed
+# (sink rate = cruise × tan(4 deg) ≈ 16.8 m/s).
+RTB_GLIDE_TAN: float = math.tan(math.radians(4.0))
 
 # Rearm time: 90 s per fighter, one at a time per base (spec §5.1).
 REARM_S: float = 90.0
@@ -105,6 +132,41 @@ FIGHTER_ORBIT_HALF_LEN_M: float = 50_000.0  # 50 km legs — wide CAP coverage
 # Map-edge egress distance: fighters fly to this distance from world centre
 # when both bases dead before transitioning to GONE.
 MAP_EDGE_EGRESS_M: float = 700_000.0   # 700 km, safely beyond the scenario area
+
+# --- Weapons employment constants ---
+
+# IR missile fire parameters (AIM-9X class via sim.a2a.IrMissile).
+# Imported lazily (inside methods) to avoid circular-import risk and to keep
+# sim/enemy_air.py GL-free even if a2a.py ever imports rendering helpers.
+
+# Strike ingress: fighters with HARM payloads run SILENT (radar.emitting=False)
+# while inbound to avoid painting themselves as HARM targets.  The radar
+# flips ON at the pop-up range (HARM_POPUP_RANGE_M) for the final target
+# acquisition sweep, then the round is released.  The radar emits while on
+# station in the intercept role — the fighter NEEDS to see the target.
+HARM_POPUP_RANGE_M: float = 30_000.0   # m from target where radar turns on
+
+# JASSM standoff release range: 150 km from target (inside JASSM's 370 km
+# range with plenty of fuel; stays well behind the player S-300 envelope
+# if the radar is down, so the fighter never enters the SAM engagement zone).
+JASSM_RELEASE_RANGE_M: float = 150_000.0   # m
+
+# HARM max engagement range (matched to arsenal HARM.max_range = 110 km;
+# the fire solution is valid at this range).
+HARM_RELEASE_RANGE_M: float = 100_000.0    # m (10 km inside the max for margin)
+
+# IR missile intercept range: fire inside the rear-hemisphere lock range
+# (8 km) with a comfortable 2 km buffer so the seeker has time to track.
+IR_FIRE_RANGE_M: float = 6_000.0    # m
+
+# Default fighter hardpoints per sortie (4 stations):
+# Strike loadout: 2x JASSM (stations 1, 2), 2x AIM-9X (stations 3, 4).
+# SEAD loadout:   2x HARM  (stations 1, 2), 2x AIM-9X (stations 3, 4).
+# CAP loadout:    4x AIM-9X.
+# Loadout is a list of weapon_id strings; empty string = empty station.
+LOADOUT_STRIKE: tuple = ("jassm", "jassm", "aim9x", "aim9x")
+LOADOUT_SEAD:   tuple = ("harm",  "harm",  "aim9x", "aim9x")
+LOADOUT_CAP:    tuple = ("aim9x", "aim9x", "aim9x", "aim9x")
 
 # Nose-radar forward half-cone: ±60 deg.
 FIGHTER_RADAR_FOV_HALF: float = math.radians(60.0)
@@ -220,7 +282,23 @@ class AirBase:
             self._rearm_queue.append(fighter)
 
     def update(self, dt: float) -> None:
-        """Advance the rearm queue; fires fighter.rearm_complete() when done."""
+        """Advance the rearm queue; fires fighter.rearm_complete() when done.
+
+        Dead base (5a verifier OPEN item): a cratered runway / sinking
+        carrier ABORTS every in-progress and queued rearm — nobody
+        'rearms' at a crater.  The airframes strand PARKED at the dead
+        site with whatever they landed with (hardpoints stay empty, fuel
+        stays zero): a clear, inert state.  ``Fighter.launch`` refuses a
+        dead base, so a stranded fighter is out of the war unless a later
+        phase adds a ground-relocation order.  The carrier case is the
+        same check by construction — ``alive`` reads the hull's ladder."""
+        if not self.alive:
+            while self._rearm_queue:
+                fighter = self._rearm_queue.popleft()
+                self.parked.append(fighter)
+                fighter._strand()
+            self._rearm_timer = 0.0
+            return
         if not self._rearm_queue:
             self._rearm_timer = 0.0
             return
@@ -461,7 +539,11 @@ class Fighter:
 
         self.state: int = FS_PARKED
         self.pos: np.ndarray = base.pos.copy()
-        self.pos[1] = 0.0           # on the ground
+        # On the ground AT FIELD ELEVATION (5a OPEN item: fighters used to
+        # park/land at y=0 even on the 140 m-elevation airfield).  The
+        # base site's pos[1] is the terrain pin for the airfield Structure
+        # and the waterline for the carrier (deck offset is Phase-8 polish).
+        self.pos[1] = float(base.pos[1])
         self.heading: float = 0.0
         self._speed: float = 0.0    # current airspeed m/s
 
@@ -488,6 +570,34 @@ class Fighter:
         self._fall_t: float = 0.0
         self.impact_pos: Optional[np.ndarray] = None
         self.hp: int = 1
+
+        # --- Weapons employment (Phase 5b) ------------------------------------
+        # Hardpoints: list of weapon_id strings, consumed on release.
+        # Initialised empty; the commander / rearm cycle fills on next launch
+        # via assign_loadout().  '_loadout_pending' holds the loadout to apply
+        # on next takeoff (set by execute_order while parked).
+        self._hardpoints: List[str] = []          # live weapons on pylons
+        self._loadout_pending: tuple = LOADOUT_CAP  # default: CAP load
+        # Intercept order target: duck-typed target entity (e.g. ReconDrone)
+        # the commander pointed us at.  None = no intercept order active.
+        self._intercept_target = None
+        # Strike order state: target XZ coordinate (from the commander order)
+        # plus the terminal aim altitude ASL for JASSM releases (structures
+        # on elevated terrain need their mid-height — sim/strike.py
+        # StrikeMissile target_y doc; the integrator computes it because it
+        # owns the map knowledge).
+        self._strike_target_xz: Optional[np.ndarray] = None
+        self._strike_target_y: float = 0.0
+        # SEAD order state: the Radar object the HARMs home on (the seeker
+        # physically chases the EMISSIONS — sim/strike.py HarmMissile gates
+        # on radar.emitting, so a silenced radar degrades the shot to the
+        # CEP-offset last-known point; no truth peeking) and the seeded
+        # generator for that deterministic miss offset.
+        self._sead_target_radar = None
+        self._sead_rng = None
+        # Missiles spawned by this fighter (handed to the world's missile list
+        # by the caller of release_weapons(); stored here for emission state mgmt).
+        self._released_missiles: List = []
 
     # -----------------------------------------------------------------------
     # Duck-type interface (ContactBoard / seeker)
@@ -569,9 +679,30 @@ class Fighter:
         self.pos[0] += math.sin(self.heading) * speed * dt
         self.pos[2] += math.cos(self.heading) * speed * dt
 
-    def _bingo(self) -> bool:
-        """True when airborne fuel is at or below bingo threshold."""
-        return self._fuel_s >= self._bingo_s
+    def _bingo(self, bases: Optional[list] = None) -> bool:
+        """True when remaining fuel forces RTB.
+
+        Two triggers, whichever bites first (5a verifier OPEN item):
+          * the static 20 %-of-endurance floor (``_bingo_s``), and
+          * the ACTUAL reserve for the RTB leg — remaining endurance no
+            longer covers flying to the nearest surviving base at cruise
+            plus the routing/approach margin (RTB_RESERVE_* above).
+        A deep-strike fighter therefore turns home exactly when physics
+        demands it, not when an arbitrary fraction says so.  With no
+        surviving base the dynamic term is moot (egress handles it)."""
+        if self._fuel_s >= self._bingo_s:
+            return True
+        if not bases:
+            return False
+        target = nearest_surviving_base(self.pos, bases)
+        if target is None:
+            return False
+        bpos = target.pos
+        dist = math.hypot(float(bpos[0]) - float(self.pos[0]),
+                          float(bpos[2]) - float(self.pos[2]))
+        reserve_s = (dist / FIGHTER_CRUISE_MPS * RTB_RESERVE_FACTOR
+                     + RTB_RESERVE_FIXED_S)
+        return FIGHTER_ENDURANCE_S - self._fuel_s <= reserve_s
 
     def _set_transit_to(self, dest_xz: np.ndarray) -> None:
         """Set up a single-waypoint TRANSIT to the given XZ destination."""
@@ -659,7 +790,11 @@ class Fighter:
         self.state = FS_RTB
 
     def _update_rtb(self, dt: float) -> None:
-        """Fly toward the assigned recovery base."""
+        """Fly toward the assigned recovery base, descending EN ROUTE on a
+        4 deg glide (5a OPEN item: the old constant-altitude RTB left a
+        9 km descent to the 5 m/s landing crawl — a ~30 min hover-down).
+        The fighter holds cruise altitude until the glide profile from the
+        base intersects it, then rides the profile at cruise speed."""
         bpos = self._base.pos
         tx, tz = float(bpos[0]), float(bpos[2])
         self._turn_toward(tx, tz, dt)
@@ -667,21 +802,33 @@ class Fighter:
         dx = tx - float(self.pos[0])
         dz = tz - float(self.pos[2])
         dist = math.hypot(dx, dz)
-        # Within landing approach distance → start descent.
+        # Glide profile: field elevation + 4 deg slope from the base.
+        profile_alt = float(bpos[1]) + dist * RTB_GLIDE_TAN
+        if self.pos[1] > profile_alt:
+            sink = FIGHTER_CRUISE_MPS * RTB_GLIDE_TAN * dt
+            self.pos[1] = max(profile_alt, self.pos[1] - sink)
+        # Within landing approach distance → start the final descent
+        # (~350 m above field on the glide — seconds at 5 m/s, not minutes).
         if dist < 5_000.0:
             self.state = FS_LANDING
 
     def _update_landing(self, dt: float) -> None:
-        """Descend and decelerate; enter REARMING when on the ground."""
+        """Descend and decelerate; enter REARMING on touchdown.
+
+        Touchdown is at FIELD ELEVATION — the base site's pos[1] (terrain
+        pin for the airfield, waterline for the carrier) — never a flat
+        y=0 (5a OPEN item: jets used to 'land' 140 m under the runway)."""
         bpos = self._base.pos
+        field_y = float(bpos[1])
         tx, tz = float(bpos[0]), float(bpos[2])
         self._turn_toward(tx, tz, dt)
         if self._speed > 50.0:
             self._speed = max(50.0, self._speed - 40.0 * dt)
         self._move_horizontal(self._speed, dt)
-        self.pos[1] = max(0.0, self.pos[1] - FIGHTER_DESCENT_RATE_MPS * dt)
-        if self.pos[1] <= 0.0:
-            self.pos[1] = 0.0
+        self.pos[1] = max(field_y,
+                          self.pos[1] - FIGHTER_DESCENT_RATE_MPS * dt)
+        if self.pos[1] <= field_y:
+            self.pos[1] = field_y
             self._speed = 0.0
             self.pos[0] = float(bpos[0])
             self.pos[2] = float(bpos[2])
@@ -730,22 +877,303 @@ class Fighter:
     def _rearm_complete(self) -> None:
         """Base calls this when the fighter's rearm slot completes."""
         self._fuel_s = 0.0              # fresh fuel
+        # Replenish hardpoints from the pending loadout (commander assigns it
+        # before the rearm completes; default is LOADOUT_CAP if unset).
+        self._hardpoints = list(self._loadout_pending)
+        self._released_missiles = []
         self.state = FS_PARKED
         # Do NOT auto-launch here — the commander AI does that in Phase 5b.
+
+    def _strand(self) -> None:
+        """Base calls this when it dies with the fighter in its rearm
+        queue: the rearm ABORTS (no fuel, no weapons — a crater arms
+        nobody).  The airframe sits PARKED at the dead site; ``launch``
+        refuses a dead base, so the state is inert and unambiguous."""
+        self.state = FS_PARKED
+
+    # -----------------------------------------------------------------------
+    # Weapons employment (Phase 5b)
+    # -----------------------------------------------------------------------
+
+    def assign_loadout(self, loadout: tuple) -> None:
+        """Set the loadout applied on the NEXT takeoff.  The commander calls
+        this while the fighter is PARKED (or as part of a rearm/retask cycle).
+        The hardpoints are not populated until the fighter actually takes off
+        so the rearm animation (rearming state) corresponds to a real
+        replenishment."""
+        self._loadout_pending = loadout
+
+    @property
+    def hardpoints(self) -> List[str]:
+        """Live weapons on pylons (list of weapon_id strings).  Consumed on
+        release; empty = WINCHESTER."""
+        return self._hardpoints
+
+    @property
+    def winchester(self) -> bool:
+        """True when all hardpoints are empty."""
+        return len(self._hardpoints) == 0
+
+    def execute_order(self, order: dict) -> None:
+        """Process a commander order dict.  Supported keys:
+
+        ``type``  (str, required):
+            "strike"    — fly to standoff_xz, release strike weapons.
+            "sead"      — fly to standoff_xz, release HARM at the radar target.
+            "intercept" — steer at target entity and fire IR missiles inside
+                          IR_FIRE_RANGE_M.
+            "rtb"       — RTB immediately (Winchester or commander pull-back).
+            "cap"       — resume patrol (CAP racetrack).
+
+        ``target`` (object, optional, for "intercept"):
+            Duck-typed target with .pos and .velocity().
+
+        ``standoff_xz`` (array-like (x, z), optional, for "strike"/"sead"):
+            Standoff waypoint at which weapons are released.
+
+        ``loadout`` (tuple of str, optional):
+            Overrides the pending loadout (applied on next takeoff).
+
+        ``bases`` (list[AirBase], optional):
+            Required for "rtb" order (same as _rtb(bases) call).
+
+        Radar emit rule:
+            "strike" ingress: SILENT until pop-up at HARM_POPUP_RANGE_M
+                (JASSM is GPS/INS — no radar needed; staying silent denies
+                the fighter's radar as a HARM target during ingress).
+            "sead" ingress:   SILENT until HARM_POPUP_RANGE_M.
+            "intercept":      EMIT (nose radar ON — must see the target).
+            "cap"/"rtb":      Follow state machine default (OFF while parked/
+                              landing, ON while on station).
+        """
+        order_type = order.get("type", "cap")
+
+        if order.get("loadout"):
+            self.assign_loadout(order["loadout"])
+
+        if order_type == "strike":
+            swp = order.get("standoff_xz")
+            if swp is not None:
+                self._strike_target_xz = np.asarray(swp, dtype=np.float64)
+                self._set_transit_to(self._strike_target_xz)
+                self.state = FS_TRANSIT
+            # Terminal aim altitude ASL (see _strike_target_y in __init__).
+            self._strike_target_y = float(order.get("target_y", 0.0))
+            # Radar SILENT during ingress (doc: strike fighters run quiet).
+            self.radar.emitting = False
+            self._intercept_target = None
+
+        elif order_type == "sead":
+            swp = order.get("standoff_xz")
+            if swp is not None:
+                self._strike_target_xz = np.asarray(swp, dtype=np.float64)
+                self._set_transit_to(self._strike_target_xz)
+                self.state = FS_TRANSIT
+            # The emitter the HARMs chase + the seeded miss-offset rng
+            # (see __init__ — emission homing, not truth peeking).
+            self._sead_target_radar = order.get("target_radar")
+            if order.get("rng") is not None:
+                self._sead_rng = order["rng"]
+            # HARM ingress: SILENT until pop-up (see HARM_POPUP_RANGE_M comment).
+            self.radar.emitting = False
+            self._intercept_target = None
+
+        elif order_type == "intercept":
+            tgt = order.get("target")
+            self._intercept_target = tgt
+            # Intercept requires the nose radar ON to reacquire at 11 km.
+            self.radar.emitting = True
+            self._strike_target_xz = None
+            if tgt is not None and self.state in (FS_ON_STATION, FS_TRANSIT):
+                # Steer directly at the target's current position.
+                tpos = np.asarray(tgt.pos, dtype=np.float64)
+                self._set_transit_to(np.array([tpos[0], tpos[2]]))
+                self.state = FS_TRANSIT
+
+        elif order_type == "rtb":
+            bases = order.get("bases", [])
+            if bases:
+                self._rtb(bases)
+            self._intercept_target = None
+            self.radar.emitting = False
+
+        elif order_type == "cap":
+            self._intercept_target = None
+            self._strike_target_xz = None
+            # CAP: on station with radar emitting per doctrine.
+            if self.state not in (FS_RTB, FS_LANDING, FS_REARMING, FS_PARKED,
+                                   FS_TAKEOFF, FS_WINCHESTER_EGRESS):
+                self._build_orbit(self._patrol_anchor_xz)
+                self.state = FS_ON_STATION
+            self.radar.emitting = True
+
+    def release_weapons(self, world_missiles: list,
+                        bases: Optional[list] = None) -> List:
+        """Check if this fighter should release weapons at its current position
+        and state.  Called by the world/commander each tick (NOT at 120 Hz —
+        at the commander 1 Hz cadence is fine; the check is cheap).
+
+        Returns a list of newly spawned missile objects added to world_missiles
+        in-place.  The caller may need to step them on the same tick.
+        ``bases`` (the world's AirBase list) routes the post-release egress —
+        omitted (tests / direct API use), the RTB order degrades to a
+        radar-silent winchester flag exactly as before.
+
+        Weapon release logic:
+            JASSM: released when within JASSM_RELEASE_RANGE_M of the strike
+                   target.  One per call; aims at _strike_target_y ASL (the
+                   integrator's structure mid-height).
+            HARM:  radar turns ON at HARM_POPUP_RANGE_M from the target (the
+                   final own-sensor sweep); released within
+                   HARM_RELEASE_RANGE_M.  With a ``target_radar`` wired by
+                   the sead order the round is a true HarmMissile homing on
+                   the EMITTER (silence degrades it to the seeded CEP
+                   offset); with none, a coordinate-aimed StrikeMissile.
+            AIM-9X: released when an intercept target is within IR_FIRE_RANGE_M
+                    and aspect_ok passes.  One missile per call; subsequent
+                    calls fire the next IR round.
+            EGRESS: all air-to-ground weapons expended -> RTB (spec 5.1
+                    behavior loop ... LAUNCH -> EGRESS -> LAND; without this
+                    a SEAD jet with its 2 leftover AIM-9X would press on
+                    into the SAM envelope it just shot at).
+
+        Enemy releases never lock the player's time accel
+        (``launch_cinematic = False`` — sim/enemy_defense.py pattern).
+
+        Returns [] when no weapon conditions are met.
+        """
+        from sim.arsenal import JASSM as _JASSM_DEF, HARM as _HARM_DEF
+        from sim.strike import HarmMissile, StrikeMissile
+        from sim.a2a import IrMissile
+        _IR_FIRE_RANGE = IR_FIRE_RANGE_M   # module constant
+
+        new_missiles: List = []
+
+        if self.state not in (FS_TRANSIT, FS_ON_STATION):
+            return new_missiles
+
+        pos = self.pos
+        vel = self.velocity()
+
+        # --- JASSM / SEAD release ---
+        if self._strike_target_xz is not None:
+            # Check jassm or harm in hardpoints
+            for i, wpn in enumerate(self._hardpoints):
+                if wpn == "jassm":
+                    dx = float(self._strike_target_xz[0]) - float(pos[0])
+                    dz = float(self._strike_target_xz[1]) - float(pos[2])
+                    if math.hypot(dx, dz) <= JASSM_RELEASE_RANGE_M:
+                        m = StrikeMissile(
+                            _JASSM_DEF,
+                            pos_f64=pos.copy(),
+                            vel_f64=vel,
+                            target_xz=(float(self._strike_target_xz[0]),
+                                       float(self._strike_target_xz[1])),
+                            target_y=self._strike_target_y,
+                        )
+                        m.launch_cinematic = False
+                        self._hardpoints.pop(i)
+                        world_missiles.append(m)
+                        new_missiles.append(m)
+                    break
+
+                elif wpn == "harm":
+                    # Pop-up for HARM: switch radar ON at popup range
+                    tx, tz = float(self._strike_target_xz[0]), float(self._strike_target_xz[1])
+                    dist = math.hypot(tx - float(pos[0]), tz - float(pos[2]))
+                    if dist <= HARM_POPUP_RANGE_M:
+                        self.radar.emitting = True
+                    if dist <= HARM_RELEASE_RANGE_M:
+                        radar = self._sead_target_radar
+                        if radar is not None:
+                            # True anti-radiation round: homes on the
+                            # emitter; the rng seeds the deterministic
+                            # silence miss offset (sim/strike.py).  The
+                            # seed-0 fallback keeps direct API calls
+                            # deterministic; the world always wires one.
+                            rng = (self._sead_rng if self._sead_rng
+                                   is not None else np.random.default_rng(0))
+                            m = HarmMissile(
+                                _HARM_DEF,
+                                pos_f64=pos.copy(),
+                                vel_f64=vel,
+                                target_radar=radar,
+                                rng=rng,
+                            )
+                        else:
+                            # No emitter wired: coordinate shot at the
+                            # last-known point (a HARM fired in memory mode).
+                            m = StrikeMissile(
+                                _HARM_DEF,
+                                pos_f64=pos.copy(),
+                                vel_f64=vel,
+                                target_xz=(tx, tz),
+                                target_y=0.0,
+                            )
+                        m.launch_cinematic = False
+                        self._hardpoints.pop(i)
+                        world_missiles.append(m)
+                        new_missiles.append(m)
+                    break
+
+        # --- AIM-9X (IR) release --- intercept target
+        if self._intercept_target is not None and self._intercept_target.alive:
+            for i, wpn in enumerate(self._hardpoints):
+                if wpn == "aim9x":
+                    tpos = np.asarray(self._intercept_target.pos, dtype=np.float64)
+                    tvel = np.asarray(self._intercept_target.velocity(),
+                                      dtype=np.float64)
+                    can_lock, _ = IrMissile.aspect_ok(
+                        pos, tpos, tvel, self.heading)
+                    dist = float(np.linalg.norm(tpos - pos))
+                    if can_lock and dist <= _IR_FIRE_RANGE:
+                        m = IrMissile(
+                            pos_f64=pos.copy(),
+                            vel_f64=vel,
+                            target=self._intercept_target,
+                        )
+                        m.launch_cinematic = False
+                        self._hardpoints.pop(i)
+                        world_missiles.append(m)
+                        new_missiles.append(m)
+                        self._released_missiles.append(m)
+                    break
+
+        # EGRESS: a strike/sead fighter that has expended its air-to-ground
+        # load turns for home — its leftover AIM-9X pair is self-defense
+        # armament, not a reason to keep boring in (see docstring).
+        if (self._strike_target_xz is not None
+                and not any(w in ("jassm", "harm") for w in self._hardpoints)
+                and self.state in (FS_TRANSIT, FS_ON_STATION)):
+            self._strike_target_xz = None
+            self._sead_target_radar = None
+            self.execute_order({"type": "rtb", "bases": bases or []})
+
+        # Winchester check: no weapons left -> RTB
+        if self.winchester and self.state not in (FS_RTB, FS_LANDING,
+                                                   FS_REARMING,
+                                                   FS_WINCHESTER_EGRESS):
+            self.execute_order({"type": "rtb", "bases": bases or []})
+
+        return new_missiles
 
     # -----------------------------------------------------------------------
     # Launch
     # -----------------------------------------------------------------------
 
     def launch(self, patrol_anchor_xz=None) -> None:
-        """Transition from PARKED to TAKEOFF.  Optionally update the patrol anchor."""
-        if self.state != FS_PARKED:
+        """Transition from PARKED to TAKEOFF.  Optionally update the patrol
+        anchor.  A dead base launches nothing (spec 5.5: a cratered runway
+        flies no sorties — also makes the stranded-after-abort state inert)."""
+        if self.state != FS_PARKED or not self._base.alive:
             return
         if patrol_anchor_xz is not None:
             self._patrol_anchor_xz = np.asarray(patrol_anchor_xz, dtype=np.float64)
         # Remove from base parked list (if there).
         if self in self._base.parked:
             self._base.parked.remove(self)
+        # Apply pending loadout to the hardpoints.
+        self._hardpoints = list(self._loadout_pending)
         self.state = FS_TAKEOFF
         self._speed = 0.0
 
@@ -767,8 +1195,8 @@ class Fighter:
         airborne = self.state not in (FS_PARKED, FS_REARMING, FS_GONE)
         if airborne:
             self._fuel_s += dt
-            if self._bingo() and self.state not in (FS_RTB, FS_LANDING,
-                                                     FS_WINCHESTER_EGRESS):
+            if self._bingo(bases) and self.state not in (FS_RTB, FS_LANDING,
+                                                         FS_WINCHESTER_EGRESS):
                 if bases:
                     self._rtb(bases)
                 return  # handle RTB next tick
@@ -798,6 +1226,17 @@ class Fighter:
             pass   # AirBase.update() ticks the rearm queue
         elif self.state == FS_WINCHESTER_EGRESS:
             self._update_winchester_egress(dt)
+
+        # Intercept steering: if an intercept target is set and alive, override
+        # the waypoint transit logic by continuously pointing at the target.
+        # The radar emit flag was already set ON in execute_order("intercept").
+        if (self._intercept_target is not None
+                and self._intercept_target.alive
+                and self.state in (FS_TRANSIT, FS_ON_STATION)):
+            tpos = self._intercept_target.pos
+            self._set_transit_to(np.array([float(tpos[0]), float(tpos[2])]))
+            if self.state == FS_ON_STATION:
+                self.state = FS_TRANSIT
 
         # Sync nose-radar position to the fighter's current pos.
         self.radar.pos[0] = self.pos[0]
