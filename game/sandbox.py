@@ -60,6 +60,7 @@ from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
                          PH_PITCHOVER, PH_RIDEOUT, PH_TERMINAL)
 from sim.physics import GRAVITY
 from sim.sam import SPH_BOOST, SPH_EJECT, SamMissile
+from sim.strike import SPH_STRIKE_BOOST, StrikeMissile
 from sim.ships import ST_BURNING, ST_GONE, ST_SINKING
 from world.generation import BASE_POS
 from world.ocean import Ocean
@@ -176,6 +177,9 @@ HINT_SECONDS = 2.5             # HUD flash time for invalid-launch hints
 HINT_S300_AIR = "S-300: SELECT AIR TARGET"
 HINT_S300_EMPTY = "S-300: BATTERY EMPTY"
 HINT_ONIKS_SURFACE = "ONIKS: SELECT SURFACE TARGET"
+HINT_RADAR_EMITTING = "RADAR: EMITTING"
+HINT_RADAR_SILENT = "RADAR: SILENT"
+HINT_RADAR_DESTROYED = "RADAR: DESTROYED"
 
 _UP = np.array([0.0, 1.0, 0.0])
 
@@ -355,6 +359,22 @@ class SandboxState(GameState):
         self.controls_overlay = not self.controls_overlay
         self.app.audio.ui_click()
 
+    def toggle_radar(self) -> None:
+        """R (radar_toggle binding): flip the player radar station's
+        emissions — the COMBAT counter to ESM localization. Silent radars
+        can't be located, but can't see either: the picture coasts (already
+        automatic). SANDBOX worlds have no radar_station: graceful no-op."""
+        radar = getattr(self.world, "radar_station", None)
+        if radar is None:
+            return
+        if not radar.alive:
+            self.show_hint(HINT_RADAR_DESTROYED)
+            return
+        radar.emitting = not radar.emitting
+        self.show_hint(HINT_RADAR_EMITTING if radar.emitting
+                       else HINT_RADAR_SILENT)
+        self.app.audio.ui_click()
+
     def _selected_air_track(self):
         """The selected contact's track if it is a live air track, else None."""
         sid = self.tactical_map.selected_contact
@@ -495,6 +515,15 @@ class SandboxState(GameState):
             elif kind == "sam_self_destruct":
                 self.effects.explosion(pos, EXPLOSION_SCALE_SELFD)
                 self.app.audio.play("boom_far", pos=pos)
+            elif kind == "base_hit":
+                # Enemy strike round into a base structure (Phase 3).
+                self.effects.explosion(pos, EXPLOSION_SCALE_GROUND)
+                self.app.audio.boom(pos)
+            elif kind == "base_destroyed":
+                # The killing hit also emitted base_hit at the same point:
+                # the structure's secondary blast stacks on the warhead's.
+                self.effects.explosion(pos, EXPLOSION_SCALE_SHIP)
+                self.app.audio.boom(pos)
             elif kind == "ciws_burst":
                 # Shell burst near the target: a few grey flak puffs, no
                 # audio (the gun is kilometers away from any camera that
@@ -534,6 +563,18 @@ class SandboxState(GameState):
                 if m.phase == SPH_BOOST:    # torch + trail END at burnout
                     tail = (px - hx * SAM_HALF_LEN, py - hy * SAM_HALF_LEN,
                             pz - hz * SAM_HALF_LEN)
+                    self._trail_for(key).add_point(tail)
+                    fx.booster_plume(tail, (hx, hy, hz), 1.0)
+                continue
+            if isinstance(m, StrikeMissile):
+                # Phase 3 enemy strikes: solid-booster torch + trail only.
+                # The turbofan/sustainer cruise shows no plume (a smokeless
+                # Tomahawk at 50 m AGL 150 km out would be sub-pixel anyway);
+                # dedicated wake/model polish is Phase-7 backlog.
+                if m.phase == SPH_STRIKE_BOOST:
+                    tail = (px - hx * MISSILE_HALF_LEN,
+                            py - hy * MISSILE_HALF_LEN,
+                            pz - hz * MISSILE_HALF_LEN)
                     self._trail_for(key).add_point(tail)
                     fx.booster_plume(tail, (hx, hy, hz), 1.0)
                 continue
@@ -827,6 +868,12 @@ class SandboxState(GameState):
             rot = math3d.rotation_from_forward(v)
             if isinstance(m, SamMissile):
                 mesh = self._mesh_s300_missile
+            elif isinstance(m, StrikeMissile):
+                # Phase 3 placeholder: enemy Tomahawk/JASSM/HARM reuse the
+                # bare Oniks round (closest existing cruise-missile body);
+                # dedicated models are Phase-7 polish. Strike phases (20-25)
+                # can never collide with CAP_ON_PHASES below.
+                mesh = self._mesh_oniks
             elif m.phase in CAP_ON_PHASES:
                 # launch variants: folded surfaces snap to X shortly after
                 # muzzle clear; the SUO cap stays on until PITCHOVER ends

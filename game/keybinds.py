@@ -69,6 +69,10 @@ ACTIONS: tuple[ActionDef, ...] = (
     ActionDef("profile_hi_lo", "PROFILE HI-LO", "ENGAGEMENT", pygame.K_1),
     ActionDef("profile_lo_lo", "PROFILE LO-LO", "ENGAGEMENT", pygame.K_2),
     ActionDef("clear_waypoints", "CLEAR WAYPOINTS", "ENGAGEMENT", pygame.K_x),
+    # COMBAT radar silence (Phase 3): flips the player radar station's
+    # emissions. R is unclaimed by every other default; in SANDBOX (no
+    # radar station) the action is a graceful no-op.
+    ActionDef("radar_toggle", "RADAR EMISSIONS", "ENGAGEMENT", pygame.K_r),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),
