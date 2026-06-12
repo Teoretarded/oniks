@@ -123,6 +123,19 @@ FIGHTER_DESCENT_RATE_MPS: float = 5.0
 # (sink rate = cruise × tan(4 deg) ≈ 16.8 m/s).
 RTB_GLIDE_TAN: float = math.tan(math.radians(4.0))
 
+# Catch-up sink rate while ABOVE the glide profile (5b verifier fix): the
+# profile altitude itself falls at cruise × tan(4 deg) ≈ 16.8 m/s as the
+# jet closes, so sinking at exactly that rate can never CONVERGE onto the
+# profile — a fighter that starts RTB inside the glide-intersect distance
+# (or high after a snap-up drone hunt at the 15.5 km ceiling) carried its
+# whole excess altitude to the field and crawled it off at the 5 m/s
+# landing rate (probe-measured: 1.9 km high over the field from a
+# 100 km / 9 km start; ~5 km high post-snap-up — the 5a hover-down again).
+# 40 m/s at the 240 m/s cruise is a ~9.5 deg idle/speedbrake descent, well
+# inside a fighter's normal idle-descent band; once ON the profile the
+# max() clamp makes the jet ride it exactly as before.
+RTB_CATCHUP_SINK_MPS: float = 40.0
+
 # Rearm time: 90 s per fighter, one at a time per base (spec §5.1).
 REARM_S: float = 90.0
 
@@ -812,10 +825,14 @@ class Fighter:
         dz = tz - float(self.pos[2])
         dist = math.hypot(dx, dz)
         # Glide profile: field elevation + 4 deg slope from the base.
+        # Above the profile the jet sinks at the CATCH-UP rate (the profile
+        # itself falls at cruise × tan(4 deg), so matching that rate would
+        # hold the excess altitude forever — RTB_CATCHUP_SINK_MPS doc); the
+        # max() clamp merges it onto the profile, which it then rides down.
         profile_alt = float(bpos[1]) + dist * RTB_GLIDE_TAN
         if self.pos[1] > profile_alt:
-            sink = FIGHTER_CRUISE_MPS * RTB_GLIDE_TAN * dt
-            self.pos[1] = max(profile_alt, self.pos[1] - sink)
+            self.pos[1] = max(profile_alt,
+                              self.pos[1] - RTB_CATCHUP_SINK_MPS * dt)
         # Within landing approach distance → start the final descent
         # (~350 m above field on the glide — seconds at 5 m/s, not minutes).
         if dist < 5_000.0:

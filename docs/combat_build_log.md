@@ -348,3 +348,23 @@ fighter employment, 23 tests), then the integrator.
   defeat-reachable: 3 Oniks -> cluster -> JASSM package -> Bastion dead
   -> DEFEAT; 40N6 kills the AWACS at 265 km; IR kill with ZERO RWR LOCK
   events), smoke 47/47.
+- 5b verifier fix: the RTB glide sank at exactly the profile's own
+  closure rate (cruise x tan 4 deg), so a jet starting ABOVE the 4 deg
+  profile (bingo inside the ~129 km glide intersect, or descending off
+  the 15.5 km snap-up ceiling after a drone hunt) kept its whole excess
+  altitude to the field and crawled it off at the 5 m/s landing rate —
+  the 5a hover-down resurfacing (probe: 1.9 km high over the field /
+  812 s landing from a 100 km, 9 km start; ~5 km high post-snap-up).
+  RTB_CATCHUP_SINK_MPS = 40 m/s (~9.5 deg idle/speedbrake descent at
+  cruise) now converges onto the profile; once ON it the clamp rides it
+  bit-identically (probe re-run: on-profile at 51 km out, 477 s landing,
+  touchdown at field elevation).
+- Verifier probes (suite + smoke re-run green after the fix): back-plot
+  cluster lands 264 m off the true base (inside the 1 km basket; HIGH
+  first-detection tracks produce ZERO back-plots); a fully silent player
+  (radar dark, no launches) is NEVER found over 400 s — zero fixes, zero
+  clusters, zero offensive orders, zero hostile rounds; the 40N6 kill
+  survives the launching site (radar station + S-300 TEL structures)
+  dying 5 s into the flight (true ARH); SM-2 drone discipline holds all
+  shots beyond 22 km and engages inside; full-battle step cost 0.63 ms
+  mean / 2.5 ms p95 at the 120 Hz step (8.33 ms budget).
