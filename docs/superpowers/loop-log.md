@@ -63,6 +63,15 @@ physics works, game is optimized, models look good."
 
 ## Iterations
 
+- **2026-06-12 S-300 tip-over physics (user feel report, research-verified).**
+  User felt the SAM still turned too fast off the launch. Research agent pinned the
+  48N6: 1,900 kg, I_yy ~6,500 kg*m^2, gas-vane TVC (torque is never the limiter -
+  the autopilot program is), and frame-timed footage: 30 deg off vertical ~1 s
+  after ignition, 60 deg at ~2 s. Verdict: our 120 deg/s path cap was ~3x too fast
+  (implied 21 g lateral at 100 m/s vs ~4.5 g physically available). Constants now
+  research-grounded (body 45 deg/s peak, 100 deg/s^2 ramp, path <= T*sin18/m/v);
+  two launch tests corrected to the frame-timed contract with two-sided bounds.
+  Measured in-sim: 30 deg at 1.99 s after ignition; suite + all intercepts green.
 - **2026-06-12 map-freeze fix (user bug report: app Not Responding on M).**
   Measured root cause: build_map_pixels ran the DENSE vectorized terrain_height
   (55 noise layers everywhere) over 1024^2 points on the main thread at the first
