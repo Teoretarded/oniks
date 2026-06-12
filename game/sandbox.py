@@ -224,7 +224,7 @@ class SandboxState(GameState):
         super().__init__(app)
         self.window = app.window
         self.renderer = app.renderer
-        self.world = WorldState()
+        self.world = self._build_world()
         self.camera = Camera()
         self.rig = CameraRig(self.camera)
         self.sky = Sky()
@@ -275,6 +275,10 @@ class SandboxState(GameState):
             "s300": StaticSubject(self._sam_tel_pos + _UP * LAUNCHER_LOOK_UP,
                                   "S-300 TEL"),
         }
+
+    def _build_world(self):
+        """The session's world; CombatState overrides (game/combat.py)."""
+        return WorldState()
 
     # ------------------------------------------------------------ GL meshes
 

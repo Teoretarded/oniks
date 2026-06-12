@@ -88,6 +88,17 @@ class App:
         self.sandbox = SandboxState(self)
         self.states.switch(self.sandbox)
 
+    def start_combat(self) -> None:
+        """Menu COMBAT item: start a fresh fog-of-war combat session.
+        Reuses the ``sandbox`` slot so pause/resume/quit flows apply."""
+        from game.combat import CombatState     # after the GL context exists
+        self._draw_loading_frame()
+        if self.sandbox is not None:
+            self.sandbox.dispose()
+        self.paused = False
+        self.sandbox = CombatState(self)
+        self.states.switch(self.sandbox)
+
     def _draw_loading_frame(self) -> None:
         """One immediate 'BUILDING WORLD...' frame so the SANDBOX click never
         reads as a hang while terrain/models/audio construct (~2 s)."""
