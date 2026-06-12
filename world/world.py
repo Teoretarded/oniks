@@ -80,14 +80,11 @@ class WorldState:
 
     def __init__(self, rng_seed: int = SEED):
         self.rng = np.random.default_rng(rng_seed)
-        self.ships = [self._spawn_ship(i, spawn)
-                      for i, spawn in enumerate(SHIP_SPAWNS)]
-        self.aircraft = [Aircraft(s["aircraft_id"], s["aircraft_type"],
-                                  s["anchor_a"], s["anchor_b"])
-                         for s in AIRCRAFT_SPAWNS]
-        self.sites = SITES
+        self.ships = self._spawn_ships()
+        self.aircraft = self._spawn_aircraft()
+        self.sites = self._spawn_sites()
         self.missiles: list[Missile] = []
-        self.contacts = ContactBoard((BASE_POS[0], BASE_POS[2]))
+        self.contacts = self._build_contacts()
         self.sim_time = 0.0
         self.events: list[tuple[str, np.ndarray]] = []
         self.reload_left = 0.0          # s until the launcher is ARMED again
@@ -101,6 +98,26 @@ class WorldState:
                     LANES[spawn["lane_index"]], spawn["lane_t0"])
         ship.speed = float(spawn["speed"])     # per-spawn speed override
         return ship
+
+    def _spawn_ships(self) -> list[Ship]:
+        """Sandbox default: the 14 lane-following traffic ships.
+        CombatWorld overrides (world/combat.py)."""
+        return [self._spawn_ship(i, spawn)
+                for i, spawn in enumerate(SHIP_SPAWNS)]
+
+    def _spawn_aircraft(self) -> list[Aircraft]:
+        """Sandbox default: the 4 racetrack patrols."""
+        return [Aircraft(s["aircraft_id"], s["aircraft_type"],
+                         s["anchor_a"], s["anchor_b"])
+                for s in AIRCRAFT_SPAWNS]
+
+    def _spawn_sites(self):
+        """Sandbox default: the enemy-coast land sites."""
+        return SITES
+
+    def _build_contacts(self) -> ContactBoard:
+        """Sandbox default: the legacy all-seeing fuzzy board."""
+        return ContactBoard((BASE_POS[0], BASE_POS[2]))
 
     @property
     def launcher_armed(self) -> bool:
