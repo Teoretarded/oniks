@@ -122,6 +122,10 @@ structures in sim/bases.py), then the integrator.
 - Fighter AIM-9X-class IR pair for the drone hunt (spec 5.1) — Phase 5.
 - Drone respawn-after-cooldown: in spec 4.3 since v1 — re-confirm in the
   Phase 4 brief (user reminder 2026-06-12).
+- Fighter model reads missile-ish in flight — wing/LEX proportion pass vs
+  F/A-18E references.
+- Carrier model: bare deck (no markings), island under-detailed.
+- AWACS model: needs a close visual gate shot (playtest).
 
 ## Phase 4 — recon drone (integration, 2026-06-12)
 
@@ -278,3 +282,14 @@ commander AI / JASSM/HARM delivery / AIM-9X / 40N6 are 5b.
   parked airframes are not drawn), fighters stranded PARKED at a dead
   base need the commander's call, Fighter.hardpoints loadout dicts land
   with employment.
+
+### Phase 5a orchestrator gate (2026-06-12)
+
+- Verifier PASS (608 tests incl. its own winchester-approach regression
+  pin, smoke 36/36); suite + smoke re-run green by orchestrator.
+- Models viewed personally (tools/probe_air_force_views.py): carrier and
+  airfield read correctly; fighter slightly missile-ish; AWACS shot too
+  distant to judge — re-shoot at the playtest. Nits filed in the Phase 8
+  backlog. 5b must take the verifier OPEN list (fuel math vs airfield
+  geometry, dead-base rearm queue, descent profile, field-elevation
+  landing, sinking-carrier queue, SM-2 ammo waste on far drone cues).
