@@ -150,6 +150,156 @@ S300_TEL = LauncherDef("s300_tel", "5P85 TEL", ("s300",), 8.0,
 SM2_VLS = LauncherDef("sm2_vls", "Mk 41 VLS", ("sm2",), 0.0,
                       tubes=8, ammo=24)
 
+@dataclass(frozen=True)
+class StrikeDef:
+    """Land-attack / anti-radiation strike missile definition.
+
+    Covers Tomahawk-class VLS cruise missiles, JASSM-class air-launched
+    cruise missiles, and HARM-class anti-radiation missiles.  Fields
+    deliberately parallel WeaponDef where the physics are shared (drag,
+    mass, ref_area, isp/fuel, max_g) and diverge where they are not
+    (no ramjet cruise_mach split, no seeker fields needed by the base
+    class — HARM subclass has its own homing logic).
+    """
+    weapon_id: str
+    display_name: str
+    length: float               # m
+    diameter: float             # m
+    launch_mass: float          # kg, total at launch including booster if any
+    fuel_mass: float            # kg, propellant consumed in flight
+    booster_thrust: float       # N, booster / solid motor (0 = no booster)
+    booster_time: float         # s, booster burn duration (0 = none)
+    eject_speed: float          # m/s, speed at start of free guidance (VLS =
+    #                             vertical eject; air-drop = release speed)
+    eject_time: float           # s, eject / free-fall phase before motor
+    max_thrust: float           # N, cruise thrust (turbofan / motor sustainer)
+    isp: float                  # s, specific impulse for cruise phase
+    cruise_mach: float          # target cruise Mach number
+    cruise_alt: float           # m, commanded cruise altitude (AGL = above
+    #                             local surface via surface_height_at)
+    max_range: float            # m, maximum effective guided range (fuel gate)
+    ref_area: float             # m^2, aerodynamic reference area
+    max_g: float                # max lateral acceleration in g
+    warhead_mass: float         # kg
+    fuse_radius: float          # m, proximity fuse kill radius (HARM / default)
+
+
+# --- Tomahawk BGM-109 (ship-launched VLS, land-attack) -----------------------
+# Reference: BGM-109C/D Block IV (TLAM), open-source unclassified data.
+#   Length: 6.25 m body + 0.52 m booster = 6.25 m cited (body only used here;
+#     booster is jettisoned).  Game model uses the body length for rendering.
+#   Launch mass with booster: ~1,440 kg.  Body-only mass ~1,000 kg post-boost.
+#   Turbofan: Williams F107-WR-402, thrust ~3,100 N (272 kg-f), Isp ~3,600 s
+#     (fuel-specific, very efficient turbofan — 100 kg JP fuel for 1,600 km).
+#   Cruise Mach 0.74 (~250 m/s at sea level), cruise alt 30–50 m terrain-
+#     following (game spec §9: 30–50 m cruise; using 50 m as commanded value).
+#   VLS cold-gas eject: pops round at ~10 m/s, solid booster lights (12 s)
+#     to push to cruise speed before booster jettison.  Booster thrust
+#     ~44,500 N (estimated from 13 s to Mach 0.7 from rest, ~1,100 kg avg mass).
+#   Max range: ~1,600 km real; game uses "effectively whole-map" → 2,000 km.
+#   Fuel mass: sufficient to fly the whole map at Mach 0.74; isp is chosen so
+#     2,000 km burns ~100 kg of fuel at Mach 0.74 (real TLAM fuel budget).
+#     At 250 m/s, 2,000 km takes 8,000 s.  Thrust ≈ drag ≈ 1,200 N in cruise.
+#     mdot = 1,200 / (3,600 * 9.81) = 0.034 kg/s → 8,000 s = 272 kg fuel.
+#     Using 300 kg fuel for margin.
+TOMAHAWK = StrikeDef(
+    weapon_id="tomahawk", display_name="BGM-109 Tomahawk",
+    length=6.25, diameter=0.527,
+    launch_mass=1_440.0,   # kg with booster (unclassified cited figure)
+    fuel_mass=300.0,       # kg JP-10 turbofan fuel for ~2,000 km at Mach 0.74
+    # VLS booster: solid rocket pops round to cruise speed (~Mach 0.74) in 12 s.
+    # Thrust estimated: 1,300 kg avg mass, 0-to-250 m/s in 12 s → ~27,000 N net.
+    # With drag at ~Mach 0.3 avg (≈500 N), gross thrust ≈ 27,500 N.
+    booster_thrust=27_500.0,   # N solid booster
+    booster_time=12.0,         # s booster burn (game spec §5.2: "12 s")
+    eject_speed=10.0,          # m/s VLS cold-gas eject speed
+    eject_time=0.5,            # s from eject until booster ignition
+    # Williams F107 turbofan in cruise.  3,100 N, Isp ≈ 3,600 s (thermodynamic
+    # estimate for a small turbofan at Mach 0.74 — consistent with 100 kg/1,600 km)
+    max_thrust=3_100.0,    # N turbofan cruise thrust
+    isp=3_600.0,           # s specific impulse (turbofan — very high, fuel-efficient)
+    cruise_mach=0.74,      # Mach, subsonic cruise (game spec §9)
+    cruise_alt=50.0,       # m above local surface (game spec §9: 30–50 m, using 50)
+    max_range=2_000_000.0, # m, effectively whole-map (game spec §9)
+    ref_area=0.218,        # m^2 = pi * (0.527/2)^2
+    max_g=4.0,             # g, terrain-following cruise missile maneuvering cap
+    warhead_mass=450.0,    # kg conventional unitary warhead (TLAM-C cited)
+    fuse_radius=5.0,       # m (impact fuze — hits ground; not a proximity weapon)
+)
+
+# --- AGM-158 JASSM (air-launched standoff land-attack) -----------------------
+# Reference: AGM-158A JASSM, open-source unclassified data.
+#   Length: 4.27 m.  Launch mass: ~1,020 kg.
+#   Propulsion: Teledyne-Continental J402 turbojet, ~3,200 N, Isp ≈ 2,200 s
+#     (subsonic turbojet — less efficient than turbofan).
+#   Cruise Mach ~0.8 (~272 m/s sea level), cruise alt ~30 m terrain-following.
+#   Range: 370 km (game spec §9 uses AGM-158A value).
+#   Air-launched: fighter drops at typical 8 km ASL, 200-250 m/s; missile
+#     free-falls 1 s then the motor ignites.
+#   Fuel mass: 370 km at 272 m/s = 1,360 s; drag in cruise ≈ 1,500 N
+#     (heavier / less slender than TLAM); mdot = 1,500/(2,200*9.81) = 0.069 kg/s
+#     → 94 kg fuel for 370 km.  Using 100 kg for margin.
+JASSM = StrikeDef(
+    weapon_id="jassm", display_name="AGM-158 JASSM",
+    length=4.27, diameter=0.45,
+    launch_mass=1_020.0,   # kg (cited: ~1,020 kg)
+    fuel_mass=100.0,       # kg JP fuel for 370 km at Mach 0.8
+    # No booster: air-launched, drops cleanly then ignites.
+    booster_thrust=0.0,
+    booster_time=0.0,
+    eject_speed=0.0,       # inherited from aircraft release velocity
+    eject_time=1.0,        # s free-fall before motor ignition (game spec §5.1)
+    # J402-CA-702 turbojet: ~3,200 N, Isp ≈ 2,200 s (subsonic jet)
+    max_thrust=3_200.0,    # N
+    isp=2_200.0,           # s
+    cruise_mach=0.80,      # game spec §9
+    cruise_alt=30.0,       # m AGL (game spec §9)
+    max_range=370_000.0,   # m (game spec §9: 370 km)
+    ref_area=0.159,        # m^2 = pi * (0.45/2)^2
+    max_g=4.0,             # g cruise maneuvering cap
+    warhead_mass=109.0,    # kg WDU-42/B penetrating warhead (cited)
+    fuse_radius=5.0,       # m (impact fuze)
+)
+
+# --- AGM-88 HARM (air-launched anti-radiation) --------------------------------
+# Reference: AGM-88C HARM, open-source unclassified data.
+#   Length: 4.17 m.  Launch mass: ~361 kg.
+#   Propulsion: Thiokol/Hercules SR113-TC-1 dual-thrust solid motor.
+#     Boost phase: ~74,000 N for ~2.6 s (estimated from Mach 2+ in 3 s).
+#     Sustain phase: ~6,000 N for ~35 s (typical dual-thrust HARM motor data).
+#     Combined Isp ≈ 200 s (solid rocket, modest but typical for a small motor).
+#   Cruise Mach 2+ (game spec §9: Mach 2.0; real is ~2.5; using 2.0 as tuned).
+#   Loft profile: climbs to ~9 km, homes on emitting radar with PN.
+#   Range: 110 km (game spec §9).
+#   Proximity fuse radius: 15 m (game spec §8 "HARM" section).
+#   Fuel mass: solid propellant — total burn is ~38 s.
+#     mdot_boost = 74,000 / (200*9.81) = 37.7 kg/s for 2.6 s → 98 kg
+#     mdot_sustain = 6,000 / (200*9.81) = 3.06 kg/s for 35 s → 107 kg
+#     Total propellant: ~205 kg.  Round to 200 kg.
+HARM = StrikeDef(
+    weapon_id="harm", display_name="AGM-88 HARM",
+    length=4.17, diameter=0.254,
+    launch_mass=361.0,     # kg (cited: 361 kg)
+    fuel_mass=200.0,       # kg solid propellant (boost + sustain phases)
+    # Boost phase: very high thrust for 2–3 s to accelerate to Mach 2+.
+    booster_thrust=74_000.0,  # N estimated from 0-to-Mach2 in ~3 s, ~300 kg avg mass
+    booster_time=3.0,         # s boost phase duration
+    eject_speed=0.0,       # air-launched: inherits aircraft release velocity
+    eject_time=0.2,        # s free-fall before motor ignition (brief separation)
+    # Sustain phase maintains speed against drag.
+    max_thrust=6_000.0,    # N sustain thrust
+    isp=200.0,             # s solid rocket Isp
+    cruise_mach=2.0,       # game spec §9 (real ~2.5; tuned per spec)
+    # HARM loft: commanded altitude 9,000 m (game spec: "lofts to ~9 km").
+    cruise_alt=9_000.0,    # m loft altitude
+    max_range=110_000.0,   # m (game spec §9: 110 km)
+    ref_area=0.0507,       # m^2 = pi * (0.254/2)^2
+    max_g=15.0,            # g, agile anti-radiation seeker head
+    warhead_mass=66.0,     # kg WDU-21/B fragmentation warhead (cited)
+    fuse_radius=15.0,      # m proximity fuse (game spec §8: "proximity 15 m")
+)
+
 WEAPONS = {"oniks": ONIKS}
 SAMS = {"s300": S300, "sm2": SM2}
+STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS}
