@@ -132,6 +132,23 @@ structures in sim/bases.py), then the integrator.
   the permanent tools/probe_sm2_camera_crash.py harness.
 - Gate: 665 tests green, smoke 47/47, crash probe survives both variants.
 
+## Phase 6 gate — Pantsir-S1 point defense (2026-06-13)
+
+- Workflow PASS: 715 tests, smoke green. Verifier caught + fixed the
+  Pantsir destructible OBB being rotated 90 deg from its model (off-center
+  strikes missed the box). Measured the balance two-sided: a single
+  inbound (sea-skim Tomahawk / terminal diver / JASSM) is reliably killed
+  by one 57E6; saturation leaks to DEFEAT (2 divers 0/3, 4 divers 1/3,
+  6+ divers 3/3) — shield, not wall. Physics-not-dice confirmed (only the
+  30mm gun rolls; 57E6 is kinematics + fuse-on-truth). No friendly fire,
+  honest radar horizon/LOS, dual-role network node verified (S-300 gains
+  low tracks only via the Pantsir radars).
+- Orchestrator gate: 715 tests re-run green; Pantsir viewed personally
+  guarding the Bastion (probe_pantsir_view.py), HUD PANTSIR panel live
+  (2 UP / M24 / G1400). Nit -> backlog: 12-tube launcher reads flat at
+  rest (tubes sit low); a raised/erect-on-engage pose would pop the
+  silhouette.
+
 ## Phase 8 — polish backlog (rolling)
 
 - Destroyer model: bow flare subtle, aft stack indistinct (reference-photo
@@ -149,6 +166,9 @@ structures in sim/bases.py), then the integrator.
   F/A-18E references.
 - Carrier model: bare deck (no markings), island under-detailed.
 - AWACS model: needs a close visual gate shot (playtest).
+- Pantsir 12-tube launcher reads flat at rest — raise/erect the tube blocks
+  (especially on engage) to pop the silhouette.
+- Dedicated 57E6 mesh (currently reuses the S-300 missile dart).
 
 ## Phase 4 — recon drone (integration, 2026-06-12)
 

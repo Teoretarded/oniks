@@ -98,6 +98,12 @@ DRONE_RECON_HINT = "DRONE: RECON ONLY"       # LMB/SPACE with drone active
 
 SITE_HALF_PX = 5.0             # site square icon half-size
 BASE_STAR_PX = 8.0             # base star spoke length
+# Phase 6 — Pantsir SHORAD markers: small friendly diamonds near the base
+# (point-defense nodes, distinct from the 8-spoke platform stars).  A dead
+# unit dims to the DEAD alpha.
+PANTSIR_COL = (0.45, 1.00, 0.70, 0.95)       # friendly point-defense green
+PANTSIR_DEAD_COL = (0.45, 1.00, 0.70, 0.35)  # destroyed unit, dimmed
+PANTSIR_DIAMOND_PX = 5.0
 CONTACT_NOSE_PX = 9.0          # contact triangle: nose ahead of the estimate
 CONTACT_BACK_PX = 5.0          # ... base behind it
 CONTACT_HALF_PX = 5.0          # ... base half-width
@@ -642,6 +648,7 @@ class TacticalMap:
         self._lanes()
         self._sites()
         self._platform_stars()
+        self._pantsir_markers()
         self._plan_chain()
         self._seeker_cone()
         self._elint_overlay()
@@ -807,6 +814,20 @@ class TacticalMap:
                 self.text.draw_lines([(sx + ax, sy + ay), (sx + bx, sy + by)],
                                      col, 1.5)
             self.text.draw_text(sx + r + 4, sy - 9, label, col)
+
+    def _pantsir_markers(self) -> None:
+        """Friendly Pantsir-S1 point-defense units near the base (COMBAT
+        Phase 6): a small diamond per unit at its true position (static
+        ground asset, not a fog-of-war contact).  A destroyed unit dims to
+        the DEAD alpha.  SANDBOX worlds have no ``pantsirs`` list."""
+        d = PANTSIR_DIAMOND_PX
+        for unit in getattr(self.sandbox.world, "pantsirs", ()):
+            sx, sy = self.view.world_to_screen((unit.pos[0], unit.pos[2]))
+            if not self._on_screen(sx, sy, pad=40.0):
+                continue
+            col = PANTSIR_COL if unit.alive else PANTSIR_DEAD_COL
+            self.text.draw_lines([(sx, sy - d), (sx + d, sy), (sx, sy + d),
+                                  (sx - d, sy), (sx, sy - d)], col, 1.5)
 
     def _platform_origin(self) -> tuple:
         """(x, z) of the active platform (route chain / bearing origin)."""

@@ -150,6 +150,7 @@ from sim.enemy_defense import (DRONE_ENGAGE_RANGE_M, VLS_DECK_M,
 from sim.enemy_ships import Destroyer
 from sim.enemy_strikes import SALVO_PERIOD_S, SALVO_SIZE, EnemyStrikeController
 from sim.missile import Missile
+from sim.pantsir import Pantsir, PantsirDefenseController
 from sim.radar import Radar, RadarNetwork
 from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
@@ -275,6 +276,49 @@ INTEL_CHECK_PERIOD_S = 1.0  # s between fixed-installation intel checks
 #                             (cheap: a range gate rejects the radar path
 #                             instantly; SAR is a hypot)
 
+# --- Phase 6: Pantsir-S1 point defense (spec §4.2) ----------------------------
+
+# Pantsir deployment sites guarding the player base.  Default 2 units
+# (PANTSIR_COUNT — armory-bound in Phase 7): one shielding the Bastion TEL
+# (the lose-condition asset, BASE_POS), one at the S-300 / radar cluster.
+# Each site is PROBE-MEASURED for dry land AND clear northward LOS over the
+# terrain to inbound sea-skimmers (threats ingress from the enemy continent
+# at +z; terrain heights 94 m / 158 m, antenna 5 m up clears the ridge to
+# 20 km against a 50 m TLAM and to 2 km against a 15 m terminal-diver).  A
+# valley site would let the ridge mask the very sea-skimmers the unit
+# exists to kill — do NOT move these without re-running the LOS sweep.  Y is
+# set from terrain_height_scalar at construction (mirrors the S-300 TEL
+# pin).  Offset > SEEKER_BASKET_M from the asset each guards (1.2 km E of
+# the Bastion, 1.3 km W of the S-300 TEL): a Pantsir sits OUTSIDE the
+# terminal-seeker basket of the cluster it protects, so a back-plotted
+# JASSM/TLAM aim refinement (_refine_strike_aim) still acquires the TEL it
+# is meant to kill, never the adjacent SHORAD vehicle — verified against
+# the measured Oniks back-plot cluster (34.8, -861.7) in the Phase-5b
+# kill-chain tests, which this placement must not perturb.
+PANTSIR_COUNT = 2
+PANTSIR_SPAWNS = (
+    # Bastion guard: 1.2 km EAST of the TEL — clear LOS to +z, outside the
+    # bastion cluster's seeker basket so it never steals the JASSM aim.
+    {"unit_id": "pantsir_00", "xz": (1_200.0, -600.0)},
+    # S-300 / radar-cluster guard: 1.3 km WEST of the S-300 TEL.
+    {"unit_id": "pantsir_01", "xz": (83_700.0, -3_500.0)},
+)
+
+# Pantsir own destructibility: a thin-skinned SHORAD vehicle — two
+# 250 kg-class HARM/JASSM hits mission-kill it (same ladder as the TEL
+# vehicles in sim/bases.py; the radar mast is soft, the chassis is not).
+# A dedicated 'pantsir' Structure kind is not added to sim/bases.py
+# (locked file boundary); the generic TEL dims/HP default is the right
+# class, so the wrapper is built with explicit hp + dims here.
+PANTSIR_STRUCT_HP = 2
+# sim/bases.py Structure.obb reads dims as (length=X, beam=Z, height=Y).  The
+# models/pantsir.py body is built with its chassis LONG axis along +Z (the
+# threat-ingress bearing the model faces; X span 3.44 m, Z span 8.19 m — the
+# Z length is LOCKED by tests/test_pantsir_model.py::test_length_approx_8m).
+# So the OBB footprint is (beam_X=3.0, length_Z=8.0): the box long side runs
+# +Z with the hull, NOT +X.  Height 4.6 m tops the turret (model Y 4.58 m).
+PANTSIR_STRUCT_DIMS = (3.0, 8.0, 4.6)   # (X beam, Z length, Y height)
+
 # --- Phase 4: recon drone ------------------------------------------------------
 
 DRONE_COUNT = 1             # drones fielded (spec 4.3 default; the Phase-7
@@ -341,6 +385,54 @@ class CombatWorld(WorldState):
                       on_destroyed=lambda _s: setattr(
                           self.radar_station, "alive", False)),
         ]
+
+        # ---- Phase 6: Pantsir-S1 point defense (spec §4.2) ----
+        # Player-side mirror of the destroyers' SM-2/CIWS auto-defense: each
+        # Pantsir auto-engages inbound hostile STRIKE missiles tracked by its
+        # own 30 km radar.  Determinism: a child generator off the world seed
+        # (SeedSequence [seed, 6] — phase tag, never colliding with the
+        # defense [seed], recon [seed, 4] or commander [seed, 5] streams)
+        # seeds every unit; each 57E6 launch then draws one integer for its
+        # round's multipath noise (sim/pantsir.py).  DUAL ROLE: the Pantsir
+        # radars JOIN self.radar_net, so they also extend the player CONTACT
+        # picture at 30 km — the S-300 can now form and engage low inbound
+        # threats the 18 m ground-radar station misses under the horizon
+        # (point-defense sensor + network node).  Each unit is wrapped in a
+        # Structure for its OWN destructibility (a HARM/JASSM that finds it
+        # kills it); on_destroyed clears Pantsir.alive AND drops its radar
+        # from the net (mirror of the radar-station structure's death — the
+        # network coverage vanishes with the node).
+        self._pantsir_rng = np.random.default_rng([rng_seed, 6])
+        self.pantsirs: list[Pantsir] = []
+        for spec in PANTSIR_SPAWNS[:PANTSIR_COUNT]:
+            px, pz = spec["xz"]
+            pos = np.array([px, terrain_height_scalar(px, pz), pz],
+                           dtype=np.float64)
+            unit = Pantsir(
+                spec["unit_id"], pos,
+                rng=np.random.default_rng(
+                    int(self._pantsir_rng.integers(2 ** 63))),
+                radar_network=self.radar_net)
+            self.pantsirs.append(unit)
+            # Destructible wrapper: the closure binds THIS unit (default-arg
+            # capture so the loop variable is frozen per structure).  Kind
+            # "pantsir" is not in sim/bases.py's default HP/dims tables (a
+            # LOCKED file), so dims + hp are passed EXPLICITLY here; the kind
+            # string is then used only by ``defeated`` (which checks
+            # bastion_tel) — a Pantsir death never trips the lose condition.
+            self.structures.append(Structure(
+                f"{spec['unit_id']}_struct", "pantsir", pos.copy(),
+                dims=PANTSIR_STRUCT_DIMS, hp=PANTSIR_STRUCT_HP,
+                on_destroyed=lambda _s, u=unit: u.kill()))
+        # The controller defends EVERY player structure (Bastion/S-300/radar
+        # + the Pantsirs themselves): it prioritises the threat closest in
+        # time-to-impact to any protected asset.  Stepped in step() AFTER the
+        # commander/strikes spawn this frame's hostile rounds so a Pantsir
+        # reacts on the NEXT base step (same ordering as the other defense
+        # layers — documented at the step() call site).
+        self.pantsir_defense = PantsirDefenseController(
+            self.pantsirs, structures=self.structures)
+
         # Hostile strike rounds currently fed to the contact board, keyed
         # by track id. Dead rounds stay in the feed until the board drops
         # their track (the same one-refresh linger sunk ships get) so no
@@ -1086,6 +1178,18 @@ class CombatWorld(WorldState):
         # and fly on the NEXT base step (the same convention as defense/
         # strikes launches).
         self._step_commander(dt)
+        # Phase 6: the player's Pantsir point defense — stepped AFTER the
+        # commander/strikes have spawned this frame's hostile rounds so a
+        # Pantsir forms its track and launches a 57E6 that flies on the
+        # NEXT base step (same reactive convention as self.defense/strikes;
+        # the 57E6 then walks the structure sweep below as a friendly round
+        # that is_hostile=False, so it can never demolish the base it
+        # guards).  Runs BEFORE the hostile-vs-base sweep so a kill this
+        # frame removes the round before it can be tested against a TEL on
+        # the next — but a round the Pantsir FAILS to stop still reaches
+        # the sweep and ends the battle (the layer is a shield, not a wall;
+        # verified both ways in tests/test_phase6_e2e.py).
+        self.pantsir_defense.step(self, dt)
         apply_missile_hits_structures(
             [m for m in self.missiles if getattr(m, "is_hostile", False)],
             self.structures, self.events)

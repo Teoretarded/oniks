@@ -99,6 +99,29 @@ def radar_status_row(world):
     return ("RADAR", RADAR_SILENT, RELOAD_COL)
 
 
+def pantsir_status_row(world, engaging: bool = False):
+    """The COMBAT Pantsir point-defense summary row for the ground-launcher
+    blocks, or None when the session world fields no Pantsirs (SANDBOX, or a
+    COMBAT setup with PANTSIR_COUNT 0) — pure, unit-testable.
+
+    Returns ``("PANTSIR", text, color)`` where text is either
+    ``"n UP  M<missiles> G<guns>"`` (alive-unit count + pooled 57E6 and
+    30 mm ammo across the LIVE units), ``"ENGAGING"`` (amber flash latched
+    for a short window after any unit launches — see CombatState), or
+    ``"DOWN"`` (red, every Pantsir destroyed)."""
+    units = getattr(world, "pantsirs", None)
+    if not units:
+        return None
+    alive = [u for u in units if u.alive]
+    if not alive:
+        return ("PANTSIR", "DOWN", DANGER_COL)
+    if engaging:
+        return ("PANTSIR", "ENGAGING", RELOAD_COL)
+    missiles = sum(u.missile_ammo for u in alive)
+    guns = sum(u.gun_ammo for u in alive)
+    return ("PANTSIR", f"{len(alive)} UP  M{missiles} G{guns}", ARMED_COL)
+
+
 def drone_panel_rows(world) -> list[tuple]:
     """The recon-drone platform's panel rows (Phase 4) — pure, GL-free,
     unit-testable. (label, value, color) tuples:
@@ -362,6 +385,10 @@ class HUD:
         radar = radar_status_row(world)
         if radar is not None:
             rows.append(radar)
+        pantsir = pantsir_status_row(
+            world, engaging=getattr(sandbox, "pantsir_engaging", False))
+        if pantsir is not None:
+            rows.append(pantsir)
         rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
@@ -382,6 +409,10 @@ class HUD:
         radar = radar_status_row(world)
         if radar is not None:
             rows.append(radar)
+        pantsir = pantsir_status_row(
+            world, engaging=getattr(sandbox, "pantsir_engaging", False))
+        if pantsir is not None:
+            rows.append(pantsir)
         rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),

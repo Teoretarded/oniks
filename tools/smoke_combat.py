@@ -13,6 +13,7 @@ import pygame
 
 from main import App, PHYS_DT
 from sim.a2a import IrMissile
+from sim.arsenal import JASSM, TOMAHAWK
 from sim.commander import (AIRFIELD_HARM, AIRFIELD_JASSM, CARRIER_HARM,
                            CARRIER_JASSM)
 from sim.enemy_air import (FIGHTER_ALT_M, FS_PARKED, FS_REARMING, FS_RTB,
@@ -383,6 +384,80 @@ def main() -> int:
     check("40N6 kills the AWACS beyond 200 km on the forced track",
           rng11 > 200_000.0 and sam11 is not None
           and sam11.killed_target and not a11.alive)
+
+    # --- Phase 6: the Pantsir-S1 point defense (pure sim; 120 Hz where a
+    # 57E6 actually flies, coarse steps for the rate-based machinery).
+    w12 = CombatWorld()
+    check("two Pantsirs guard the base, radars in the player net",
+          len(w12.pantsirs) == 2
+          and all(p.radar in w12.radar_net.radars for p in w12.pantsirs)
+          and all(p.missile_ammo == 12 and p.gun_ammo == 700
+                  for p in w12.pantsirs))
+    # An inbound hostile Tomahawk at the Bastion guard: the Pantsir forms a
+    # track and a 57E6 kills it before it can run the structure sweep.
+    w12.radar_station.emitting = False      # isolate from the commander
+    for s in w12.ships:
+        s.tomahawk_ammo = 0
+    p_bastion = w12.pantsirs[0]
+    inbound = StrikeMissile(
+        TOMAHAWK,
+        np.array([BASE_POS[0], 50.0, p_bastion.pos[2] + 18_000.0]),
+        np.zeros(3), (BASE_POS[0], BASE_POS[2]), target_y=0.0)
+    inbound.launch_platform = None
+    w12.missiles.append(inbound)
+    saw_launch = False
+    for _ in range(int(120.0 / PHYS_DT)):
+        w12.step(PHYS_DT)
+        saw_launch = saw_launch or any(
+            k == "pantsir_launch" for k, _ in w12.drain_events())
+        if not inbound.alive:
+            break
+    check("a 57E6 launches and kills the inbound Tomahawk",
+          saw_launch and not inbound.alive
+          and all(s.alive for s in w12.structures if s.kind == "bastion_tel"))
+
+    # Saturation: more diving JASSMs than the 57E6 + gun can service still
+    # leaks and ends the battle (the Pantsir is a shield, not a magic wall).
+    w13 = CombatWorld()
+    w13.radar_station.emitting = False
+    for s in w13.ships:
+        s.tomahawk_ammo = 0
+        s.sm2_ammo = 0
+        s.ciws_ammo = 0
+    bastion13 = next(s for s in w13.structures if s.kind == "bastion_tel")
+    aim_y13 = float(bastion13.pos[1]) + bastion13.dims[2] * 0.5
+    for i in range(4):                       # 4 divers > the measured leak
+        w13.missiles.append(StrikeMissile(  # threshold (probe: 3+ leak)
+            JASSM,
+            np.array([BASE_POS[0] + (i - 2) * 40.0, 9_000.0,
+                      BASE_POS[2] + 100_000.0]),
+            np.array([0.0, 0.0, -272.0]),
+            (BASE_POS[0], BASE_POS[2]), target_y=aim_y13))
+        w13.missiles[-1].launch_platform = None
+    defeated13 = False
+    for _ in range(int(520.0 / PHYS_DT)):
+        w13.step(PHYS_DT)
+        w13.drain_events()
+        if w13.defeated:
+            defeated13 = True
+            break
+    check("a saturation JASSM raid leaks past the Pantsir -> DEFEAT",
+          defeated13)
+
+    # A Pantsir killed (its destructible Structure demolished) stops
+    # defending and its radar drops from the player network.
+    w14 = CombatWorld()
+    pk = w14.pantsirs[0]
+    struct14 = next(s for s in w14.structures
+                    if s.structure_id == f"{pk.unit_id}_struct")
+    while struct14.alive:                     # the real damage entry point
+        struct14.hit()
+    tgt14 = np.array([pk.pos[0], pk.pos[1] + 300.0, pk.pos[2] + 8_000.0])
+    check("a destroyed Pantsir goes dark and leaves the radar net",
+          (not pk.alive) and (not pk.radar.alive)
+          and not any(r is pk.radar and r.detects(tgt14, "missile")
+                      for r in w14.radar_net.radars)
+          and w14.pantsirs[1].alive)
 
     # --- GL pass over the Phase-4 UI: TAB cycle, drone HUD panel, map
     # overlays (drone diamond/route + ELINT rays/circles) and the [ / ]
