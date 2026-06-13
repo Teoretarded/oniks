@@ -41,6 +41,7 @@ from sim.recon import RWR_LOCK
 from sim.ships import ST_SINKING
 from sim.strike import HarmMissile, StrikeMissile
 from world.combat import SEEKER_BASKET_M, CombatWorld
+from world.combat_config import CombatConfig
 from world.generation import BASE_POS
 from world.world import SAM_TEL_POS, WorldState
 
@@ -57,18 +58,37 @@ def _disarm_ships(w):
         s.ciws_ammo = 0
 
 
+def _disarm_pantsirs(w):
+    """Empty Pantsir magazines so Phase 5b kill-chain tests run unaffected
+    by the Phase 6 point defense (the two phases are tested independently).
+    This mirrors how _disarm_ships isolates the player offensive chain from
+    the enemy SM-2/CIWS defenses."""
+    for p in getattr(w, "pantsirs", []):
+        p.missile_ammo = 0
+        p.gun.ammo = 0
+
+
 def _plot_three_oniks(w):
-    """Launch 3 real Oniks; fly each 40 s at the locked 120 Hz step so the
-    enemy sensors catch the climb below the 2 km back-plot ceiling, then
+    """Launch 3 real Oniks; fly each missile long enough for the enemy
+    sensors to catch the climb below the 2 km back-plot ceiling, then
     expend it (the plots are recorded at first detection — the long
-    cruise adds nothing to the FIND chain under test)."""
-    target = w.ships[0].pos.copy()
+    cruise adds nothing to the FIND chain under test).
+
+    Updated for Phase 7 (seeded fleet): the closest destroyer is targeted
+    so the SPY-1 (300 km range) physically detects the climb; 100 s of
+    flight moves the missile ~30 km downrange — well inside the sensor
+    envelope regardless of fleet seed placement."""
+    # Target the destroyer closest to BASE_POS so detection is reliable.
+    from world.generation import BASE_POS
+    closest = min(w.ships, key=lambda s: float(
+        np.hypot(s.pos[0] - BASE_POS[0], s.pos[2] - BASE_POS[2])))
+    target = closest.pos.copy()
     target[1] = 0.0
     for _ in range(3):
         w.reload_left = 0.0
         m = w.launch("hi-lo", target)
         assert m is not None
-        for _ in range(int(40.0 / DT)):
+        for _ in range(int(100.0 / DT)):   # 100 s -> ~30 km, inside any SPY-1 horizon
             w.step(DT)
         m.alive = False
         for _ in range(4):
@@ -161,11 +181,21 @@ def test_harm_mission_silence_degrades_and_belief_flips_back():
 
 @pytest.mark.slow
 def test_backplot_jassm_strike_reaches_defeat():
-    w = CombatWorld()
+    # Phase 7 (updated): use seed=5 which places a destroyer at ~135 km so
+    # the Oniks back-plot detects the missile below the 2 km ceiling.
+    # DEFAULT seed=1337 places all destroyers at 260-340 km; the back-plot
+    # threshold requires first detection at < 2 km altitude, which needs
+    # the ship's SPY-1 to see the missile during its early climb (< 200 km).
+    # Seed=5 is the canonical probe-measured geometry for this test.
+    w = CombatWorld(CombatConfig(seed=5))
     w.radar_station.emitting = False    # never located: KILL ungated (the
     #                                     blind-before-kill gate is covered
     #                                     by tests/test_commander.py)
     _disarm_ships(w)                    # the Oniks flights fly clean
+    _disarm_pantsirs(w)                 # Phase 6 point-defense isolated from
+    #                                     the Phase 5b kill chain (the Pantsir
+    #                                     interception physics is covered by
+    #                                     tests/test_pantsir_phase6.py)
     tlam0 = sum(s.tomahawk_ammo for s in w.ships)
     _plot_three_oniks(w)
     clusters = w.commander.picture.targetable_clusters()
@@ -228,23 +258,34 @@ def test_backplot_jassm_strike_reaches_defeat():
 
 @pytest.mark.slow
 def test_ir_drone_hunt_kills_with_no_rwr_lock():
-    w = CombatWorld()
+    # Phase 7 (updated): seed=5 places a destroyer at ~135 km — close enough
+    # for the drone to cross inside its 30 km stealth bubble at a plausible
+    # crossing leg computed from the live fleet position.
+    w = CombatWorld(CombatConfig(seed=5))
     _disarm_ships(w)                    # isolate the IR channel (the SM-2
     #                                     hunt is pinned by phase-4 e2e)
     d = w.drone
-    # Crossing leg inside destroyer_00's 30 km stealth bubble: the track
-    # forms, the commander vectors the hunter.
-    d.pos[0], d.pos[2] = -40_000.0, 128_000.0
-    d.set_route([(60_000.0, 128_000.0)])
+    # Crossing leg inside the closest destroyer's 30 km stealth bubble:
+    # the track forms, the commander vectors the hunter.
+    # Updated for Phase 7: use the seeded fleet position rather than the
+    # old hardcoded DESTROYER_SPAWNS pin — the drone crosses 15 km ahead
+    # of the closest destroyer at its Z depth (within stealth range).
+    close_ship = min(w.ships, key=lambda s: float(
+        np.hypot(s.pos[0], s.pos[2])))
+    sx, sz = float(close_ship.pos[0]), float(close_ship.pos[2])
+    # Position drone 15 km ahead (lower z) of the closest ship, crossing
+    # from sx-40 km to sx+40 km — the 80 km leg crosses the stealth bubble.
+    d.pos[0], d.pos[2] = sx - 40_000.0, sz - 15_000.0
+    d.set_route([(sx + 40_000.0, sz - 15_000.0)])
     f = w._fighter_list[0]
-    f.launch((0.0, 160_000.0))
+    f.launch((sx, sz))
     f.pos[1] = FIGHTER_ALT_M
     w.step(DT_COARSE)                   # takeoff completes -> TRANSIT
     assert f.state == FS_TRANSIT
     # Scenario forcing: the tail-chase already at the snap-up ceiling band
     # 10 km behind the drone (the full 9->15.5 km climb + 40 km chase is
     # probe-measured: tools/probe_5b_harm_ir.py).
-    f.pos[0], f.pos[1], f.pos[2] = -50_000.0, 15_000.0, 128_000.0
+    f.pos[0], f.pos[1], f.pos[2] = sx - 50_000.0, 15_000.0, sz - 15_000.0
     saw_lock = False
     ir = None
     for _ in range(int(240.0 / DT_COARSE)):
@@ -327,14 +368,20 @@ def test_40n6_kills_awacs_beyond_200km_on_forced_track():
 # ---------------------------------------------------------------------------
 
 def test_victory_all_ships_and_airfield_dead():
+    """Phase 7 (updated): win condition now requires all ships + airfield +
+    all enemy ground radar structures (DEFAULT config: n_enemy_radars=2)."""
     w = CombatWorld()
     assert not w.victorious
     for s in w.ships:
         s.hp = 0
         s.state = ST_SINKING
-    assert not w.victorious             # airfield still stands
+    assert not w.victorious             # airfield + radars still stand
     while w.airfield.alive:
         w.airfield.hit()
+    # Phase 7: enemy ground radars also part of the win condition.
+    for struct, r in w.enemy_radars:
+        while struct.alive:
+            struct.hit()
     assert w.victorious
     assert not w.defeated               # outcomes are independent
     for _ in range(8):                  # the sim keeps running (spec 2.2)

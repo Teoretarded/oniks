@@ -1,22 +1,40 @@
-"""CombatWorld (Phase 2): destroyers at sea, radar-gated picture, on-land
-site, enemy defense controller wired into step()."""
+"""CombatWorld (Phase 2/7): destroyers at sea, radar-gated picture, on-land
+site, enemy defense controller wired into step().
+
+test_no_sandbox_traffic: UPDATED for Phase 7 — CombatWorld now uses seeded
+fleet generation (sample_fleet) driven by CombatConfig.  The legacy
+DESTROYER_SPAWNS 2-element constant is retired as the generation source;
+ship counts are now config-driven (DEFAULT: 3 destroyers + 1 carrier).
+The test now asserts ship count and type rather than exact IDs from the old
+constant (updated to seeded-fleet truth).
+"""
 
 from sim.enemy_ships import Destroyer
-from world.combat import (COMBAT_SITES, DESTROYER_SPAWNS,
-                          PLAYER_RADAR_RANGES, RADAR_STATION_XZ, CombatWorld)
+from world.combat import (COMBAT_SITES, PLAYER_RADAR_RANGES,
+                          RADAR_STATION_XZ, CombatWorld)
+from world.combat_config import DEFAULT as DEFAULT_CONFIG
 from world.generation import terrain_height_scalar
 
 DT = 1.0 / 120.0
 
 
 def test_no_sandbox_traffic():
-    """Phase 2 (extended by Phase 5a): the only ships are the two enemy
-    destroyers plus EXACTLY one carrier (spec 5.4) — none of the sandbox
-    lane traffic, no legacy aircraft (Phase-5a enemy air lives in
-    cw.enemy_air, never here), only the friendly radar site."""
+    """Phase 5a/7 (updated): the only ships are config.n_destroyers enemy
+    destroyers plus EXACTLY one carrier (spec 5.4) — no sandbox lane
+    traffic, no legacy aircraft (enemy air lives in cw.enemy_air), only
+    the friendly radar site.  DEFAULT config: 3 destroyers + 1 carrier.
+
+    Updated from legacy DESTROYER_SPAWNS (the 2-entry module constant is
+    retired as the generation source) to seeded-fleet truth: count and
+    type assertions rather than exact IDs.
+    """
     cw = CombatWorld()
-    assert [s.ship_id for s in cw.ships] == [
-        s["ship_id"] for s in DESTROYER_SPAWNS] + ["carrier_00"]
+    n_d = DEFAULT_CONFIG.n_destroyers     # 3
+    assert len(cw.ships) == n_d + 1      # n destroyers + 1 carrier
+    d_ids = [s.ship_id for s in cw.ships if s.ship_type != "carrier"]
+    assert all(d_id.startswith("destroyer_") for d_id in d_ids)
+    assert len(d_ids) == n_d
+    assert any(s.ship_id == "carrier_00" for s in cw.ships)
     assert all(isinstance(s, Destroyer) for s in cw.ships)
     assert [s.ship_type for s in cw.ships].count("carrier") == 1
     assert cw.aircraft == []

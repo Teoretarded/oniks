@@ -156,7 +156,9 @@ from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
 from sim.sam import SamMissile
 from sim.strike import StrikeMissile
+from world.combat_config import CombatConfig, DEFAULT as _DEFAULT_CONFIG
 from world.generation import BASE_POS, SEED, terrain_height_scalar
+from world.spawn_zones import sample_fleet
 from world.world import SAM_TEL_POS, WorldState
 
 # Player ground radar station: home-coast shelf east of the base (the same
@@ -319,6 +321,21 @@ PANTSIR_STRUCT_HP = 2
 # +Z with the hull, NOT +X.  Height 4.6 m tops the turret (model Y 4.58 m).
 PANTSIR_STRUCT_DIMS = (3.0, 8.0, 4.6)   # (X beam, Z length, Y height)
 
+# --- Phase 7: enemy ground radars (spec §5.5, config.n_enemy_radars) -----------
+# Enemy ground radar deployment: on the enemy continent (z >= 500 km, dry land
+# guaranteed).  X positions are drawn uniformly in the band below.  Z is fixed
+# at _ENEMY_RADAR_Z_BASE (502 km — comfortably on the continent, probed dry).
+# Antenna height and detection ranges mirror the PLAYER radar station above.
+_ENEMY_RADAR_Z_BASE: float = 502_000.0       # m — dry land on enemy continent
+_ENEMY_RADAR_ANTENNA_M: float = 18.0         # m — matches player radar mast
+_ENEMY_RADAR_RANGES: dict = {               # size class -> max range (m)
+    "ship":     200_000.0,
+    "fighter":  200_000.0,
+    "missile":  100_000.0,
+    "stealth":  30_000.0,
+}
+_ENEMY_RADAR_X_RANGE: tuple = (-60_000.0, 60_000.0)  # X placement band (m)
+
 # --- Phase 4: recon drone ------------------------------------------------------
 
 DRONE_COUNT = 1             # drones fielded (spec 4.3 default; the Phase-7
@@ -358,8 +375,34 @@ ELINT_AGE_MAX_S = TRACK_DROP_S - 10.0   # 80 s: error == actionable bound
 class CombatWorld(WorldState):
     """WorldState variant: destroyers at sea, radar-gated contact picture."""
 
-    def __init__(self, rng_seed: int = SEED):
+    def __init__(self, config: CombatConfig = _DEFAULT_CONFIG,
+                 rng_seed: int | None = None):
+        """Construct the combat world from a CombatConfig.
+
+        The legacy ``rng_seed`` keyword is kept for backward-compat:
+        if supplied it OVERRIDES config.seed (old call sites like
+        ``CombatWorld(rng_seed=42)`` keep working without change).
+        Note: rng_seed alone (positional) will NOT work; callers that
+        used ``CombatWorld()`` (no args) or ``CombatWorld(rng_seed=N)``
+        are unchanged.  New callers pass a CombatConfig.
+        """
+        if rng_seed is None:
+            rng_seed = config.seed
+        # _config must be set BEFORE super().__init__ because _spawn_ships
+        # is called from there and reads it.
+        self._config = config
         super().__init__(rng_seed)
+
+        # Wire the finite-magazine armory AFTER super().__init__ so the
+        # per-shot counters (sam_ammo, sam_ammo_40n6) are overwritten.
+        self._arm_magazines(
+            oniks_ammo=config.oniks_ammo,
+            oniks_mag_reload_s=config.oniks_mag_reload_s,
+            s300_48n6_ammo=config.s300_48n6_ammo,
+            s300_40n6_ammo=config.s300_40n6_ammo,
+            s300_mag_reload_s=config.s300_mag_reload_s,
+        )
+
         destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
         # The enemy side's fire control: CIWS randomness derives from the
         # world seed so a battle replays exactly (determinism contract).
@@ -386,7 +429,7 @@ class CombatWorld(WorldState):
                           self.radar_station, "alive", False)),
         ]
 
-        # ---- Phase 6: Pantsir-S1 point defense (spec §4.2) ----
+        # ---- Phase 6: Pantsir-S1 point defense (spec §4.2, config-driven) ----
         # Player-side mirror of the destroyers' SM-2/CIWS auto-defense: each
         # Pantsir auto-engages inbound hostile STRIKE missiles tracked by its
         # own 30 km radar.  Determinism: a child generator off the world seed
@@ -402,17 +445,23 @@ class CombatWorld(WorldState):
         # kills it); on_destroyed clears Pantsir.alive AND drops its radar
         # from the net (mirror of the radar-station structure's death — the
         # network coverage vanishes with the node).
+        n_pantsir = config.n_pantsir
         self._pantsir_rng = np.random.default_rng([rng_seed, 6])
         self.pantsirs: list[Pantsir] = []
-        for spec in PANTSIR_SPAWNS[:PANTSIR_COUNT]:
+        pantsir_spawns = self._pantsir_spawns(n_pantsir, rng_seed)
+        for spec in pantsir_spawns:
             px, pz = spec["xz"]
             pos = np.array([px, terrain_height_scalar(px, pz), pz],
                            dtype=np.float64)
             unit = Pantsir(
                 spec["unit_id"], pos,
+                missile_ammo=config.pantsir_57e6_ammo,
+                gun_ammo=config.pantsir_gun_ammo,
                 rng=np.random.default_rng(
                     int(self._pantsir_rng.integers(2 ** 63))),
                 radar_network=self.radar_net)
+            # Arm the Pantsir magazine-refill mechanic.
+            unit.arm_magazine(config.pantsir_mag_reload_s)
             self.pantsirs.append(unit)
             # Destructible wrapper: the closure binds THIS unit (default-arg
             # capture so the loop variable is frozen per structure).  Kind
@@ -466,6 +515,16 @@ class CombatWorld(WorldState):
         # Enemy fixed installations, swept against PLAYER cruise missiles
         # (the mirror of self.structures vs hostile rounds) in step().
         self.enemy_structures = [self.airfield]
+
+        # ---- Enemy ground radars (spec §5.5, config.n_enemy_radars) ----------
+        # Each radar is a Structure on the enemy continent (dry-land pin) with
+        # a Radar that joins the ENEMY sensor picture (cue for destroyers +
+        # commander).  They are valid Oniks targets (swept in the
+        # apply_missile_hits_structures pass against PLAYER cruise missiles)
+        # and contribute to the victorious win condition.
+        self.enemy_radars: list[tuple] = []   # (Structure, Radar)
+        self._spawn_enemy_radars(config.n_enemy_radars, rng_seed)
+
         carrier = next(s for s in self.ships if isinstance(s, Carrier))
         self.carrier = carrier
         # Recovery sites in NEAREST-SURVIVING-base priority order is the
@@ -509,13 +568,119 @@ class CombatWorld(WorldState):
         self._cmd_missions: list[dict] = []
 
     def _spawn_ships(self):
-        ships = [Destroyer(s["ship_id"], s["anchor_xz"],
-                           heading_deg=s["heading_deg"])
-                 for s in DESTROYER_SPAWNS]
-        # Always exactly ONE carrier (spec §5.4) at the fixed deep anchor.
-        ships.append(Carrier("carrier_00", CARRIER_ANCHOR_XZ,
-                             heading_deg=CARRIER_HEADING_DEG))
+        """Seeded fleet generation via world/spawn_zones.sample_fleet.
+
+        The carrier (always 1) and config.n_destroyers destroyers are placed
+        using a numpy SeedSequence child off the world seed (tag [seed, 3] —
+        never colliding with defense/recon/commander/pantsir streams at tags
+        6/4/5/6 respectively).  All hulls get a heading toward BASE_POS.
+        _config is set BEFORE super().__init__ so this method finds it.
+        """
+        import math as _math
+        config = getattr(self, "_config", _DEFAULT_CONFIG)
+        fleet_rng = np.random.default_rng([config.seed, 3])
+        layout = sample_fleet(fleet_rng, config.n_destroyers)
+
+        bx, bz = float(BASE_POS[0]), float(BASE_POS[2])
+
+        def _heading(anchor_xz):
+            ax, az = anchor_xz
+            return _math.degrees(_math.atan2(bx - ax, bz - az))
+
+        ships = []
+        for i, xz in enumerate(layout["destroyers"]):
+            ships.append(Destroyer(
+                f"destroyer_{i:02d}", xz,
+                heading_deg=_heading(xz)))
+
+        ships.append(Carrier(
+            "carrier_00", layout["carrier"],
+            heading_deg=_heading(layout["carrier"])))
+
         return ships
+
+    @staticmethod
+    def _pantsir_spawns(n: int, seed: int) -> list[dict]:
+        """Deterministic Pantsir pad sites for up to n units.
+
+        The first min(n, PANTSIR_COUNT) use the LOCKED probe-measured pads
+        from PANTSIR_SPAWNS.  Units beyond PANTSIR_COUNT are generated from
+        a child rng at offsets around the base (maintains SEEKER_BASKET_M
+        clearance from the TEL clusters they guard).
+        """
+        import math as _math
+        spawns = list(PANTSIR_SPAWNS[:min(n, PANTSIR_COUNT)])
+        if n > PANTSIR_COUNT:
+            bx = float(BASE_POS[0])
+            bz = float(BASE_POS[2])
+            extra = n - PANTSIR_COUNT
+            for j in range(extra):
+                angle = _math.radians(
+                    (j / extra) * 360.0 + 45.0)
+                radius = 1_700.0 + j * 200.0
+                px = bx + radius * _math.sin(angle)
+                pz = bz + radius * _math.cos(angle)
+                spawns.append({
+                    "unit_id": f"pantsir_{PANTSIR_COUNT + j:02d}",
+                    "xz": (px, pz),
+                })
+        return spawns[:n]
+
+    def _spawn_enemy_radars(self, n: int, seed: int) -> None:
+        """Place n enemy ground radars on the enemy continent.
+
+        Deterministic: a SeedSequence child off [seed, 7] draws X positions
+        uniformly in _ENEMY_RADAR_X_RANGE.  All radars sit at z =
+        _ENEMY_RADAR_Z_BASE on dry land (enemy continent land z > 500 km).
+
+        Each radar:
+        - Is a Structure in self.enemy_structures (swept vs player Oniks).
+        - Owns a Radar in the enemy sensor picture (feeds destroyers/commander
+          via _enemy_cue_radars — extended to include ground radars).
+        - Carries a tactical-map site-marker dict (same shape as AIRFIELD_SITE)
+          shown only once a player sensor images it (fog of war; latched in
+          _update_airfield_intel, surfaced by known_enemy_sites).
+        - on_destroy: clears its Radar.alive.
+        """
+        # Fog of war for the radar installations: ids the player side has
+        # IMAGED (latched, like airfield_known — fixed installations never
+        # age out of knowledge).  Built unconditionally so the n==0 path is
+        # consistent with the n>0 path for downstream getattr-free access.
+        self._enemy_radar_known: set = set()
+        self._enemy_radar_sites: list = []
+        if n <= 0:
+            self._enemy_ground_radars: list = []
+            return
+
+        radar_rng = np.random.default_rng([seed, 7])
+        x_lo, x_hi = _ENEMY_RADAR_X_RANGE
+        self._enemy_ground_radars = []
+
+        for i in range(n):
+            xpos = float(radar_rng.uniform(x_lo, x_hi))
+            zpos = _ENEMY_RADAR_Z_BASE
+            ypos = terrain_height_scalar(xpos, zpos)
+            pos = np.array([xpos, ypos, zpos], dtype=np.float64)
+            radar_id = f"enemy_radar_{i:02d}"
+
+            r = Radar(
+                radar_id=radar_id,
+                pos=(xpos, ypos + _ENEMY_RADAR_ANTENNA_M, zpos),
+                antenna_m=_ENEMY_RADAR_ANTENNA_M,
+                ranges=_ENEMY_RADAR_RANGES,
+            )
+            self._enemy_ground_radars.append(r)
+
+            # Structure: reuses the player radar-station OBB/HP defaults.
+            struct = Structure(
+                radar_id, "radar_station", pos,
+                on_destroyed=lambda _s, _r=r: setattr(_r, "alive", False))
+            self.enemy_structures.append(struct)
+            self.enemy_radars.append((struct, r))
+            # Map marker (consumed by known_enemy_sites once imaged).
+            self._enemy_radar_sites.append(
+                {"id": radar_id, "kind": "radar",
+                 "pos": (xpos, zpos), "name": "ENEMY RADAR"})
 
     def _spawn_aircraft(self):
         return []
@@ -594,10 +759,15 @@ class CombatWorld(WorldState):
         air radar — the AWACS emits whenever it flies (5a doctrine) and a
         fighter's nose radar searches only while the jet is up
         (``alive`` is the airborne flag: parked/rearming/dead airframes
-        radiate nothing)."""
+        radiate nothing).  Phase 7: live enemy ground radars also emit
+        (always-on coastal installations)."""
         ems = [(s.radar.radar_id, s.radar) for s in self.ships]
         ems.extend((e.radar.radar_id, e.radar)
                    for e in self.enemy_air if e.alive)
+        # Enemy ground radars: always emitting while alive.
+        ems.extend((r.radar_id, r)
+                   for r in getattr(self, "_enemy_ground_radars", [])
+                   if r.alive)
         return ems
 
     def _step_recon_sensors(self) -> None:
@@ -664,12 +834,18 @@ class CombatWorld(WorldState):
     def _enemy_cue_radars(self):
         """Datalink cueing sources beyond own-ship SPY-1 (spec section 3:
         "enemy ships rely on their own radar or AWACS cueing"): the live
-        AWACS radar.  Resolved lazily — the defense controller is built
-        before the AWACS in __init__ but only calls this from step()."""
+        AWACS radar AND any live enemy ground radars (they join the enemy
+        picture, cueing destroyers like the AWACS).  Resolved lazily —
+        the defense controller is built before the AWACS and before
+        _spawn_enemy_radars in __init__."""
+        cues = []
         awacs = getattr(self, "awacs", None)
         if awacs is not None and awacs.alive:
-            return [awacs.radar]
-        return []
+            cues.append(awacs.radar)
+        for r in getattr(self, "_enemy_ground_radars", []):
+            if r.alive:
+                cues.append(r)
+        return cues
 
     def _step_enemy_air(self, dt: float) -> None:
         """Rearm queues, the standing-CAP scheduler, then every enemy
@@ -740,25 +916,48 @@ class CombatWorld(WorldState):
         """Enemy fixed installations the player side has actually IMAGED
         (fog of war for structures): the tactical map draws these as site
         markers; an unseen installation is simply absent from the map.
-        The 3D scene is not gated — the geometry physically exists."""
-        return [AIRFIELD_SITE] if self.airfield_known else []
+        The 3D scene is not gated — the geometry physically exists.
+
+        Phase 7: the airfield AND every imaged enemy ground radar (spec
+        §5.5) — both latched once a player sensor sees them, so the map
+        fills in as the drone images the coast."""
+        sites = [AIRFIELD_SITE] if self.airfield_known else []
+        known = getattr(self, "_enemy_radar_known", ())
+        for site in getattr(self, "_enemy_radar_sites", ()):
+            if site["id"] in known:
+                sites.append(site)
+        return sites
 
     def _update_airfield_intel(self) -> None:
-        """Latch ``airfield_known`` when any player sensor sees the
-        airfield: the drone's SAR strip (the designed path — a surface
-        'structure' is imaged exactly like a silent hull) or, for
-        completeness, the radar net (in practice the 516 km pin sits far
-        past the player radar's range, so SAR overflight is the game)."""
-        if self.airfield_known or self.sim_time < self._intel_next_t:
+        """Latch the fixed-installation map markers (fog of war) when any
+        player sensor images them: the drone's SAR strip (the designed
+        path — a surface 'structure' is imaged exactly like a silent hull)
+        or the radar net.  Covers the airfield AND, Phase 7, the enemy
+        ground radars.  Gated only on the shared INTEL_CHECK_PERIOD_S
+        cadence (NOT on airfield_known — radars may still be unknown after
+        the airfield latches)."""
+        if self.sim_time < self._intel_next_t:
             return
         self._intel_next_t = self.sim_time + INTEL_CHECK_PERIOD_S
-        pos = self.airfield.pos
+        if not self.airfield_known and self._sensor_images(self.airfield.pos):
+            self.airfield_known = True
+        known = self._enemy_radar_known
+        for struct, _r in getattr(self, "enemy_radars", ()):
+            if struct.structure_id in known:
+                continue
+            if self._sensor_images(struct.pos):
+                known.add(struct.structure_id)
+
+    def _sensor_images(self, pos) -> bool:
+        """True when a live player sensor images the surface point ``pos``:
+        the drone's SAR strip (the imaging path for fixed installations) or
+        the radar net at the 'ship' size class.  The shared gate behind the
+        airfield and enemy-radar fog-of-war latches."""
         drone = self.drone
         if (drone is not None and drone.alive
                 and self.sar.detects(drone.pos, pos)):
-            self.airfield_known = True
-        elif self.radar_net.visible(pos, "ship"):
-            self.airfield_known = True
+            return True
+        return bool(self.radar_net.visible(pos, "ship"))
 
     # ---------------------------------------------------------------- phase 5b
 
@@ -1126,14 +1325,22 @@ class CombatWorld(WorldState):
 
     @property
     def victorious(self) -> bool:
-        """Spec 2.2 win condition: all enemy ships (incl. the carrier)
-        AND the enemy airfield destroyed.  Phase 5 fields no enemy
-        GROUND radars — they join this conjunction when the Phase-7
-        setup screen adds their counts.  Like ``defeated``, the sim
-        keeps running (full end-screens are Phase 7); the HUD mirrors
-        the defeat banner with a VICTORY one."""
-        return (all(not s.alive for s in self.ships)
-                and not self.airfield.alive)
+        """Spec 2.2 win condition: all enemy ships (incl. carrier) AND
+        all enemy ground radars AND the enemy airfield destroyed.
+        Like ``defeated``, the sim keeps running after this trips
+        (full end-screens in Phase 7); the HUD mirrors the defeat
+        banner with a VICTORY banner."""
+        if not all(not s.alive for s in self.ships):
+            return False
+        if not self.airfield.alive:
+            pass  # airfield dead — check radars below
+        else:
+            return False
+        # All enemy ground radars must also be destroyed.
+        for struct, _r in getattr(self, "enemy_radars", []):
+            if struct.alive:
+                return False
+        return True
 
     @property
     def launcher_armed(self) -> bool:

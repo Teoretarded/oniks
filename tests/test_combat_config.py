@@ -1,0 +1,451 @@
+"""Tests for world/combat_config.py and the config-driven CombatWorld.
+
+Coverage:
+1. CombatConfig defaults match spec 2.1 LOCKED schema.
+2. clamp_config enforces all slider ranges; seed is unclamped.
+3. Seeded determinism: same config -> same fleet anchors + enemy radar pins.
+4. Different seed -> different layout.
+5. n_destroyers=10 places 10 destroyers + 1 carrier in open water with separation.
+6. Enemy ground radars: on dry land (terrain > 0) + alive in enemy sensor picture.
+7. Oniks magazine: depletes, locks at 0, refills after oniks_mag_reload_s.
+8. S-300 48N6 and 40N6 magazine refill.
+9. Pantsir 57E6 magazine refill.
+10. Sandbox WorldState Oniks stays infinite (pre-existing green must stay green).
+11. victorious flips only when ships + radars + airfield all dead.
+12. defeated unchanged (all bastion_tel dead).
+"""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pytest
+
+from sim.ships import ST_GONE
+from world.combat_config import (
+    DEFAULT, CombatConfig, clamp_config, clamp_field,
+    CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_ENEMY_RADARS, CLAMP_PLAYER_RADARS,
+    CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_RELOAD_S,
+)
+
+DT = 1.0 / 120.0
+
+
+# ---------------------------------------------------------------------------
+# 1. Default values match LOCKED schema
+# ---------------------------------------------------------------------------
+
+def test_defaults_match_locked_schema():
+    c = CombatConfig()
+    assert c.seed == 1337
+    assert c.n_destroyers == 3
+    assert c.n_awacs == 1
+    assert c.n_enemy_radars == 2
+    assert c.n_player_radars == 1
+    assert c.n_pantsir == 2
+    assert c.n_drones == 1
+    assert c.oniks_ammo == 8
+    assert c.oniks_mag_reload_s == 120.0
+    assert c.s300_48n6_ammo == 4
+    assert c.s300_40n6_ammo == 2
+    assert c.s300_mag_reload_s == 45.0
+    assert c.pantsir_57e6_ammo == 12
+    assert c.pantsir_gun_ammo == 700
+    assert c.pantsir_mag_reload_s == 60.0
+
+
+def test_default_is_frozen():
+    """Frozen dataclass: cannot assign fields."""
+    with pytest.raises((AttributeError, TypeError)):
+        DEFAULT.seed = 42  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# 2. clamp_config + clamp_field enforce ranges
+# ---------------------------------------------------------------------------
+
+def test_clamp_field_bounds():
+    assert clamp_field(5, 0, 10) == 5
+    assert clamp_field(-1, 0, 10) == 0
+    assert clamp_field(99, 0, 10) == 10
+
+
+def test_clamp_config_count_floors():
+    c = clamp_config(
+        n_destroyers=-5, n_awacs=-1, n_enemy_radars=-1,
+        n_player_radars=0,   # below min 1
+        n_pantsir=-1, n_drones=-1,
+    )
+    assert c.n_destroyers == CLAMP_DESTROYERS[0]
+    assert c.n_awacs == CLAMP_AWACS[0]
+    assert c.n_enemy_radars == CLAMP_ENEMY_RADARS[0]
+    assert c.n_player_radars == CLAMP_PLAYER_RADARS[0]  # min=1
+    assert c.n_pantsir == CLAMP_PANTSIR[0]
+    assert c.n_drones == CLAMP_DRONES[0]
+
+
+def test_clamp_config_count_ceilings():
+    c = clamp_config(
+        n_destroyers=999, n_awacs=999, n_enemy_radars=999,
+        n_player_radars=999, n_pantsir=999, n_drones=999,
+    )
+    assert c.n_destroyers == CLAMP_DESTROYERS[1]
+    assert c.n_awacs == CLAMP_AWACS[1]
+    assert c.n_enemy_radars == CLAMP_ENEMY_RADARS[1]
+    assert c.n_player_radars == CLAMP_PLAYER_RADARS[1]
+    assert c.n_pantsir == CLAMP_PANTSIR[1]
+    assert c.n_drones == CLAMP_DRONES[1]
+
+
+def test_clamp_config_ammo_floor():
+    c = clamp_config(
+        oniks_ammo=0, s300_48n6_ammo=0, s300_40n6_ammo=0,
+        pantsir_57e6_ammo=0, pantsir_gun_ammo=0,
+    )
+    assert c.oniks_ammo == CLAMP_AMMO[0]        # min 1
+    assert c.s300_48n6_ammo == CLAMP_AMMO[0]
+    assert c.s300_40n6_ammo == CLAMP_AMMO[0]
+    assert c.pantsir_57e6_ammo == CLAMP_AMMO[0]
+    assert c.pantsir_gun_ammo == CLAMP_AMMO[0]
+
+
+def test_clamp_config_ammo_ceiling():
+    c = clamp_config(
+        oniks_ammo=9999, s300_48n6_ammo=9999,
+    )
+    assert c.oniks_ammo == CLAMP_AMMO[1]        # max 200
+    assert c.s300_48n6_ammo == CLAMP_AMMO[1]
+
+
+def test_clamp_config_reload_range():
+    c = clamp_config(oniks_mag_reload_s=0.0)    # below min 5.0
+    assert c.oniks_mag_reload_s == CLAMP_RELOAD_S[0]
+
+    c2 = clamp_config(oniks_mag_reload_s=9999.0)  # above max 600.0
+    assert c2.oniks_mag_reload_s == CLAMP_RELOAD_S[1]
+
+
+def test_clamp_config_seed_unclamped():
+    """Seed must accept any integer — no clamping applied."""
+    assert clamp_config(seed=0).seed == 0
+    assert clamp_config(seed=2 ** 32).seed == 2 ** 32
+    assert clamp_config(seed=-1).seed == -1
+
+
+# ---------------------------------------------------------------------------
+# 3 + 4. Seeded determinism / different-seed divergence
+# ---------------------------------------------------------------------------
+
+def _fleet_anchors(cw):
+    """Sorted (x, z) anchor pairs for all ships (carrier included)."""
+    return sorted(
+        (round(float(s.pos[0])), round(float(s.pos[2])))
+        for s in cw.ships)
+
+
+def _enemy_radar_pins(cw):
+    """Sorted (x, z) for each enemy ground radar structure."""
+    return sorted(
+        (round(float(struct.pos[0])), round(float(struct.pos[2])))
+        for struct, _r in cw.enemy_radars)
+
+
+def test_seeded_determinism_fleet_and_radars():
+    """Same config -> same fleet anchors and enemy radar pins."""
+    from world.combat import CombatWorld
+    cfg = CombatConfig(seed=42, n_destroyers=3, n_enemy_radars=2)
+    cw_a = CombatWorld(cfg)
+    cw_b = CombatWorld(cfg)
+    assert _fleet_anchors(cw_a) == _fleet_anchors(cw_b)
+    assert _enemy_radar_pins(cw_a) == _enemy_radar_pins(cw_b)
+
+
+def test_different_seed_different_layout():
+    """Different seed -> different fleet layout."""
+    from world.combat import CombatWorld
+    cw1 = CombatWorld(CombatConfig(seed=100, n_destroyers=4))
+    cw2 = CombatWorld(CombatConfig(seed=200, n_destroyers=4))
+    assert _fleet_anchors(cw1) != _fleet_anchors(cw2)
+
+
+# ---------------------------------------------------------------------------
+# 5. n_destroyers=10: open water, separation
+# ---------------------------------------------------------------------------
+
+def test_large_destroyer_count_placement():
+    """n_destroyers=10 places 10 destroyers + 1 carrier, all open water,
+    all >= 25 km apart (world/spawn_zones.py contract)."""
+    from world.combat import CombatWorld
+    from world.spawn_zones import MIN_SEPARATION_M
+    from world.generation import terrain_height_scalar
+
+    cw = CombatWorld(CombatConfig(seed=1337, n_destroyers=10))
+    assert len(cw.ships) == 11  # 10 destroyers + 1 carrier
+
+    xz_list = [(float(s.pos[0]), float(s.pos[2])) for s in cw.ships]
+    # Open water
+    for x, z in xz_list:
+        assert terrain_height_scalar(x, z) < -5.0, (
+            f"ship at ({x:.0f}, {z:.0f}) not in open water")
+    # >= 25 km separation
+    for i, (ax, az) in enumerate(xz_list):
+        for j, (bx, bz) in enumerate(xz_list):
+            if i >= j:
+                continue
+            sep = math.hypot(ax - bx, az - bz)
+            assert sep >= MIN_SEPARATION_M, (
+                f"ships {i} and {j} too close ({sep/1e3:.1f} km)")
+
+
+# ---------------------------------------------------------------------------
+# 6. Enemy ground radars: on dry land, in enemy sensor picture
+# ---------------------------------------------------------------------------
+
+def test_enemy_radars_on_dry_land():
+    """All enemy radar structures sit on dry land (terrain > 0)."""
+    from world.combat import CombatWorld
+    from world.generation import terrain_height_scalar
+
+    cw = CombatWorld(CombatConfig(seed=1337, n_enemy_radars=4))
+    assert len(cw.enemy_radars) == 4
+    for struct, r in cw.enemy_radars:
+        x, z = float(struct.pos[0]), float(struct.pos[2])
+        h = terrain_height_scalar(x, z)
+        assert h > 0.0, (
+            f"enemy radar at ({x:.0f}, {z:.0f}) below sea level h={h:.1f}")
+
+
+def test_enemy_radars_in_enemy_picture():
+    """Enemy ground radars are returned by _enemy_cue_radars (datalink) and
+    include their Radar in the emitters list."""
+    from world.combat import CombatWorld
+
+    cw = CombatWorld(CombatConfig(seed=1337, n_enemy_radars=2))
+    cues = cw._enemy_cue_radars()
+    # The ground radar Radars should be in the cue list (alive at init)
+    ground_radars = [r for _s, r in cw.enemy_radars]
+    for r in ground_radars:
+        assert r in cues, "live enemy ground radar not in _enemy_cue_radars"
+
+    # _emitters includes them
+    emitter_ids = {eid for eid, _ in cw._emitters()}
+    for _s, r in cw.enemy_radars:
+        assert r.radar_id in emitter_ids, (
+            f"{r.radar_id} not in _emitters()")
+
+
+def test_zero_enemy_radars():
+    """n_enemy_radars=0 is valid — no radars spawned."""
+    from world.combat import CombatWorld
+    cw = CombatWorld(CombatConfig(seed=1337, n_enemy_radars=0))
+    assert cw.enemy_radars == []
+
+
+# ---------------------------------------------------------------------------
+# 7. Oniks magazine: deplete, lock, refill
+# ---------------------------------------------------------------------------
+
+def _build_combat(config=None):
+    from world.combat import CombatWorld
+    return CombatWorld(config or DEFAULT)
+
+
+def test_oniks_magazine_depletes_and_locks():
+    """Firing oniks_ammo shots drains the magazine to 0; next launch returns
+    None and launcher_armed is False."""
+    cfg = CombatConfig(seed=1337, oniks_ammo=3, oniks_mag_reload_s=60.0)
+    cw = _build_combat(cfg)
+    target = np.array([0.0, 0.0, 150_000.0])
+
+    for _ in range(3):
+        m = cw.launch("hi-lo", target)
+        assert m is not None, "launch should succeed within magazine"
+        cw.reload_left = 0.0  # skip per-shot reload
+
+    assert cw._oniks_ammo == 0
+    assert not cw.launcher_armed
+    # 4th launch blocked
+    m4 = cw.launch("hi-lo", target)
+    assert m4 is None, "4th launch must be blocked (magazine empty)"
+
+
+def test_oniks_magazine_refills_after_timer():
+    """After the magazine runs dry the refill timer runs and restores ammo."""
+    cfg = CombatConfig(seed=1337, oniks_ammo=2, oniks_mag_reload_s=5.0)
+    cw = _build_combat(cfg)
+    target = np.array([0.0, 0.0, 150_000.0])
+
+    for _ in range(2):
+        cw.launch("hi-lo", target)
+        cw.reload_left = 0.0
+
+    assert cw._oniks_ammo == 0
+    assert cw._oniks_mag_reload_left > 0.0
+
+    # Run for 5.1 s — refill should complete
+    for _ in range(int(5.1 * 120)):
+        cw.step(DT)
+
+    assert cw._oniks_ammo == 2
+    assert cw.launcher_armed
+
+
+def test_oniks_magazine_initial_count():
+    """_oniks_ammo starts at oniks_ammo; a fresh config is fully loaded."""
+    cfg = CombatConfig(seed=1337, oniks_ammo=8)
+    cw = _build_combat(cfg)
+    assert cw._oniks_ammo == 8
+    assert cw._oniks_mag_cap == 8
+
+
+# ---------------------------------------------------------------------------
+# 8. S-300 magazine refill
+# ---------------------------------------------------------------------------
+
+def test_s300_48n6_magazine_refill():
+    """48N6 pool: drains to 0, blocks further shots, refills after timer."""
+    from world.combat import CombatWorld
+
+    cfg = CombatConfig(seed=1337, s300_48n6_ammo=2, s300_mag_reload_s=5.0)
+    cw = CombatWorld(cfg)
+    assert cw.sam_ammo == 2
+
+    # Drain by direct manipulation (no need for a tracked target)
+    cw.sam_ammo = 0
+    cw._s300_48n6_mag_reload_left = cfg.s300_mag_reload_s
+
+    assert not cw.sam_launcher_armed
+
+    for _ in range(int(5.1 * 120)):
+        cw.step(DT)
+
+    assert cw.sam_ammo == 2
+    assert cw.sam_launcher_armed
+
+
+def test_s300_40n6_magazine_refill():
+    """40N6 pool: same mechanic as 48N6."""
+    from world.combat import CombatWorld
+
+    cfg = CombatConfig(seed=1337, s300_40n6_ammo=2, s300_mag_reload_s=5.0)
+    cw = CombatWorld(cfg)
+    assert cw.sam_ammo_40n6 == 2
+
+    cw.sam_ammo_40n6 = 0
+    cw._s300_40n6_mag_reload_left = cfg.s300_mag_reload_s
+
+    assert not cw.sam_40n6_launcher_armed
+
+    for _ in range(int(5.1 * 120)):
+        cw.step(DT)
+
+    assert cw.sam_ammo_40n6 == 2
+    assert cw.sam_40n6_launcher_armed
+
+
+# ---------------------------------------------------------------------------
+# 9. Pantsir 57E6 magazine refill
+# ---------------------------------------------------------------------------
+
+def test_pantsir_magazine_refill():
+    """Pantsir 57E6 magazine: drain, block, refill after timer."""
+    from world.combat import CombatWorld
+    from sim.pantsir import PantsirDefenseController
+
+    cfg = CombatConfig(seed=1337, pantsir_57e6_ammo=3, pantsir_mag_reload_s=5.0)
+    cw = CombatWorld(cfg)
+
+    pantsir = cw.pantsirs[0]
+    assert pantsir.missile_ammo == 3
+    assert pantsir._mag_cap == 3
+    assert pantsir._mag_reload_s == 5.0
+
+    # Drain ammo and arm the timer
+    pantsir.missile_ammo = 0
+    pantsir._mag_reload_left = 5.0
+
+    for _ in range(int(5.1 * 120)):
+        cw.step(DT)
+
+    assert pantsir.missile_ammo == 3, (
+        f"Pantsir ammo should refill to 3 but got {pantsir.missile_ammo}")
+
+
+# ---------------------------------------------------------------------------
+# 10. Sandbox Oniks stays infinite (pre-existing green)
+# ---------------------------------------------------------------------------
+
+def test_sandbox_oniks_is_infinite():
+    """WorldState (sandbox) must fire unlimited Oniks — _oniks_ammo=None."""
+    from world.world import WorldState
+    import numpy as np
+
+    ws = WorldState()
+    assert ws._oniks_ammo is None, "_oniks_ammo must be None in sandbox"
+
+    target = np.array([0.0, 0.0, 150_000.0])
+    for _ in range(10):
+        m = ws.launch("hi-lo", target)
+        assert m is not None, "Sandbox Oniks must be infinite"
+        ws.reload_left = 0.0  # skip per-shot reload
+
+
+# ---------------------------------------------------------------------------
+# 11. victorious condition: ships + radars + airfield all dead
+# ---------------------------------------------------------------------------
+
+def test_victorious_requires_all_conditions():
+    """victorious only flips when all ships AND all enemy radars AND airfield
+    are destroyed — partial destruction is not enough."""
+    from world.combat import CombatWorld
+
+    cfg = CombatConfig(seed=1337, n_enemy_radars=2)
+    cw = CombatWorld(cfg)
+
+    # Initially none are dead — not victorious.
+    assert not cw.victorious
+
+    # Kill all ships only (alive is a read-only property; set state to ST_GONE).
+    for s in cw.ships:
+        s.state = ST_GONE
+    assert not cw.victorious  # airfield + radars still alive
+
+    # Kill airfield too.
+    cw.airfield.alive = False
+    assert not cw.victorious  # radars still alive
+
+    # Kill all enemy radars.
+    for struct, r in cw.enemy_radars:
+        struct.alive = False
+        r.alive = False
+    assert cw.victorious
+
+
+def test_victorious_with_zero_radars():
+    """With n_enemy_radars=0 the win condition reduces to ships + airfield."""
+    from world.combat import CombatWorld
+
+    cfg = CombatConfig(seed=1337, n_enemy_radars=0)
+    cw = CombatWorld(cfg)
+    for s in cw.ships:
+        s.state = ST_GONE
+    cw.airfield.alive = False
+    assert cw.victorious
+
+
+# ---------------------------------------------------------------------------
+# 12. defeated: unchanged — all bastion_tel structures dead
+# ---------------------------------------------------------------------------
+
+def test_defeated_unchanged():
+    """Spec 2.2 lose condition: all bastion_tel structures dead."""
+    from world.combat import CombatWorld
+
+    cw = CombatWorld(DEFAULT)
+    assert not cw.defeated
+
+    for s in cw.structures:
+        if s.kind == "bastion_tel":
+            s.alive = False
+    assert cw.defeated

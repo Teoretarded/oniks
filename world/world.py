@@ -101,6 +101,22 @@ class WorldState:
         self.sam_ammo_40n6 = N40N6_AMMO  # rounds: N40N6_AMMO = 2
         self.oniks_fired = 0            # launch ordinal: seeds the weave phase
 
+        # --- Magazine-refill armory (LOCKED mechanic) -------------------------
+        # These are None in the sandbox (infinite ammo); CombatWorld sets them
+        # via _arm_magazines() after super().__init__() completes.
+        self._oniks_mag_cap: int | None = None    # None -> infinite Oniks
+        self._oniks_ammo: int | None = None       # current magazine count
+        self._oniks_mag_reload_s: float = 0.0     # duration of refill
+        self._oniks_mag_reload_left: float = 0.0  # s until refill completes
+
+        # S-300 48N6 magazine refill (separate pool; shared refill duration)
+        self._s300_48n6_mag_cap: int | None = None
+        self._s300_48n6_mag_reload_left: float = 0.0
+        # S-300 40N6 magazine refill
+        self._s300_40n6_mag_cap: int | None = None
+        self._s300_40n6_mag_reload_left: float = 0.0
+        self._s300_mag_reload_s: float = 0.0      # shared refill duration
+
     @staticmethod
     def _spawn_ship(i: int, spawn: dict) -> Ship:
         ship = Ship(f"{spawn['ship_type']}_{i:02d}", spawn["ship_type"],
@@ -130,23 +146,94 @@ class WorldState:
 
     @property
     def launcher_armed(self) -> bool:
-        return self.reload_left <= 0.0
+        """True when the Bastion TEL is ready to fire.
+
+        Two gates:
+        1. Tube reload: ``reload_left`` must be 0 (tube mechanically re-cocked).
+        2. Magazine: if a finite Oniks magazine is active (``_oniks_ammo`` is
+           not None) the count must be positive.  None = sandbox infinite.
+        """
+        if self.reload_left > 0.0:
+            return False
+        if self._oniks_ammo is not None and self._oniks_ammo <= 0:
+            return False
+        return True
 
     @property
     def sam_launcher_armed(self) -> bool:
-        """True when the S-300 48N6 battery is ready: reload timer expired
-        AND at least one 48N6 round remaining.  This is the original interface
-        used by the HUD and by tests/test_world_state.py — kept 48N6-specific
-        so existing callers and tests are unchanged.
+        """True when the S-300 48N6 battery is ready: tube reload expired,
+        at least one 48N6 round in the tube block, AND the magazine refill
+        timer (if active) has completed.
+
+        This is the original interface used by the HUD and by
+        tests/test_world_state.py — kept 48N6-specific so existing callers
+        and tests are unchanged.
 
         For the 40N6 separate stock, check ``sam_40n6_launcher_armed``."""
-        return self.sam_reload_left <= 0.0 and self.sam_ammo > 0
+        if self.sam_reload_left > 0.0:
+            return False
+        if self.sam_ammo <= 0:
+            return False
+        # Magazine refill in progress: block firing until refill completes.
+        if self._s300_48n6_mag_reload_left > 0.0:
+            return False
+        return True
 
     @property
     def sam_40n6_launcher_armed(self) -> bool:
-        """True when the 40N6 battery is ready: reload timer expired AND
-        at least one 40N6 round remaining."""
-        return self.sam_reload_left <= 0.0 and self.sam_ammo_40n6 > 0
+        """True when the 40N6 battery is ready: tube reload expired, at least
+        one 40N6 round remaining, and any magazine refill timer completed."""
+        if self.sam_reload_left > 0.0:
+            return False
+        if self.sam_ammo_40n6 <= 0:
+            return False
+        if self._s300_40n6_mag_reload_left > 0.0:
+            return False
+        return True
+
+    # ---------------------------------------------------------------- armory
+
+    def _arm_magazines(
+        self,
+        oniks_ammo: int | None,
+        oniks_mag_reload_s: float,
+        s300_48n6_ammo: int | None,
+        s300_40n6_ammo: int | None,
+        s300_mag_reload_s: float,
+    ) -> None:
+        """Set finite-magazine caps and reload durations (CombatWorld only).
+
+        Call AFTER ``super().__init__()`` so that the tube-block counts
+        (``self.sam_ammo``, ``self.sam_ammo_40n6``) are already initialised.
+        Passing None for an ammo count leaves the corresponding pool infinite
+        (sandbox behaviour is preserved by never calling this method at all).
+
+        Parameters
+        ----------
+        oniks_ammo
+            Starting Oniks magazine count (None -> infinite).
+        oniks_mag_reload_s
+            Seconds to refill a depleted Oniks magazine.
+        s300_48n6_ammo
+            Starting 48N6 magazine count (None -> infinite).
+        s300_40n6_ammo
+            Starting 40N6 magazine count (None -> infinite).
+        s300_mag_reload_s
+            Shared refill duration for both S-300 pools.
+        """
+        if oniks_ammo is not None:
+            self._oniks_mag_cap = int(oniks_ammo)
+            self._oniks_ammo = int(oniks_ammo)
+        self._oniks_mag_reload_s = float(oniks_mag_reload_s)
+
+        if s300_48n6_ammo is not None:
+            self._s300_48n6_mag_cap = int(s300_48n6_ammo)
+            # Seed the tube block with the smaller of magazine and TEL ammo.
+            self.sam_ammo = min(self.sam_ammo, s300_48n6_ammo)
+        if s300_40n6_ammo is not None:
+            self._s300_40n6_mag_cap = int(s300_40n6_ammo)
+            self.sam_ammo_40n6 = min(self.sam_ammo_40n6, s300_40n6_ammo)
+        self._s300_mag_reload_s = float(s300_mag_reload_s)
 
     def terrain_height_at(self, x: float, z: float) -> float:
         """Scalar heightfield query (generation's bit-identical fast path)."""
@@ -168,6 +255,27 @@ class WorldState:
             self.reload_left = max(0.0, self.reload_left - dt)
         if self.sam_reload_left > 0.0:
             self.sam_reload_left = max(0.0, self.sam_reload_left - dt)
+
+        # --- Magazine-refill timers (finite-ammo mode only) -------------------
+        if self._oniks_mag_reload_left > 0.0:
+            self._oniks_mag_reload_left = max(
+                0.0, self._oniks_mag_reload_left - dt)
+            if self._oniks_mag_reload_left == 0.0 and self._oniks_mag_cap is not None:
+                self._oniks_ammo = self._oniks_mag_cap
+
+        if self._s300_48n6_mag_reload_left > 0.0:
+            self._s300_48n6_mag_reload_left = max(
+                0.0, self._s300_48n6_mag_reload_left - dt)
+            if (self._s300_48n6_mag_reload_left == 0.0
+                    and self._s300_48n6_mag_cap is not None):
+                self.sam_ammo = self._s300_48n6_mag_cap
+
+        if self._s300_40n6_mag_reload_left > 0.0:
+            self._s300_40n6_mag_reload_left = max(
+                0.0, self._s300_40n6_mag_reload_left - dt)
+            if (self._s300_40n6_mag_reload_left == 0.0
+                    and self._s300_40n6_mag_cap is not None):
+                self.sam_ammo_40n6 = self._s300_40n6_mag_cap
         for ship in self.ships:
             ship.update(dt)
         for ac in self.aircraft:
@@ -230,6 +338,15 @@ class WorldState:
         self.oniks_fired += 1
         self.missiles.append(m)
         self.reload_left = BASTION.reload_s
+
+        # Consume one round from the finite magazine (if armed).
+        if self._oniks_ammo is not None:
+            self._oniks_ammo -= 1
+            if self._oniks_ammo <= 0:
+                # Magazine depleted — start the refill timer.
+                self._oniks_ammo = 0
+                self._oniks_mag_reload_left = self._oniks_mag_reload_s
+
         return m
 
     def launch_sam(self, aircraft_id, round_id: str = "48n6"):
@@ -313,8 +430,16 @@ class WorldState:
 
         if round_id == "40n6":
             self.sam_ammo_40n6 -= 1
+            # Start magazine refill if the 40N6 pool just ran out.
+            if self.sam_ammo_40n6 <= 0 and self._s300_40n6_mag_cap is not None:
+                self.sam_ammo_40n6 = 0
+                self._s300_40n6_mag_reload_left = self._s300_mag_reload_s
         else:
             self.sam_ammo -= 1
+            # Start magazine refill if the 48N6 pool just ran out.
+            if self.sam_ammo <= 0 and self._s300_48n6_mag_cap is not None:
+                self.sam_ammo = 0
+                self._s300_48n6_mag_reload_left = self._s300_mag_reload_s
 
         self.sam_reload_left = S300_TEL.reload_s
         return m
