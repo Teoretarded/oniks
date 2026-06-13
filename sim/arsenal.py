@@ -302,7 +302,81 @@ HARM = StrikeDef(
     fuse_radius=15.0,      # m proximity fuse (game spec §8: "proximity 15 m")
 )
 
+# --- 40N6-class very-long-range SAM (player, Phase 5) -------------------------
+# Derivation from the 48N6 (S300) as reference platform:
+#
+#   Real 40N6: ~400 kg warhead, ~4,000 kg launch mass, Mach 6+ boost,
+#   max range ~380 km vs HIGH-altitude targets.  The ACTIVE terminal seeker
+#   (ARH) means the launcher needs NO illuminator after launch — the missile
+#   homes on its own RF return in terminal phase.  This is the key
+#   discriminator vs the 48N6 (SARH).  The tradeoff: the active seeker has
+#   difficulty discriminating low-altitude clutter returns, so the engagement
+#   envelope MINIMUM is 4,000 m (vs HIGH targets only — the loft geometry and
+#   active seeker wasted/blind below the horizon of the seeker dome at 30 km
+#   apogee; real-world confirmed engagement floor ~5 km stated in open
+#   references).
+#
+#   Motor sizing to reach 380 km:
+#     S300 reference: thrust 200,000 N, burn 12 s, mass 1900 kg ->
+#       burnout ~Mach 5.2, coast ~150 km (lofted).
+#     To reach 380 km we need substantially more initial energy:
+#       Scale motor: thrust 280,000 N, burn 18 s (heavier, longer burn),
+#       isp 240 s (same propellant class), mdot = 280,000/(240*9.81) = 119 kg/s
+#       => 18 s burns ~2142 kg propellant.  Leaving ~1858 kg body/warhead/seeker
+#       from a 4000 kg launch mass.  delta-v ~ thrust*burn/avg_mass
+#       = 280000*18 / 3000 ~ 1680 m/s extra, on top of catapult 18 m/s.
+#       Burnout speed at loft altitude ~20 km: ~Mach 5-5.5.  Coast from
+#       ~20 km apogee at 380 km in ~270-300 s total flight (vs 180 s for
+#       S300 at 150 km): the 40N6's practical design apogee ~30 km (published
+#       in open references; the higher loft is what extends range in thin air).
+#     Loft parameters: LOFT_GAIN and LOFT_BIAS_MAX in sam.py must be higher to
+#       drive the apogee to ~30 km.  The missile uses the SAME SamMissile phase
+#       machine; eject/boost/midcourse/terminal phases work identically.  The
+#       active seeker (no illuminator) is modelled by passing illuminator_pos_fn=None
+#       to SamMissile (the code already handles this: without an illuminator the
+#       terminal LOS check runs from the missile's own seeker — exactly the ARH
+#       mode).  The world launch_sam('40n6') sets illuminator_pos_fn=None.
+#
+#   Self-destruct time: 300 s (generous coast to 380 km at average ~1300 m/s;
+#     a 380 km shot at Mach 3.5 cruise takes ~340 s — using 360 s so an
+#     honest 380 km shot doesn't time out; add margin to 380 s).
+#
+#   Terminal range for active seeker handover: 40 km (the ARH seeker can see
+#   the target from further out in the thin upper-layer air; vs the 48N6's
+#   20 km SARH terminal gate).
+N40N6 = SamDef(
+    weapon_id="40n6", display_name="S-300VM 40N6",
+    length=8.0, diameter=0.515, launch_mass=4_000.0, propellant_mass=2_142.0,
+    # Same catapult cold-launch sequence as the 48N6 (same TEL family, same
+    # delay unit: 1.5 s hang before ignition).
+    eject_speed=18.0, eject_time=1.5,
+    # Larger motor for 380 km reach (see derivation above).
+    motor_thrust=280_000.0, motor_time=18.0, isp=240.0,
+    ref_area=0.208,    # same diameter as 48N6: pi * (0.515/2)^2
+    max_g=20.0,        # slightly lower agility than 48N6 (heavier airframe)
+    fuse_radius=25.0,
+    # Active seeker: 40 km terminal gate (ARH self-guides from further out
+    # in the thin upper atmosphere where SARH illumination would fade).
+    terminal_range=40_000.0,
+    max_range=380_000.0,
+    self_destruct_t=380.0, self_destruct_speed=250.0,
+    # Engagement floor 4,000 m: active seeker + high-loft geometry is
+    # effectively blind/wasted below this altitude — the seeker dome looks
+    # mostly DOWN in the loft and cannot resolve low-altitude clutter at
+    # the intercept geometry (vs HIGH targets only, per spec §4.3b).
+    # Real-world open-source references confirm a floor ~5 km; using 4 km
+    # as a slightly optimistic game value.
+    min_intercept_alt=4_000.0, max_intercept_alt=40_000.0,
+)
+
+# 40N6 TEL: same 5P85 body, 2 rounds (the heavier missile halves the load).
+# N40N6_AMMO = 2 is the stock constant the world uses.
+N40N6_AMMO: int = 2
+N40N6_TEL = LauncherDef("40n6_tel", "5P85 TEL (40N6)", ("40n6",), 12.0,
+                        tubes=2, ammo=N40N6_AMMO)
+
 WEAPONS = {"oniks": ONIKS}
-SAMS = {"s300": S300, "sm2": SM2}
+SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6}
 STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM}
-LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS}
+LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
+             "40n6_tel": N40N6_TEL}

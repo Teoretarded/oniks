@@ -101,6 +101,24 @@ def test_hi_oniks_at_100km_draws_sm2_launch():
     assert est_vel[2] > 0.0
 
 
+def test_enemy_sm2_is_hostile_with_air_duck_type():
+    """Enemy interceptors must carry is_hostile + the air-entity duck-type
+    (user-reported seam: untagged SM-2s were map-clickable like friendly
+    rounds and leaked truth-position diamonds). The duck-type fields are
+    what world/combat.py _update_strike_contacts feeds the gated board."""
+    d = Destroyer("dd_tag", ANCHOR)
+    ctrl = EnemyDefenseController([d])
+    w = _StubWorld()
+    w.missiles.append(_oniks((ANCHOR[0], 14_000.0, ANCHOR[1] - 100_000.0),
+                             (0.0, 0.0, 680.0)))
+    _run(ctrl, w, d, TRACK_FORM_S + 1.0)
+    sam = _sams(w)[0]
+    assert sam.is_hostile is True
+    assert sam.is_air is True
+    assert sam.radar_size == "missile"
+    assert sam.aircraft_id.startswith("hostile_sam_")
+
+
 def test_lo_skimmer_at_100km_is_under_the_horizon():
     d = Destroyer("dd_lo", ANCHOR)
     ctrl = EnemyDefenseController([d])

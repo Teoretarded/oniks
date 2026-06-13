@@ -855,10 +855,17 @@ class RwrReceiver:
                     self._states[eid] = RWR_CLEAR
                     self._bearings[eid] = bearing_deg
 
-        # --- LOCK: an enemy missile is currently targeting this drone ------
+        # --- LOCK: an enemy radar-guided missile is targeting this drone ------
+        # IR missiles (IrMissile, AIM-9X class) are PASSIVE seekers — they
+        # generate no radar emission and must never trigger a LOCK alert.
+        # A missile opts IN to RWR lock detection via the ``rwr_generates_lock``
+        # class/instance attribute (default True for backward compat, but
+        # IrMissile sets it False per the passive-seeker contract).
         for missile in enemy_missiles:
             if not getattr(missile, "alive", False):
                 continue
+            if not getattr(missile, "rwr_generates_lock", True):
+                continue   # passive-seeker: no RWR event (IR, spec §5.1)
             tgt = getattr(missile, "target", None)
             if tgt is None:
                 continue

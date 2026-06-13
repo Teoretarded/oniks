@@ -192,6 +192,14 @@ def test_drone_engaged_rwr_lock_kill_and_respawn():
     RWR, a sam_kill air burst, the respawn cooldown and the replacement
     at the base."""
     w = CombatWorld()
+    # 5b: the commander also vectors AIM-9X fighters at drone tracks —
+    # ground the air wing so this test keeps isolating the SM-2 channel
+    # it has always pinned (the IR hunt is covered by the 5b e2e).
+    from sim.enemy_air import FS_GONE, Fighter
+    for e in w.enemy_air:
+        if isinstance(e, Fighter):
+            e.state = FS_GONE
+            e._alive = False
     d = w.drone
     w.ships[1].radar.emitting = False
     d.pos[0], d.pos[2] = 20_000.0, 140_000.0

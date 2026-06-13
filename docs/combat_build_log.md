@@ -109,6 +109,29 @@ structures in sim/bases.py), then the integrator.
   smoke_combat extended with a pure-sim ESM section (radar starts
   EMITTING; fix at 90 s; >=1 Tomahawk in flight; silencing halts salvos).
 
+## Phase 5b gate — commander + the SM-2 contact seam (2026-06-13)
+
+- Workflow PASS: 664 tests, smoke 47/47. Commander holds zero world refs
+  (beliefs only); back-plot lands 264 m off the true base after 3 observed
+  launches; a totally silent player is mathematically unfindable
+  (defeated=False forever). 40N6 kills the AWACS at >200 km; IR drone-kill
+  fires with no RWR LOCK; all seven 5a flight fixes verified.
+- **Orchestrator gate — user-reported crash chased down.** Repro: map-click
+  an enemy SM-2 contact -> orbit -> zoom in. Could not reproduce the
+  original crash on current master (likely fixed incidentally by the
+  Missile.velocity duck-type in phase 2), BUT the hunt found the real
+  adjacent defect: enemy SM-2s were never tagged is_hostile, so the
+  tactical map treated them as friendly rounds — clickable, camera-follow,
+  and drawn at TRUE position (fog-of-war leak). Fix:
+  sim/enemy_defense._mark_hostile_round() tags every enemy interceptor
+  (is_hostile + the is_air/radar_size/aircraft_id air duck-type) so it
+  rides the gated ContactBoard as a fog-of-war contact and every existing
+  player-facing filter excludes it. Surfaced a latent crash on the way:
+  SamMissile lacked velocity() (the ContactBoard feed dead-reckons through
+  it) — added. Pinned by test_enemy_sm2_is_hostile_with_air_duck_type +
+  the permanent tools/probe_sm2_camera_crash.py harness.
+- Gate: 665 tests green, smoke 47/47, crash probe survives both variants.
+
 ## Phase 8 — polish backlog (rolling)
 
 - Destroyer model: bow flare subtle, aft stack indistinct (reference-photo
@@ -293,3 +316,78 @@ commander AI / JASSM/HARM delivery / AIM-9X / 40N6 are 5b.
   backlog. 5b must take the verifier OPEN list (fuel math vs airfield
   geometry, dead-base rearm queue, descent profile, field-elevation
   landing, sinking-carrier queue, SM-2 ammo waste on far drone cues).
+
+## Phase 5b — the commander runs the war (integration, 2026-06-12)
+
+Workflow `combat-phase5`: 2 parallel implementers (sim/commander.py
+EnemyCommander/EnemyPicture brain, 25 tests; sim/a2a.py AIM-9X + 40N6 +
+fighter employment, 23 tests), then the integrator.
+
+- world/combat.py: the commander ticks at 1 Hz on a SENSOR-ONLY picture
+  fed at the 0.25 s defense cadence — ESM accrual on the emitting player
+  radar, player missile tracks (with first-seen metadata) from whichever
+  SPY-1/AWACS/nose radar physically detects them, drone tracks at
+  stealth-class ranges. Orders execute here: HARM/JASSM packages roll
+  PARKED jets silent-ingress (HARMs home on the actual EMITTER object —
+  silence degrades to the seeded 150-400 m CEP offset and the radar
+  SURVIVES), Tomahawk salvos at back-plotted clusters, AWACS flee/resume,
+  ship silence with a sector-quiet gate (a drone track inside the 22 km
+  engagement window keeps/raises the radar — spec 4.3 "silent ships may
+  light up"), drone-hunt vectoring (fly to last-known; entity pursuit
+  only after an own-nose-radar reacquire, and never re-vectored off it).
+  Commander-managed CAP replaces the 5a scheduler (same rotation, gated
+  off while a strike package owns the flight line). HARM BDA: a finished
+  package believes the emitter dead until it is heard again.
+- Terminal scene-matching (JASSM IIR / TLAM DSMAC class): a believed aim
+  point within SEEKER_BASKET_M = 1 km of a live player structure acquires
+  it at OBB mid-height; the measured 3-launch back-plot lands 264 m off
+  the base, so strike accuracy emerges from sensor geometry, never dice.
+- Kill-chain physics fixed by probe (tools/probe_5b_*): the air-launch
+  descent ramp realized only kp/kd*30 ~ 9.5 m/s (JASSMs arrived terminal
+  km-high and splashed) — the PD now gets its true 30 m/s equilibrium
+  offset; the terminal commit line grazed the coastal rise under the
+  cliff-top base (1.3 km short, measured) — stage 1 now also rides the
+  deck while BELOW the aim point altitude (radar-station TLAM geometry
+  bit-unchanged); fighters at 9 km could never close the 6 km 3-D IR
+  gate on the 18 km drone — intercepts snap-up to the 15.5 km F/A-18E
+  combat ceiling.
+- 5a OPEN list closed: dynamic bingo reserve from the ACTUAL leg to the
+  nearest surviving base (endurance 2 400 -> 3 600 s for the measured 5b
+  strike legs); RTB descends en route on a 4 deg glide (the 30 min
+  hover-down is gone); touchdown at field elevation; a dead/sinking base
+  aborts in-progress rearms (fighters strand PARKED, launch refuses);
+  SM-2 drone shots held inside DRONE_ENGAGE_RANGE_M = 22 km (the
+  phase-4-measured 0.27-Pk waste zone beyond it).
+- Player 40N6: V (rebindable `sam_round`) toggles 48N6 <-> 40N6; HUD
+  panel/map strip show the selection + both stocks; the map ring swaps
+  envelopes; 4 km floor + empty-stock hints. world.victorious (spec 2.2:
+  all enemy ships + airfield; enemy ground radars join in Phase 7) drives
+  a VICTORY banner mirroring the defeat one.
+- Updated-to-new-truth (not weakened): 5a CAP e2e runs the radar silent
+  (emitting now correctly draws a HARM package on top of the CAP);
+  phase-4 drone-hunt e2e grounds the air wing to keep isolating the SM-2
+  channel it pins.
+- Gate: 664 tests green (25 commander + 23 weapons + 8 5b e2e incl.
+  defeat-reachable: 3 Oniks -> cluster -> JASSM package -> Bastion dead
+  -> DEFEAT; 40N6 kills the AWACS at 265 km; IR kill with ZERO RWR LOCK
+  events), smoke 47/47.
+- 5b verifier fix: the RTB glide sank at exactly the profile's own
+  closure rate (cruise x tan 4 deg), so a jet starting ABOVE the 4 deg
+  profile (bingo inside the ~129 km glide intersect, or descending off
+  the 15.5 km snap-up ceiling after a drone hunt) kept its whole excess
+  altitude to the field and crawled it off at the 5 m/s landing rate —
+  the 5a hover-down resurfacing (probe: 1.9 km high over the field /
+  812 s landing from a 100 km, 9 km start; ~5 km high post-snap-up).
+  RTB_CATCHUP_SINK_MPS = 40 m/s (~9.5 deg idle/speedbrake descent at
+  cruise) now converges onto the profile; once ON it the clamp rides it
+  bit-identically (probe re-run: on-profile at 51 km out, 477 s landing,
+  touchdown at field elevation).
+- Verifier probes (suite + smoke re-run green after the fix): back-plot
+  cluster lands 264 m off the true base (inside the 1 km basket; HIGH
+  first-detection tracks produce ZERO back-plots); a fully silent player
+  (radar dark, no launches) is NEVER found over 400 s — zero fixes, zero
+  clusters, zero offensive orders, zero hostile rounds; the 40N6 kill
+  survives the launching site (radar station + S-300 TEL structures)
+  dying 5 s into the flight (true ARH); SM-2 drone discipline holds all
+  shots beyond 22 km and engages inside; full-battle step cost 0.63 ms
+  mean / 2.5 ms p95 at the 120 Hz step (8.33 ms budget).

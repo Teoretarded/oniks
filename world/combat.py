@@ -102,6 +102,35 @@ employment, the commander AI and AIM-9X/JASSM/HARM delivery are 5b):
     emitting in 5a) and airborne fighters' nose radars — passively
     locatable by construction.
 
+Phase 5b — the commander runs the war (spec §6):
+
+  * One EnemyCommander (sim/commander.py) ticks at 1 Hz on a SENSOR-ONLY
+    EnemyPicture fed here on a 0.25 s cadence (the defense controllers'
+    VIS_CHECK_PERIOD): ESM accrual on the player radar while any enemy
+    platform survives to hear it, player missile tracks from whichever
+    SPY-1/AWACS/nose radar physically detects them (first-seen metadata
+    recorded for the launch back-plot), drone tracks from the same
+    radars.  Fog of war is symmetric — no commander decision reads truth.
+  * Orders are executed here: HARM/JASSM strike packages launch PARKED
+    fighters (silent ingress, release ranges in sim/enemy_air.py), the
+    HARMs home on the actual radar EMITTER (silence degrades them — the
+    sim/strike.py physics), Tomahawk salvos draw the destroyers'
+    magazines at back-plotted launch clusters, the AWACS flees inbound
+    missile tracks, ships silence/raise their radars per the threat
+    picture, and fighters get vectored at drone tracks (nose-radar
+    reacquire -> AIM-9X, all passive on the drone's RWR).
+  * Strike aim refinement: JASSM/TLAM carry terminal scene-matching
+    seekers (IIR/DSMAC class) — a round whose BELIEVED aim point falls
+    within SEEKER_BASKET_M of a player structure acquires it terminally;
+    a back-plot error beyond the basket hits dirt.  Kill probability
+    emerges from back-plot accuracy vs the basket, never a roll.
+  * The 5a standing-CAP scheduler is REPLACED by commander-managed CAP:
+    same rotation rules, but only while no strike package is active (the
+    parked pool belongs to the mission generator).
+  * ``victorious`` (spec 2.2 win): every enemy ship dead AND the airfield
+    dead.  Phase 5 fields no enemy ground radars — they join the
+    condition with the Phase-7 setup-screen counts.
+
 Pure numpy / GL-free (LOCKED test convention), like world.world.
 """
 
@@ -109,18 +138,23 @@ from __future__ import annotations
 
 import numpy as np
 
+from sim.arsenal import TOMAHAWK
 from sim.bases import Structure, apply_missile_hits_structures
+from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
+                           LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
                            AirBase, Awacs, Carrier, Fighter)
-from sim.enemy_defense import EnemyDefenseController
+from sim.enemy_defense import (DRONE_ENGAGE_RANGE_M, VLS_DECK_M,
+                               EnemyDefenseController)
 from sim.enemy_ships import Destroyer
-from sim.enemy_strikes import EnemyStrikeController
+from sim.enemy_strikes import SALVO_PERIOD_S, SALVO_SIZE, EnemyStrikeController
 from sim.missile import Missile
 from sim.radar import Radar, RadarNetwork
-from sim.recon import (DRONE_GONE, ELINT_FIX_ACTIONABLE_M, ElintReceiver,
-                       ReconDrone, RwrReceiver, SarSensor)
+from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
+                       ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
 from sim.sam import SamMissile
+from sim.strike import StrikeMissile
 from world.generation import BASE_POS, SEED, terrain_height_scalar
 from world.world import SAM_TEL_POS, WorldState
 
@@ -197,13 +231,42 @@ CARRIER_HEADING_DEG = 90.0      # east-west racetrack, beam-on to the player
 AWACS_ANCHOR_A_XZ = (-40_000.0, 405_000.0)
 AWACS_ANCHOR_B_XZ = (40_000.0, 435_000.0)
 
-# Standing CAP (5a placeholder for the commander): the racetrack anchor
-# sits over the destroyer screen (anchors at z 150/170 km) so the CAP
-# orbits the fleet it protects.
+# Standing CAP (commander-managed since 5b): the racetrack anchor sits
+# over the destroyer screen (anchors at z 150/170 km) so the CAP orbits
+# the fleet it protects.
 FIGHTER_CAP_ANCHOR_XZ = (0.0, 160_000.0)
 CAP_TARGET_AIRBORNE = 2     # fighters kept up (out of the 4 fielded)
 CAP_SCHED_PERIOD_S = 5.0    # s between scheduler checks; also staggers
 #                             launches (at most one fighter rolls per check)
+
+# --- Phase 5b: the commander's integration cadences + strike physics ----------
+
+CMD_FEED_PERIOD_S = 0.25    # s between enemy-picture sensor feeds — matches
+#                             the defense controllers' VIS_CHECK_PERIOD (the
+#                             terrain-LOS ray inside Radar.detects is the
+#                             budget item; 120 Hz feeding would be ~30x the
+#                             cost for zero doctrine value at a 1 Hz brain)
+CMD_WEAPON_PERIOD_S = 1.0   # s between fighter release_weapons sweeps (the
+#                             commander tick rate; release gates are ranges,
+#                             so a 1 s quantization moves a release point by
+#                             ~240 m at cruise — irrelevant at 100+ km)
+
+# Terminal scene-matching seeker basket (JASSM IIR / Tomahawk Blk IV
+# DSMAC-class): the round's INS flies to the BELIEVED coordinates; in the
+# terminal scene the imaging/correlation seeker acquires a structure within
+# this radius of the aim point (real DSMAC/IIR acquisition baskets are
+# quoted around a kilometre of INS drift).  Static targets mean the
+# acquisition decision can be evaluated at ORDER time without changing the
+# outcome.  Fog honesty: the gate runs on the believed aim point — a
+# back-plot error beyond the basket puts the round in the dirt, so strike
+# effectiveness EMERGES from sensor geometry, never from a roll.
+SEEKER_BASKET_M = 1_000.0
+
+# Terminal aim height over the acquired structure: OBB mid-height (the
+# sim/strike.py target_y doc — aiming at ground level under a target on
+# the 150 m coastal shelf grounds the round short).
+def _structure_aim_y(s: Structure) -> float:
+    return float(s.pos[1]) + s.dims[2] * 0.5
 
 AIRFIELD_FIGHTERS = 2       # parked at the airfield at spawn
 CARRIER_FIGHTERS = 2        # parked on the carrier at spawn
@@ -334,6 +397,24 @@ class CombatWorld(WorldState):
         # marker persists, unlike a moving track that ages out).
         self.airfield_known = False
         self._intel_next_t = 0.0
+
+        # ---- Phase 5b: the enemy commander ----
+        # Seeded with the world seed (determinism contract); the child
+        # generator (SeedSequence [seed, 5] — phase tag, never colliding
+        # with the defense [seed] or recon [seed, 4] streams) seeds the
+        # HARM miss offsets per launch.
+        self._fighter_list = [e for e in self.enemy_air
+                              if isinstance(e, Fighter)]
+        self.commander = EnemyCommander(
+            self._fighter_list, self.awacs, destroyers, seed=rng_seed)
+        self._cmd_rng = np.random.default_rng([rng_seed, 5])
+        self._cmd_feed_next_t = 0.0
+        self._cmd_weapon_next_t = 0.0
+        # id(missile) -> first-seen sensor record for the back-plot feed.
+        self._cmd_missile_intel: dict[int, dict] = {}
+        # Integrator-side mission execution records (fighters + spawned
+        # rounds per active commander mission; completion + BDA run here).
+        self._cmd_missions: list[dict] = []
 
     def _spawn_ships(self):
         ships = [Destroyer(s["ship_id"], s["anchor_xz"],
@@ -507,7 +588,7 @@ class CombatWorld(WorldState):
             base.update(dt)
         if self.sim_time >= self._cap_next_t:
             self._cap_next_t = self.sim_time + CAP_SCHED_PERIOD_S
-            self._schedule_cap()
+            self._commander_cap()
         for e in self.enemy_air:
             had_impact = e.impact_pos is not None
             if isinstance(e, Fighter):
@@ -519,14 +600,20 @@ class CombatWorld(WorldState):
                         else "aircraft_splash")
                 self.events.append((kind, e.impact_pos.copy()))
 
-    def _schedule_cap(self) -> None:
-        """Keep ~CAP_TARGET_AIRBORNE fighters up (5a standing rotation;
-        the 5b commander replaces this).  Outbound states count as
-        airborne; an RTB/landing fighter frees its slot so the next one
-        rolls.  At most ONE launch per check (natural stagger), drawn
-        round-robin across the LIVE bases.  Fighters parked at a dead
-        base never launch (a cratered runway flies no sorties — spec
-        §5.5; recovering those airframes is the 5b commander's call)."""
+    def _commander_cap(self) -> None:
+        """Commander-managed standing CAP (5b — replaces the 5a scheduler
+        with the SAME rotation rules, gated on the mission picture): keep
+        ~CAP_TARGET_AIRBORNE fighters up while NO strike package is
+        active — the parked pool belongs to the mission generator, so a
+        rearming SEAD jet is never re-tasked to CAP under an active
+        package.  Outbound states count as airborne; an RTB/landing
+        fighter frees its slot so the next one rolls.  At most ONE launch
+        per check (natural stagger), drawn round-robin across the LIVE
+        bases.  Fighters parked at a dead base never launch (a cratered
+        runway flies no sorties — spec §5.5)."""
+        if any(rec["kind"] in ("harm_package", "jassm_package")
+               for rec in self._cmd_missions):
+            return                      # strike packages own the flight line
         airborne = sum(1 for e in self.enemy_air
                        if isinstance(e, Fighter)
                        and e.state in (FS_TAKEOFF, FS_TRANSIT,
@@ -540,6 +627,7 @@ class CombatWorld(WorldState):
                 continue
             for fighter in list(base.parked):
                 if fighter.state == FS_PARKED:
+                    fighter.assign_loadout(LOADOUT_CAP)
                     fighter.launch(FIGHTER_CAP_ANCHOR_XZ)
                     self._cap_base_idx = (self._cap_base_idx + k + 1) % n
                     return
@@ -580,6 +668,360 @@ class CombatWorld(WorldState):
         elif self.radar_net.visible(pos, "ship"):
             self.airfield_known = True
 
+    # ---------------------------------------------------------------- phase 5b
+
+    def _enemy_sensor_radars(self) -> list:
+        """The live enemy sensor set feeding the commander's picture:
+        destroyer SPY-1s (the carrier's mount stays silent — doctrine),
+        the AWACS, and every AIRBORNE fighter nose radar (FighterRadar
+        applies its own emit + forward-cone gates inside detects)."""
+        radars = [s.radar for s in self.ships
+                  if s.alive and not isinstance(s, Carrier)]
+        if self.awacs.alive:
+            radars.append(self.awacs.radar)
+        radars.extend(f.radar for f in self._fighter_list if f.alive)
+        return radars
+
+    def _step_commander(self, dt: float) -> None:
+        """Feed the sensor-only picture (0.25 s cadence), tick the brain
+        (1 Hz, internal gate), execute its orders, sweep the fighters'
+        weapon-release checks (1 Hz) and close out finished missions."""
+        now = self.sim_time
+        if now >= self._cmd_feed_next_t:
+            self._cmd_feed_next_t = now + CMD_FEED_PERIOD_S
+            self._feed_enemy_picture(CMD_FEED_PERIOD_S, now)
+        for order in self.commander.step(now, dt):
+            self._execute_commander_order(order)
+        if now >= self._cmd_weapon_next_t:
+            self._cmd_weapon_next_t = now + CMD_WEAPON_PERIOD_S
+            self._release_fighter_weapons()
+        self._update_commander_missions(now)
+
+    def _feed_enemy_picture(self, dt_s: float, now: float) -> None:
+        """Sensor events -> EnemyPicture.  Every entry traces to a live
+        enemy sensor: ESM accrual only while the player radar EMITS and
+        an enemy platform survives to hear it (the enemy_strikes.py
+        functional-ESM model — no range gate against a megawatt search
+        set); missile/drone tracks only from a radar whose detects()
+        physically passes (range class + horizon + terrain LOS)."""
+        pic = self.commander.picture
+        radar = self.radar_station
+        heard = (radar.alive and radar.emitting
+                 and (any(s.alive for s in self.ships)
+                      or self.awacs.alive
+                      or any(f.alive for f in self._fighter_list)))
+        pic.update_emitter(radar.radar_id, radar.pos, heard, dt_s, now)
+        if heard:
+            # Re-illumination is EVIDENCE: a radar believed killed by a
+            # HARM package that is heard again flips back to alive.
+            pic.mark_emitter_alive(radar.radar_id)
+
+        detectors = self._enemy_sensor_radars()
+
+        # Player missiles -> track store + launch back-plot (first-seen
+        # metadata recorded at the first physical detection).  Filter:
+        # player rounds only — the Oniks (Missile) and the S-300/40N6
+        # (SamMissile with no launch_platform; enemy SM-2s carry their
+        # launching ship there, sim/enemy_defense.py).
+        live_keys = set()
+        for m in self.missiles:
+            if not m.alive or getattr(m, "is_hostile", False):
+                continue
+            if not isinstance(m, (Missile, SamMissile)):
+                continue
+            if getattr(m, "launch_platform", None) is not None:
+                continue
+            key = id(m)
+            live_keys.add(key)
+            rec = self._cmd_missile_intel.get(key)
+            if rec is None:
+                det = next((r for r in detectors
+                            if r.detects(m.pos, "missile")), None)
+                if det is None:
+                    continue                    # nobody sees it yet
+                rec = dict(track_id=f"hostile_{key:x}", first_t=now,
+                           first_pos=m.pos.copy(), first_vel=m.vel.copy(),
+                           det_pos=np.asarray(det.pos,
+                                              dtype=np.float64).copy())
+                self._cmd_missile_intel[key] = rec
+            elif not any(r.detects(m.pos, "missile") for r in detectors):
+                continue                        # track coasts, no refresh
+            self.commander.process_missile_track(
+                rec["track_id"], m.pos, m.vel, now, rec["first_t"],
+                rec["first_pos"], rec["first_vel"], rec["det_pos"])
+        self._cmd_missile_intel = {
+            k: v for k, v in self._cmd_missile_intel.items()
+            if k in live_keys}
+
+        # The drone -> a last-known-position track while any enemy radar
+        # holds it at its 'stealth' class range.
+        drone = self.drone
+        if (drone is not None and drone.alive
+                and any(r.detects(drone.pos, drone.radar_size)
+                        for r in detectors)):
+            pic.update_drone_track(
+                drone.aircraft_id,
+                np.array([float(drone.pos[0]), float(drone.pos[2])]), now)
+
+        self._drone_sector_alert(now)
+
+    def _drone_track_in_sector(self, ship, now: float) -> bool:
+        """True when the PICTURE's drone track (last-known + a closing
+        allowance of the drone type's known cruise speed per second of
+        staleness — class intel, not truth) could be inside this ship's
+        SM-2 drone-engagement range.  The 'sector is quiet' test behind
+        the silence doctrine."""
+        for tr in self.commander.picture.live_drone_tracks(now):
+            age = now - tr["t"]
+            d = float(np.hypot(float(tr["pos"][0]) - float(ship.pos[0]),
+                               float(tr["pos"][1]) - float(ship.pos[2])))
+            if d - DRONE_SPEED_MPS * age <= DRONE_ENGAGE_RANGE_M:
+                return True
+        return False
+
+    def _drone_sector_alert(self, now: float) -> None:
+        """Spec §4.3 'once detected ... silent ships may light up': a
+        SILENT destroyer whose sector holds a drone track inside the
+        engagement window raises its radar to kill the snooper — at that
+        range the drone's SAR is imaging the hull regardless of
+        emissions, so silence buys nothing and costs the shot.  The
+        symmetric gate lives in _execute_commander_order: a SHIP_SILENT
+        order is refused while the sector is hot."""
+        for ship in self.ships:
+            if not ship.alive or isinstance(ship, Carrier):
+                continue                    # carrier doctrine: always dark
+            if (not ship.radar.emitting
+                    and self._drone_track_in_sector(ship, now)):
+                ship.radar.emitting = True
+
+    # ------------------------------------------------------- order execution
+
+    def _execute_commander_order(self, order: dict) -> None:
+        """Route one commander order dict (schema: sim/commander.py) onto
+        the owning entity/system."""
+        kind = order["type"]
+        if kind == "vector_to_drone":
+            self._vector_fighter_to_drone(order)
+        elif kind == "awacs_flee":
+            if self.awacs.alive:
+                self.awacs.flee(order["threat_pos"])
+        elif kind == "awacs_resume":
+            if self.awacs.alive:
+                self.awacs.stop_flee()
+        elif kind in ("ship_silent", "ship_emit"):
+            ship = next((s for s in self.ships
+                         if s.ship_id == order["ship_id"]), None)
+            if ship is None or not ship.alive:
+                return
+            if (kind == "ship_silent"
+                    and self._drone_track_in_sector(ship, self.sim_time)):
+                # 'Sector is quiet' gate (commander doctrine docstring):
+                # silence denies ELINT only against a FAR snooper; one
+                # already inside the engagement window is imaging the
+                # hull on SAR — keep the radar up and kill it instead
+                # (the spec §4.3 reaction, see _drone_sector_alert).
+                return
+            ship.radar.emitting = (kind == "ship_emit")
+        elif kind in ("harm_package", "jassm_package"):
+            self._launch_strike_package(order, sead=(kind == "harm_package"))
+        elif kind == "tomahawk_salvo":
+            self._fire_tomahawk_salvo(order)
+
+    def _vector_fighter_to_drone(self, order: dict) -> None:
+        """Drone-hunt vectoring (spec §5.1 hunt loop).  The commander
+        names the nearest airborne fighter; the integrator may redirect
+        to the nearest airborne fighter NOT flying a strike package (a
+        package is never broken for a drone) that still carries AIM-9X.
+        The fighter flies at the LAST-KNOWN track point with its nose
+        radar searching; only once its OWN radar physically reacquires
+        the drone (11 km 'stealth' cone) does it steer on the entity —
+        continuous truth steering is gated behind an own-sensor event."""
+        drone = self.drone
+        if drone is None or not drone.alive:
+            return
+        named = next((f for f in self._fighter_list
+                      if f.aircraft_id == order["fighter_id"]), None)
+        candidates = [named] if named is not None else []
+        candidates += [f for f in self._fighter_list if f is not named]
+        hunter = None
+        for f in candidates:
+            if (f is not None and f.alive
+                    and f.state in (FS_TAKEOFF, FS_TRANSIT, FS_ON_STATION)
+                    and f._strike_target_xz is None
+                    and "aim9x" in f.hardpoints):
+                hunter = f
+                break
+        if hunter is None:
+            return
+        if (hunter._intercept_target is not None
+                and getattr(hunter._intercept_target, "alive", False)):
+            # Already in entity pursuit: the fighter's own tracking beats
+            # a stale 1 Hz vector.  Re-vectoring here would CLEAR the
+            # pursuit every time the overtaking jet's nose cone swings
+            # off the target for a beat (measured in the 5b probes).
+            return
+        if hunter.radar.detects(drone.pos, drone.radar_size):
+            hunter.execute_order({"type": "intercept", "target": drone})
+            return
+        # Not reacquired yet: head for last-known, radar searching.  The
+        # commander re-issues the vector each tick while the track lives,
+        # so the steering point refreshes at 1 Hz.
+        hunter.execute_order({"type": "intercept"})
+        tp = order["target_pos"]
+        if hunter.state in (FS_TRANSIT, FS_ON_STATION):
+            hunter._set_transit_to(
+                np.array([float(tp[0]), float(tp[2])]))
+            hunter.state = FS_TRANSIT
+
+    def _refine_strike_aim(self, tx: float, tz: float):
+        """Terminal scene-matching acquisition (SEEKER_BASKET_M doc): the
+        nearest LIVE player structure within the basket of the believed
+        aim point becomes the terminal aim (OBB mid-height); otherwise
+        the round flies into the believed coordinates at ground level."""
+        best = None
+        best_d = SEEKER_BASKET_M
+        for s in self.structures:
+            if not s.alive:
+                continue
+            d = float(np.hypot(float(s.pos[0]) - tx, float(s.pos[2]) - tz))
+            if d < best_d:
+                best, best_d = s, d
+        if best is not None:
+            return (float(best.pos[0]), float(best.pos[2]),
+                    _structure_aim_y(best))
+        return tx, tz, max(terrain_height_scalar(tx, tz), 0.0)
+
+    def _launch_strike_package(self, order: dict, sead: bool) -> None:
+        """Launch a 2-ship HARM/JASSM package per the commander order:
+        arm the loadout, roll the jets at the believed target, wire the
+        weapon-release fields (sim/enemy_air.py release_weapons does the
+        rest at its range gates).  The order's fighters were PARKED at
+        live bases when the commander selected them this same tick."""
+        tp = order["target_pos"]
+        tx, tz = float(tp[0]), float(tp[2])
+        if sead:
+            aim_y = 0.0                      # HARMs chase emissions
+        else:
+            tx, tz, aim_y = self._refine_strike_aim(tx, tz)
+        mission = dict(kind=order["type"], target_id=order["target_id"],
+                       fighters=[], missiles=[], released=0)
+        for fid in order["fighter_ids"]:
+            f = next((x for x in self._fighter_list
+                      if x.aircraft_id == fid), None)
+            if f is None or f.state != FS_PARKED:
+                continue
+            f.assign_loadout(LOADOUT_SEAD if sead else LOADOUT_STRIKE)
+            f.launch(patrol_anchor_xz=(tx, tz))
+            if f.state != FS_TAKEOFF:
+                continue                     # dead base refused the roll
+            if sead:
+                # The HARMs home on the actual EMITTER object — the
+                # seeker physically chases emissions and the silence
+                # degradation lives in sim/strike.py.  One child rng per
+                # jet seeds the deterministic miss offsets.
+                f.execute_order({
+                    "type": "sead",
+                    "target_radar": self.radar_station,
+                    "rng": np.random.default_rng(
+                        int(self._cmd_rng.integers(2 ** 63)))})
+            else:
+                f.execute_order({"type": "strike", "target_y": aim_y})
+            # Target set AFTER the order (the order's standoff_xz key is
+            # deliberately omitted: it would force FS_TRANSIT and skip
+            # the takeoff climb of a jet that is still on the runway).
+            f._strike_target_xz = np.array([tx, tz], dtype=np.float64)
+            mission["fighters"].append(f)
+        if mission["fighters"]:
+            self._cmd_missions.append(mission)
+        else:
+            # Nothing rolled (bases died since selection): close the
+            # commander's mission so it can re-plan.
+            self.commander.complete_mission(order["type"],
+                                            order["target_id"])
+
+    def _fire_tomahawk_salvo(self, order: dict) -> None:
+        """TOMAHAWK_SALVO order -> a SALVO_SIZE salvo from the surviving
+        destroyers' magazines at the back-plotted cluster (the
+        enemy_strikes.py launch pattern, aimed by the same terminal
+        scene-matching refinement as the JASSMs).  The next salvo at this
+        cluster unlocks after SALVO_PERIOD_S once these rounds are done."""
+        tp = order["target_pos"]
+        tx, tz, aim_y = self._refine_strike_aim(float(tp[0]), float(tp[2]))
+        rounds = []
+        for ship in self.ships:
+            if isinstance(ship, Carrier):
+                continue                     # carriers carry no TLAM
+            while (len(rounds) < SALVO_SIZE and ship.alive
+                   and ship.tomahawk_ammo > 0):
+                deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
+                m = StrikeMissile(
+                    TOMAHAWK, deck,
+                    np.array([0.0, TOMAHAWK.eject_speed, 0.0]),
+                    (tx, tz), target_y=aim_y)
+                m.launch_cinematic = False   # no 1x lock for enemy launches
+                m.launch_platform = ship     # damage.py: never self-OBB-hit
+                self.missiles.append(m)
+                ship.tomahawk_ammo -= 1
+                rounds.append(m)
+            if len(rounds) >= SALVO_SIZE:
+                break
+        if rounds:
+            self._cmd_missions.append(dict(
+                kind="tomahawk_salvo", target_id=order["target_id"],
+                fighters=[], missiles=rounds, released=len(rounds),
+                complete_at=self.sim_time + SALVO_PERIOD_S))
+        # Magazines dry: leave the commander's mission active forever —
+        # there is nothing left to schedule at this cluster.
+
+    def _release_fighter_weapons(self) -> None:
+        """Sweep every live fighter's release gates (1 Hz — the checks
+        are range compares; the rounds themselves fly at 120 Hz once
+        spawned into self.missiles) and book new rounds to their
+        missions for completion tracking."""
+        for f in self._fighter_list:
+            if not f._alive:
+                continue
+            new = f.release_weapons(self.missiles, bases=self.air_bases)
+            if not new:
+                continue
+            rec = next((mi for mi in self._cmd_missions
+                        if f in mi["fighters"]), None)
+            if rec is not None:
+                rec["missiles"].extend(new)
+                rec["released"] += len(new)
+
+    def _update_commander_missions(self, now: float) -> None:
+        """Close out finished missions: every package jet is done (dead,
+        or off its ingress states) and every released round is dead.
+        HARM completion runs BDA — the package reports weapons on the
+        emitter, so the commander BELIEVES the radar dead until it is
+        heard emitting again (evidence resets the belief; a silenced
+        radar that survived its CEP-offset impacts therefore 'plays
+        dead' exactly as long as it stays silent)."""
+        still = []
+        for rec in self._cmd_missions:
+            if rec["kind"] == "tomahawk_salvo":
+                if (now >= rec["complete_at"]
+                        and all(not m.alive for m in rec["missiles"])):
+                    self.commander.complete_mission(rec["kind"],
+                                                    rec["target_id"])
+                else:
+                    still.append(rec)
+                continue
+            fighters_done = all(
+                (not f._alive) or f.state not in (FS_TAKEOFF, FS_TRANSIT,
+                                                  FS_ON_STATION)
+                for f in rec["fighters"])
+            if fighters_done and all(not m.alive for m in rec["missiles"]):
+                self.commander.complete_mission(rec["kind"],
+                                                rec["target_id"])
+                if rec["kind"] == "harm_package" and rec["released"] > 0:
+                    self.commander.picture.mark_emitter_destroyed(
+                        rec["target_id"])
+            else:
+                still.append(rec)
+        self._cmd_missions = still
+
     # ---------------------------------------------------------------- phase 3
 
     @property
@@ -589,6 +1031,17 @@ class CombatWorld(WorldState):
         watch; full end-screens come in Phase 7."""
         return all(not s.alive for s in self.structures
                    if s.kind == "bastion_tel")
+
+    @property
+    def victorious(self) -> bool:
+        """Spec 2.2 win condition: all enemy ships (incl. the carrier)
+        AND the enemy airfield destroyed.  Phase 5 fields no enemy
+        GROUND radars — they join this conjunction when the Phase-7
+        setup screen adds their counts.  Like ``defeated``, the sim
+        keeps running (full end-screens are Phase 7); the HUD mirrors
+        the defeat banner with a VICTORY one."""
+        return (all(not s.alive for s in self.ships)
+                and not self.airfield.alive)
 
     @property
     def launcher_armed(self) -> bool:
@@ -628,6 +1081,11 @@ class CombatWorld(WorldState):
         self._step_enemy_air(dt)
         self.defense.step(self, dt)
         self.strikes.step(self, dt)
+        # Phase 5b: the commander — fed and ticked after the reactive
+        # layers so rounds its orders spawn join self.missiles this step
+        # and fly on the NEXT base step (the same convention as defense/
+        # strikes launches).
+        self._step_commander(dt)
         apply_missile_hits_structures(
             [m for m in self.missiles if getattr(m, "is_hostile", False)],
             self.structures, self.events)

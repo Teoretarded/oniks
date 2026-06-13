@@ -26,7 +26,7 @@ import numpy as np
 from models import bastion
 from models import s300 as s300_model
 from sim.aircraft import AC_FALLING, AC_GONE, Aircraft
-from sim.arsenal import BASTION, ONIKS, S300, S300_TEL
+from sim.arsenal import BASTION, ONIKS, S300, S300_TEL, N40N6, N40N6_AMMO, N40N6_TEL
 from sim.contacts import ContactBoard
 from sim.damage import apply_missile_hits
 from sim.missile import LAUNCH_PHASES, Missile
@@ -95,7 +95,10 @@ class WorldState:
         self.events: list[tuple[str, np.ndarray]] = []
         self.reload_left = 0.0          # s until the launcher is ARMED again
         self.sam_reload_left = 0.0      # s until the next S-300 tube is ready
-        self.sam_ammo = S300_TEL.ammo   # rounds left in the 4-tube block
+        self.sam_ammo = S300_TEL.ammo   # rounds left in the 4-tube block (48N6)
+        # 40N6 stocks: 2 rounds on the same TEL (heavier missile, half load).
+        # Shared reload timer with the 48N6 (one tube-to-tube reload cycle).
+        self.sam_ammo_40n6 = N40N6_AMMO  # rounds: N40N6_AMMO = 2
         self.oniks_fired = 0            # launch ordinal: seeds the weave phase
 
     @staticmethod
@@ -131,7 +134,19 @@ class WorldState:
 
     @property
     def sam_launcher_armed(self) -> bool:
+        """True when the S-300 48N6 battery is ready: reload timer expired
+        AND at least one 48N6 round remaining.  This is the original interface
+        used by the HUD and by tests/test_world_state.py — kept 48N6-specific
+        so existing callers and tests are unchanged.
+
+        For the 40N6 separate stock, check ``sam_40n6_launcher_armed``."""
         return self.sam_reload_left <= 0.0 and self.sam_ammo > 0
+
+    @property
+    def sam_40n6_launcher_armed(self) -> bool:
+        """True when the 40N6 battery is ready: reload timer expired AND
+        at least one 40N6 round remaining."""
+        return self.sam_reload_left <= 0.0 and self.sam_ammo_40n6 > 0
 
     def terrain_height_at(self, x: float, z: float) -> float:
         """Scalar heightfield query (generation's bit-identical fast path)."""
@@ -217,30 +232,90 @@ class WorldState:
         self.reload_left = BASTION.reload_s
         return m
 
-    def launch_sam(self, aircraft_id):
-        """Fire an S-300 at the air contact ``aircraft_id`` (Task S4).
+    def launch_sam(self, aircraft_id, round_id: str = "48n6"):
+        """Fire an S-300 at the air contact ``aircraft_id``.
 
-        The shot is made on the CONTACT picture: boost/midcourse aim at the
-        board's dead-reckoned estimate (frozen at the last fix if the track
-        drops mid-flight); only the terminal seeker sees truth. Tubes fire
-        lower pair first; 8 s tube-to-tube reload; 4 rounds. Returns the
-        SamMissile, or None when cold/empty or the track is not a live air
-        contact.
+        Parameters
+        ----------
+        aircraft_id : str
+            Track id on the contact board.
+        round_id : str, optional
+            ``'48n6'`` (default) — standard S-300 48N6 round (max 4 in TEL).
+            ``'40n6'`` — very-long-range 40N6 round (max 2 in TEL).
+
+        Round selection notes
+        --------------------
+        Both rounds share the same 5P85 TEL and the same sam_reload_left timer
+        (one tube mechanically indexes per reload cycle; mixing round types is
+        realistic — the TEL operator selects the canister type electronically).
+        The 40N6 uses an ACTIVE terminal seeker (illuminator_pos_fn=None):
+        the SamMissile LOS check runs from the missile itself, not a ground
+        illuminator.  This is the key difference from the 48N6 (which uses
+        the same None default — the player S300 is also own-seeker because
+        there is no S-300-specific illuminator pointer in the sandbox world).
+
+        Engagement-envelope enforcement (round-specific):
+            40N6: min_intercept_alt = 4,000 m — only engages HIGH targets.
+                  Attempting a sub-4 km-alt target returns None (no shoot).
+            48N6: min_intercept_alt = 100 m (existing behavior unchanged).
+
+        Returns the SamMissile, or None when cold/empty/invalid track/out-of-
+        envelope.
         """
-        if not self.sam_launcher_armed:
-            return None
+        # Gate on round-specific armed state (reload timer + ammo).
+        if round_id == "40n6":
+            if not self.sam_40n6_launcher_armed:
+                return None
+        else:
+            if not self.sam_launcher_armed:
+                return None
+
         track = self.contacts.tracks.get(aircraft_id)
         if track is None or not track.get("is_air"):
             return None
         target = self._find_air_entity(aircraft_id)
         if target is None:
             return None
-        tube = S300_TEL.ammo - self.sam_ammo
+
+        # Select weapon def and ammo pool.
+        if round_id == "40n6":
+            if self.sam_ammo_40n6 <= 0:
+                return None
+            weapon_def = N40N6
+            # 40N6 envelope check: min altitude 4,000 m.  Use the track
+            # position (contact picture) for the altitude gate — the player
+            # acts on what they know, not ground truth.
+            target_alt = float(track["pos"][1])
+            if target_alt < weapon_def.min_intercept_alt:
+                return None  # out of envelope: refuses sub-4 km targets
+            # Tube index: 40N6 occupies the last 2 canister positions (index
+            # 2 and 3 of the 4-tube block, after the 48N6 pair).
+            tube = N40N6_AMMO - self.sam_ammo_40n6 + 2
+        else:
+            # Default: 48N6
+            if self.sam_ammo <= 0:
+                return None
+            weapon_def = S300
+            tube = S300_TEL.ammo - self.sam_ammo
+
+        # Guard against tube index going out of range.
+        tube = min(tube, len(SAM_MOUTH_OFFSETS) - 1)
         pos = SAM_TEL_POS + SAM_MOUTH_OFFSETS[tube]
-        m = SamMissile(S300, pos, target,
+
+        # Active seeker (40N6) vs SARH (48N6 in sandbox context):
+        # Both pass illuminator_pos_fn=None here.  The 48N6 in the sandbox
+        # uses its own seeker LOS (same behaviour as before this change).
+        # The 40N6 is explicitly ARH — also None.  CombatWorld subclasses
+        # that want SARH for 48N6 can override _launch_sam_48n6 separately.
+        m = SamMissile(weapon_def, pos, target,
                        contact_estimate_fn=self._contact_estimate(aircraft_id))
         self.missiles.append(m)
-        self.sam_ammo -= 1
+
+        if round_id == "40n6":
+            self.sam_ammo_40n6 -= 1
+        else:
+            self.sam_ammo -= 1
+
         self.sam_reload_left = S300_TEL.reload_s
         return m
 

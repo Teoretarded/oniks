@@ -92,6 +92,20 @@ ILLUMINATOR_M = 20.0        # m, SPY-1/director illuminator above the
 DRONE_SM2_MAX_INFLIGHT = 2  # rounds in flight per drone (spec 4.3 brief:
 #                             shoot-shoot-look vs one slow target — the full
 #                             4-round raid cap stays reserved for missiles)
+DRONE_ENGAGE_RANGE_M = 22_000.0  # m: NO drone shots beyond this ground range
+#                             (5b ammo discipline, 5a verifier OPEN item).
+#                             The Phase-4 measured kill-per-shot curve
+#                             (tools/probe_drone_sm2.py seeded batches,
+#                             locked by tests/test_phase4_e2e.py) reads
+#                             0.93 at 10 km, 0.67 at 20 km, 0.27 at 28 km
+#                             of the 30 km stealth detection range: past
+#                             ~22 km the low-SNR track noise (sigma ~ R^3)
+#                             makes a launch a near-coin-flip magazine
+#                             drain against a target that is CLOSING
+#                             anyway — fire control holds the shot until
+#                             the geometry pays.  AWACS far cues made this
+#                             waste real in 5a (a 40 km cue could trigger
+#                             launches the seeker could never finish).
 
 # Stealth low-SNR tracking noise (the multipath analog for tiny targets,
 # user law: outcomes emerge from guidance physics, never kill rolls).
@@ -114,6 +128,22 @@ DRONE_SM2_MAX_INFLIGHT = 2  # rounds in flight per drone (spec 4.3 brief:
 STEALTH_SNR_SIGMA_MAX_M = 60.0   # m per-axis OU RMS at the detection edge
 STEALTH_SNR_RANGE_EXP = 3.0      # sigma ~ (R / R_detect)^3 (see above)
 STEALTH_SNR_TAU_S = 0.7          # s correlation (scintillation/track loop)
+
+
+def _mark_hostile_round(sam) -> None:
+    """Enemy-launched interceptor: flag it for every player-facing filter.
+
+    ``is_hostile`` drives the tactical-map pick/draw and camera-cycle
+    exclusions plus the structure sweep; the air-entity duck-type
+    (``is_air`` / ``radar_size`` / ``aircraft_id``) lets the round ride
+    the gated ContactBoard feed (world/combat.py _update_strike_contacts)
+    so the player sees a fog-of-war CONTACT — never the truth-position
+    diamond that enemy SM-2s leaked before (user-reported seam: clicking
+    one selected it like a friendly round)."""
+    sam.is_hostile = True
+    sam.is_air = True
+    sam.radar_size = "missile"
+    sam.aircraft_id = f"hostile_sam_{id(sam):x}"
 
 
 class StealthTargetSam(SamMissile):
@@ -393,6 +423,7 @@ class ShipDefense:
             illuminator_pos_fn=self._illuminator())
         sam.launch_cinematic = False    # no 1x time lock for enemy launches
         sam.launch_platform = ship      # damage.py: never self-OBB-hit
+        _mark_hostile_round(sam)
         world.missiles.append(sam)
         ship.sm2_ammo -= 1
         ship.sm2_reload_timer = ship.sm2_reload_s
@@ -422,8 +453,8 @@ class ShipDefense:
             ey = float(st["pos"][1]) + float(st["vel"][1]) * st["age"]
             ez = float(st["pos"][2]) + float(st["vel"][2]) * st["age"]
             rng_ground = math.hypot(ex - sx, ez - sz)
-            if not SM2_MIN_RANGE_M <= rng_ground <= SM2.max_range:
-                continue
+            if not SM2_MIN_RANGE_M <= rng_ground <= DRONE_ENGAGE_RANGE_M:
+                continue        # beyond 22 km: measured waste zone — hold
             if not SM2.min_intercept_alt <= ey <= SM2.max_intercept_alt:
                 continue
             deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
@@ -435,6 +466,7 @@ class ShipDefense:
                 detection_range_m=detect_range)
             sam.launch_cinematic = False    # no 1x time lock (enemy launch)
             sam.launch_platform = ship      # damage.py: never self-OBB-hit
+            _mark_hostile_round(sam)
             world.missiles.append(sam)
             ship.sm2_ammo -= 1
             ship.sm2_reload_timer = ship.sm2_reload_s

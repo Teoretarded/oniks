@@ -475,16 +475,19 @@ class StrikeMissile:
             gx, gz = _steer_scalar(vx, vz, self._route_heading())
             if self._launched_above_cruise:
                 # Air-launched from above cruise alt: descend at a gentle,
-                # controlled rate.  We ramp the target altitude from the
-                # current altitude down to cruise_alt at a capped sink rate
-                # (at most DESCENT_SINK_RATE m/s of target-alt change per
-                # second).  This keeps the missile from diving at 4G.
-                # The PD then commands just enough gy to hold that ramp.
-                DESCENT_SINK_RATE = 30.0   # m/s target-altitude ramp rate
+                # controlled DESCENT_SINK_RATE.  The PD reaches equilibrium
+                # when kp * offset == kd * sink, so the commanded point
+                # must sit offset = sink * kd / kp BELOW the current
+                # altitude to realize the wanted sink (a fixed `alt - 30`
+                # offset only delivered kp/kd * 30 ~ 9.5 m/s — measured by
+                # the 5b probes: a JASSM released at its 150 km gate
+                # arrived TERMINAL still kilometres high and dove into
+                # the sea short of every target).  30 m/s on a ~250 m/s
+                # cruise is a ~7 deg glide — no 4G dive.
+                DESCENT_SINK_RATE = 30.0   # m/s realized sink rate
                 target_alt = max(w.cruise_alt,
-                                 alt - DESCENT_SINK_RATE * dt * 120.0)
-                # Clamp: the target may not go BELOW cruise_alt.
-                target_alt = max(target_alt, w.cruise_alt)
+                                 alt - DESCENT_SINK_RATE
+                                 * CRUISE_ALT_KD / CRUISE_ALT_KP)
                 gy = altitude_hold_accel(alt, vs, target_alt,
                                          CRUISE_ALT_KP, CRUISE_ALT_KD,
                                          CRUISE_ALT_MAX_A) + GRAVITY
@@ -503,10 +506,21 @@ class StrikeMissile:
                                      CRUISE_ALT_MAX_A) + GRAVITY
 
         elif self.phase == SPH_STRIKE_TERMINAL:
-            if self._dist_to_target() > TERMINAL_COMMIT_RANGE_M:
+            if (self._dist_to_target() > TERMINAL_COMMIT_RANGE_M
+                    or alt < self.target_y):
                 # Stage 1: stay on the terrain-following deck — the armed
                 # round still rides the terrain over any ridge between it
-                # and the target (see TERMINAL_COMMIT_RANGE_M).
+                # and the target (see TERMINAL_COMMIT_RANGE_M).  The
+                # ``alt < target_y`` clause (5b): commit to the straight
+                # PN line only once AT-OR-ABOVE the aim point — a target
+                # on a cliff top approached from the sea otherwise gets a
+                # committed line that grazes the rising slope under it
+                # (measured: a JASSM on the player base died 1.3 km short
+                # on the coastal rise).  Riding the deck UP the slope
+                # until level with the aim point turns the final commit
+                # into a short, clear descent; aim heights are structure
+                # mid-OBB (well under cruise_alt AGL), so the condition
+                # always releases before overflight.
                 gx, gz = _steer_scalar(vx, vz, self._route_heading())
                 agl, agl_vs = self._skim_ref(alt, vs, world)
                 gy = altitude_hold_accel(agl, agl_vs, w.cruise_alt,
