@@ -311,8 +311,13 @@ PANTSIR_SPAWNS = (
 # (locked file boundary); the generic TEL dims/HP default is the right
 # class, so the wrapper is built with explicit hp + dims here.
 PANTSIR_STRUCT_HP = 2
-PANTSIR_STRUCT_DIMS = (8.0, 3.0, 4.6)   # models/pantsir.py measured bbox
-#                                         (L=8.0, beam=3.0, height≈4.6 m)
+# sim/bases.py Structure.obb reads dims as (length=X, beam=Z, height=Y).  The
+# models/pantsir.py body is built with its chassis LONG axis along +Z (the
+# threat-ingress bearing the model faces; X span 3.44 m, Z span 8.19 m — the
+# Z length is LOCKED by tests/test_pantsir_model.py::test_length_approx_8m).
+# So the OBB footprint is (beam_X=3.0, length_Z=8.0): the box long side runs
+# +Z with the hull, NOT +X.  Height 4.6 m tops the turret (model Y 4.58 m).
+PANTSIR_STRUCT_DIMS = (3.0, 8.0, 4.6)   # (X beam, Z length, Y height)
 
 # --- Phase 4: recon drone ------------------------------------------------------
 
