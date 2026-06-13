@@ -411,3 +411,44 @@ fighter employment, 23 tests), then the integrator.
   dying 5 s into the flight (true ARH); SM-2 drone discipline holds all
   shots beyond 22 km and engages inside; full-battle step cost 0.63 ms
   mean / 2.5 ms p95 at the 120 Hz step (8.33 ms budget).
+
+## Phase 7 — setup screen + end screen + enemy radars (integration, 2026-06-13)
+
+- Full flow wired: menu COMBAT -> CombatSetupState (World/Armory pages),
+  START -> App.start_combat(config) -> CombatState(app, config) ->
+  CombatWorld(config). start_combat stays backward-compatible (config=None
+  -> default config) so the smoke tool and any bare caller are unchanged.
+- Enemy ground radars (spec 5.5): config.n_enemy_radars units on the enemy
+  continent. The 3D geometry ALWAYS renders (one build_radar_station mesh
+  per unit in CombatState._site_draws, freed by the base dispose); the
+  tactical MAP marker is fog-gated — latched only once a player sensor
+  (drone SAR or the radar net) images the pin, mirroring airfield_known.
+  known_enemy_sites surfaces the airfield + every imaged radar; the latch
+  lives in _update_airfield_intel (cadence shared, no early-return on the
+  airfield so radars still latch after it). Valid Oniks targets + part of
+  the victorious win condition (all ships + airfield + radars dead).
+- End screen: CombatState owns a CombatEndOverlay (not an app-state switch),
+  latched the first frame world.defeated/victorious flips (defeat outranks).
+  The sim keeps running underneath, dimmed — render draws the live scene
+  then the overlay's dim+panel; input routes to the overlay. REMATCH ->
+  start_combat(SAME config); NEW BATTLE -> open_combat_setup; MAIN MENU ->
+  quit_to_menu. The 5b inline HUD banner still reads underneath.
+- Armory HUD: the Bastion block gains an Oniks magazine row — "n/cap" green
+  while loaded, "0/cap RLDG <s>s" amber while the refill timer runs (pure
+  game/hud.oniks_ammo_row; None in the sandbox so its infinite Oniks shows
+  no row). S-300/Pantsir readouts already carried magazine state.
+- Updated-to-new-truth (NOT weakened): test_states menu-COMBAT now asserts
+  the setup screen opens (was: straight into the battle); test_phase5a SAR
+  airfield-reveal asserts the airfield is PRESENT in known_enemy_sites
+  (the DEFAULT overflight point sits ~9 km from enemy_radar_01, inside the
+  25 km SAR strip, so it legitimately images that radar too); smoke
+  Phase-4/5b drone legs rebuilt RELATIVE to the seeded fleet (the retired
+  DESTROYER_SPAWNS fixed anchors no longer hold — back-plot/drone-hunt use
+  seed=5 per the canonical probe geometry, ELINT/SAR derive from live hulls).
+- Gate: 790 tests green (16 new Phase-7 e2e: menu->setup->config->world
+  flow, end-screen callbacks fire the right App flow, enemy-radar fog-of-war
+  reveal + latch, victory needs radars dead, stepped determinism, sandbox
+  untouched). smoke 69/69 incl. config-driven order of battle, Oniks 3->0->
+  lock->refill, full victory condition, bit-identical 5 s stepped battle.
+  Headless GL drive of the whole flow (menu->setup->combat->DEFEAT/VICTORY
+  overlay->REMATCH/NEW BATTLE/MAIN MENU) renders every frame without crash.

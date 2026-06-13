@@ -50,8 +50,11 @@ class FakeApp:
     def start_sandbox(self):
         self.started += 1
 
-    def start_combat(self):
+    def start_combat(self, config=None):
         self.combat_started = getattr(self, "combat_started", 0) + 1
+
+    def open_combat_setup(self):
+        self.combat_setup_opened = getattr(self, "combat_setup_opened", 0) + 1
 
     def open_settings(self, back_to):
         self.settings_from.append(back_to)
@@ -142,10 +145,12 @@ def test_menu_starts_on_sandbox_and_navigates(kb):
     assert menu.items[menu.sel] == "SANDBOX"
 
 
-def test_menu_combat_item_starts_combat(kb):
+def test_menu_combat_item_opens_setup(kb):
+    """Phase 7: COMBAT opens the two-page setup screen (World/Armory) before
+    the battle — START there calls app.start_combat(config)."""
     menu = MenuState(FakeApp(kb))
     menu._fire("COMBAT")
-    assert menu.app.combat_started == 1
+    assert menu.app.combat_setup_opened == 1
 
 
 def test_menu_press_flash_defers_then_fires(kb):

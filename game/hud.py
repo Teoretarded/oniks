@@ -122,6 +122,26 @@ def pantsir_status_row(world, engaging: bool = False):
     return ("PANTSIR", f"{len(alive)} UP  M{missiles} G{guns}", ARMED_COL)
 
 
+def oniks_ammo_row(world):
+    """The COMBAT Oniks magazine row for the Bastion launcher block, or None
+    when the Oniks magazine is infinite (SANDBOX — ``_oniks_ammo`` is None) —
+    pure, unit-testable.
+
+    Returns ``("AMMO", text, color)`` where text is ``"<n>/<cap>"`` (green
+    while rounds remain), or ``"0/<cap> RLDG <s>s"`` (amber, magazine empty
+    and the refill timer running — the renewable-but-rate-limited armory
+    mechanic, world/world.py ``_arm_magazines``)."""
+    ammo = getattr(world, "_oniks_ammo", None)
+    if ammo is None:
+        return None                         # sandbox: infinite, no row
+    cap = getattr(world, "_oniks_mag_cap", ammo)
+    if ammo > 0:
+        return ("AMMO", f"{ammo}/{cap}", ARMED_COL)
+    # Empty: surface the refill countdown so the player knows when it returns.
+    left = getattr(world, "_oniks_mag_reload_left", 0.0)
+    return ("AMMO", f"0/{cap} RLDG {int(np.ceil(left - 1e-9))}s", RELOAD_COL)
+
+
 def drone_panel_rows(world) -> list[tuple]:
     """The recon-drone platform's panel rows (Phase 4) — pure, GL-free,
     unit-testable. (label, value, color) tuples:
@@ -379,6 +399,11 @@ class HUD:
         rows = [
             ("STATUS", status, col),
             ("WEAPON", ONIKS.display_name.upper(), VALUE_COL),
+        ]
+        ammo = oniks_ammo_row(world)        # COMBAT magazine; None in sandbox
+        if ammo is not None:
+            rows.append(ammo)
+        rows += [
             ("PROFILE", sandbox.profile.upper(), VALUE_COL),
             ("TARGET", self._target_summary(sandbox, BASE_POS), VALUE_COL),
         ]
