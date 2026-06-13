@@ -39,8 +39,8 @@ from game.states import (
 from world.combat_config import (
     CombatConfig,
     CLAMP_AMMO, CLAMP_AWACS, CLAMP_DESTROYERS, CLAMP_DRONES,
-    CLAMP_ENEMY_RADARS, CLAMP_PANTSIR, CLAMP_PLAYER_RADARS, CLAMP_RELOAD_S,
-    clamp_config,
+    CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_PANTSIR, CLAMP_PLAYER_RADARS,
+    CLAMP_RELOAD_S, clamp_config,
 )
 
 # --- Layout -------------------------------------------------------------------
@@ -116,7 +116,7 @@ _ARMORY_ROWS = [
      "step": 1,  "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
     {"kind": "stepper", "label": "PANTSIR  GUN AMMO",
      "field": "pantsir_gun_ammo",
-     "step": 10, "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
+     "step": 10, "lo": CLAMP_GUN_AMMO[0], "hi": CLAMP_GUN_AMMO[1]},
     {"kind": "stepper", "label": "PANTSIR  RELOAD (s)",
      "field": "pantsir_mag_reload_s",
      "step": 5,  "lo": CLAMP_RELOAD_S[0], "hi": CLAMP_RELOAD_S[1]},

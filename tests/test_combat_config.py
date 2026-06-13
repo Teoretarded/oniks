@@ -118,6 +118,21 @@ def test_clamp_config_ammo_ceiling():
     assert c.s300_48n6_ammo == CLAMP_AMMO[1]
 
 
+def test_clamp_config_preserves_default_gun_belt():
+    """The LOCKED schema default pantsir_gun_ammo=700 must survive a
+    clamp_config() round-trip (the default-through-setup path runs every
+    field through clamp_config; a 700 belt clamped with the missile
+    CLAMP_AMMO=(1,200) would silently truncate to 200 — regression guard
+    for the dedicated CLAMP_GUN_AMMO range)."""
+    from world.combat_config import CLAMP_GUN_AMMO
+    assert clamp_config(pantsir_gun_ammo=700).pantsir_gun_ammo == 700
+    # ceiling + floor honoured on the gun-specific range
+    assert clamp_config(pantsir_gun_ammo=99999).pantsir_gun_ammo == CLAMP_GUN_AMMO[1]
+    assert clamp_config(pantsir_gun_ammo=0).pantsir_gun_ammo == CLAMP_GUN_AMMO[0]
+    # a default-config build (no edits) keeps the full 700-round belt
+    assert clamp_config().pantsir_gun_ammo == 700
+
+
 def test_clamp_config_reload_range():
     c = clamp_config(oniks_mag_reload_s=0.0)    # below min 5.0
     assert c.oniks_mag_reload_s == CLAMP_RELOAD_S[0]

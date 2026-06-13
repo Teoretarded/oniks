@@ -452,3 +452,37 @@ fighter employment, 23 tests), then the integrator.
   lock->refill, full victory condition, bit-identical 5 s stepped battle.
   Headless GL drive of the whole flow (menu->setup->combat->DEFEAT/VICTORY
   overlay->REMATCH/NEW BATTLE/MAIN MENU) renders every frame without crash.
+
+## Phase 7 VERIFY (adversarial)
+
+- Re-ran full suite + smoke from scratch: 790 baseline green, smoke 70/70 exit 0.
+- Determinism (scratch probe, deleted): CombatWorld(CombatConfig(seed=S)) x2 for
+  seeds 1337/7/99999/2024 -> bit-identical fleet anchors, enemy-radar pins, AWACS
+  + Pantsir positions. 60 s of 120 Hz stepping on two same-seed worlds stayed
+  bit-identical (ships/missiles/air pos+alive, oniks_fired); different seeds
+  diverged in both layout and 60 s outcome. PASS.
+- Armory: oniks_ammo=2 -> exactly 2 launches then lock then refill-to-cap;
+  SANDBOX WorldState Oniks still infinite (50/50 launches, _oniks_ammo is None).
+  S-300 48N6/40N6 + Pantsir 57E6 magazine seed + empty-refill all correct. PASS.
+- Win/lose: victory withheld with ships dead but airfield OR radars alive;
+  trips only when ships AND airfield AND all ground radars dead (also the
+  n_enemy_radars=0 path). defeat = all bastion TELs dead; launch() returns None
+  after defeat. PASS.
+- Fog of war: enemy radars absent from known_enemy_sites until a sensor images
+  them, then latched (persists after the drone leaves); alive radars cue the
+  commander, dead ones drop from the cue list; no truth leak for distant radars. PASS.
+- Perf: extreme config (12 destroyers / 6 radars / 6 Pantsir / 3 AWACS) mean
+  step 0.502 ms, default config 0.228 ms — both well under the 8.33 ms @120 Hz
+  budget. Steps 10 s with no crash. PASS.
+
+- FIXED (small): pantsir_gun_ammo schema default is 700 but clamp_config() ran
+  gun ammo through CLAMP_AMMO=(1,200), so the default-through-setup path (open
+  setup, press START untouched) silently truncated the 30 mm belt 700 -> 200
+  (~7.5 s of gun engagement vs ~25.5 s). Added a dedicated CLAMP_GUN_AMMO=(1,1000)
+  used only for gun ammo (floor still 1, so test_clamp_config_ammo_floor is
+  unchanged); setup gun-ammo stepper hi now 1000. New regression test
+  test_clamp_config_preserves_default_gun_belt. NOTE: this adds a clamp constant
+  beyond the locked "ammo 1-200" schema line to resolve a contradiction with the
+  locked pantsir_gun_ammo=700 default; integrator should confirm the deviation.
+- Gate after fix: 791 tests green (1 new), smoke 70/70 exit 0; end-to-end
+  setup build_config() default now preserves 700.

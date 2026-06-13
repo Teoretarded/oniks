@@ -48,6 +48,14 @@ CLAMP_PLAYER_RADARS: tuple = (1, 4)
 CLAMP_PANTSIR:       tuple = (0, 6)
 CLAMP_DRONES:        tuple = (0, 3)
 CLAMP_AMMO:          tuple = (1, 200)
+# Pantsir 30 mm belt: a real 2A38M belt holds far more than a missile
+# magazine, and the LOCKED schema default is 700 rounds — outside CLAMP_AMMO.
+# Gun ammo therefore gets its own (1, 1000) range so the documented default
+# survives a clamp_config() round-trip (the schema's pantsir_gun_ammo=700 and
+# CLAMP_AMMO=(1,200) are otherwise mutually contradictory: clamping 700 with
+# the missile range silently truncates the belt to 200).  Floor stays 1 so
+# tests/test_combat_config.py::test_clamp_config_ammo_floor is unchanged.
+CLAMP_GUN_AMMO:      tuple = (1, 1000)
 CLAMP_RELOAD_S:      tuple = (5, 600)
 
 
@@ -89,6 +97,7 @@ def clamp_config(
     lo_pa, hi_pa = CLAMP_PANTSIR
     lo_dr, hi_dr = CLAMP_DRONES
     lo_am, hi_am = CLAMP_AMMO
+    lo_gun, hi_gun = CLAMP_GUN_AMMO
     lo_re, hi_re = CLAMP_RELOAD_S
 
     return CombatConfig(
@@ -105,7 +114,7 @@ def clamp_config(
         s300_40n6_ammo=clamp_field(int(s300_40n6_ammo), lo_am, hi_am),
         s300_mag_reload_s=clamp_field(float(s300_mag_reload_s), lo_re, hi_re),
         pantsir_57e6_ammo=clamp_field(int(pantsir_57e6_ammo), lo_am, hi_am),
-        pantsir_gun_ammo=clamp_field(int(pantsir_gun_ammo), lo_am, hi_am),
+        pantsir_gun_ammo=clamp_field(int(pantsir_gun_ammo), lo_gun, hi_gun),
         pantsir_mag_reload_s=clamp_field(float(pantsir_mag_reload_s),
                                           lo_re, hi_re),
     )
