@@ -149,6 +149,25 @@ structures in sim/bases.py), then the integrator.
   rest (tubes sit low); a raised/erect-on-engage pose would pop the
   silhouette.
 
+## Phase 7 gate — setup + armory + seeded gen + win/lose (2026-06-13)
+
+- Workflow PASS: 791 tests, smoke 70/70. Determinism bit-identical across
+  seeds 1337/7/99999/2024 (layout AND 60 s of sim). Armory bites: Oniks
+  finite in COMBAT (magazine + empty-refill), still infinite in SANDBOX;
+  S-300 48N6/40N6 + Pantsir 57E6/gun magazines refill. Victory needs ALL
+  enemy ships + ground radars + airfield dead; defeat = all Bastion TELs.
+  Enemy ground radars fog-of-war (map only after SAR/overflight), cue the
+  commander while alive. Perf: extreme 13-ship config 0.50 ms/step.
+  Verifier fixed the default Pantsir gun belt clamped 700->200 (added
+  CLAMP_GUN_AMMO 1-1000 — approved: locked ammo clamp 1-200 contradicted
+  the locked 700 default; honor the default + spec "gun ammo configurable").
+- Orchestrator gate: 791 re-run green; BOTH setup pages viewed personally
+  (probe_setup_screen.py) — World + Armory render clean, on-aesthetic,
+  correct footer hints, gun belt 700. End overlay renders over a live
+  frame only — captured at the playtest; logic verified in tests.
+- **ALL 7 CORE PHASES COMPLETE.** Next: 30-min playtest -> code audit ->
+  QOL pass -> additions brainstorm -> Phase 8 polish.
+
 ## Phase 8 — polish backlog (rolling)
 
 - Destroyer model: bow flare subtle, aft stack indistinct (reference-photo
@@ -411,3 +430,78 @@ fighter employment, 23 tests), then the integrator.
   dying 5 s into the flight (true ARH); SM-2 drone discipline holds all
   shots beyond 22 km and engages inside; full-battle step cost 0.63 ms
   mean / 2.5 ms p95 at the 120 Hz step (8.33 ms budget).
+
+## Phase 7 — setup screen + end screen + enemy radars (integration, 2026-06-13)
+
+- Full flow wired: menu COMBAT -> CombatSetupState (World/Armory pages),
+  START -> App.start_combat(config) -> CombatState(app, config) ->
+  CombatWorld(config). start_combat stays backward-compatible (config=None
+  -> default config) so the smoke tool and any bare caller are unchanged.
+- Enemy ground radars (spec 5.5): config.n_enemy_radars units on the enemy
+  continent. The 3D geometry ALWAYS renders (one build_radar_station mesh
+  per unit in CombatState._site_draws, freed by the base dispose); the
+  tactical MAP marker is fog-gated — latched only once a player sensor
+  (drone SAR or the radar net) images the pin, mirroring airfield_known.
+  known_enemy_sites surfaces the airfield + every imaged radar; the latch
+  lives in _update_airfield_intel (cadence shared, no early-return on the
+  airfield so radars still latch after it). Valid Oniks targets + part of
+  the victorious win condition (all ships + airfield + radars dead).
+- End screen: CombatState owns a CombatEndOverlay (not an app-state switch),
+  latched the first frame world.defeated/victorious flips (defeat outranks).
+  The sim keeps running underneath, dimmed — render draws the live scene
+  then the overlay's dim+panel; input routes to the overlay. REMATCH ->
+  start_combat(SAME config); NEW BATTLE -> open_combat_setup; MAIN MENU ->
+  quit_to_menu. The 5b inline HUD banner still reads underneath.
+- Armory HUD: the Bastion block gains an Oniks magazine row — "n/cap" green
+  while loaded, "0/cap RLDG <s>s" amber while the refill timer runs (pure
+  game/hud.oniks_ammo_row; None in the sandbox so its infinite Oniks shows
+  no row). S-300/Pantsir readouts already carried magazine state.
+- Updated-to-new-truth (NOT weakened): test_states menu-COMBAT now asserts
+  the setup screen opens (was: straight into the battle); test_phase5a SAR
+  airfield-reveal asserts the airfield is PRESENT in known_enemy_sites
+  (the DEFAULT overflight point sits ~9 km from enemy_radar_01, inside the
+  25 km SAR strip, so it legitimately images that radar too); smoke
+  Phase-4/5b drone legs rebuilt RELATIVE to the seeded fleet (the retired
+  DESTROYER_SPAWNS fixed anchors no longer hold — back-plot/drone-hunt use
+  seed=5 per the canonical probe geometry, ELINT/SAR derive from live hulls).
+- Gate: 790 tests green (16 new Phase-7 e2e: menu->setup->config->world
+  flow, end-screen callbacks fire the right App flow, enemy-radar fog-of-war
+  reveal + latch, victory needs radars dead, stepped determinism, sandbox
+  untouched). smoke 69/69 incl. config-driven order of battle, Oniks 3->0->
+  lock->refill, full victory condition, bit-identical 5 s stepped battle.
+  Headless GL drive of the whole flow (menu->setup->combat->DEFEAT/VICTORY
+  overlay->REMATCH/NEW BATTLE/MAIN MENU) renders every frame without crash.
+
+## Phase 7 VERIFY (adversarial)
+
+- Re-ran full suite + smoke from scratch: 790 baseline green, smoke 70/70 exit 0.
+- Determinism (scratch probe, deleted): CombatWorld(CombatConfig(seed=S)) x2 for
+  seeds 1337/7/99999/2024 -> bit-identical fleet anchors, enemy-radar pins, AWACS
+  + Pantsir positions. 60 s of 120 Hz stepping on two same-seed worlds stayed
+  bit-identical (ships/missiles/air pos+alive, oniks_fired); different seeds
+  diverged in both layout and 60 s outcome. PASS.
+- Armory: oniks_ammo=2 -> exactly 2 launches then lock then refill-to-cap;
+  SANDBOX WorldState Oniks still infinite (50/50 launches, _oniks_ammo is None).
+  S-300 48N6/40N6 + Pantsir 57E6 magazine seed + empty-refill all correct. PASS.
+- Win/lose: victory withheld with ships dead but airfield OR radars alive;
+  trips only when ships AND airfield AND all ground radars dead (also the
+  n_enemy_radars=0 path). defeat = all bastion TELs dead; launch() returns None
+  after defeat. PASS.
+- Fog of war: enemy radars absent from known_enemy_sites until a sensor images
+  them, then latched (persists after the drone leaves); alive radars cue the
+  commander, dead ones drop from the cue list; no truth leak for distant radars. PASS.
+- Perf: extreme config (12 destroyers / 6 radars / 6 Pantsir / 3 AWACS) mean
+  step 0.502 ms, default config 0.228 ms — both well under the 8.33 ms @120 Hz
+  budget. Steps 10 s with no crash. PASS.
+
+- FIXED (small): pantsir_gun_ammo schema default is 700 but clamp_config() ran
+  gun ammo through CLAMP_AMMO=(1,200), so the default-through-setup path (open
+  setup, press START untouched) silently truncated the 30 mm belt 700 -> 200
+  (~7.5 s of gun engagement vs ~25.5 s). Added a dedicated CLAMP_GUN_AMMO=(1,1000)
+  used only for gun ammo (floor still 1, so test_clamp_config_ammo_floor is
+  unchanged); setup gun-ammo stepper hi now 1000. New regression test
+  test_clamp_config_preserves_default_gun_belt. NOTE: this adds a clamp constant
+  beyond the locked "ammo 1-200" schema line to resolve a contradiction with the
+  locked pantsir_gun_ammo=700 default; integrator should confirm the deviation.
+- Gate after fix: 791 tests green (1 new), smoke 70/70 exit 0; end-to-end
+  setup build_config() default now preserves 700.

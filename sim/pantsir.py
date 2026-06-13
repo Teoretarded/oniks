@@ -189,6 +189,12 @@ class Pantsir:
 
         # --- Magazine ---------------------------------------------------------
         self.missile_ammo: int = int(missile_ammo)
+        # Magazine-refill mechanic (armed by CombatWorld via arm_magazine).
+        # Default 0.0 reload duration means the mechanic is inactive; when
+        # arm_magazine is called the refill kicks in once the count hits 0.
+        self._mag_cap: int = int(missile_ammo)   # full magazine size
+        self._mag_reload_s: float = 0.0           # duration of one refill cycle
+        self._mag_reload_left: float = 0.0        # s until next refill completes
 
         # --- Fire-control reload ----------------------------------------------
         self._reload_timer: float = 0.0   # counts DOWN; > 0 means reloading
@@ -205,6 +211,22 @@ class Pantsir:
     @property
     def gun_ammo(self) -> int:
         return self.gun.ammo
+
+    def arm_magazine(self, mag_reload_s: float) -> None:
+        """Activate the magazine-refill mechanic for this unit.
+
+        Called by CombatWorld after construction (see world/combat.py
+        _arm_magazines section).  Once the missile_ammo count hits 0 a
+        timer of ``mag_reload_s`` seconds starts; on expiry the magazine
+        is refilled to the construction count (``_mag_cap``).
+
+        Parameters
+        ----------
+        mag_reload_s:
+            Seconds to reload the full missile magazine (config-driven;
+            spec §4.2 "armory-configurable").
+        """
+        self._mag_reload_s = float(mag_reload_s)
 
     def kill(self) -> None:
         """Destroy this unit (called by the damage system when HP reaches 0).
@@ -517,6 +539,10 @@ class _UnitDefense:
 
         world.missiles.append(sam)
         unit.missile_ammo -= 1
+        # Start the magazine refill timer when the last round is consumed.
+        if unit.missile_ammo <= 0 and unit._mag_reload_s > 0.0:
+            unit.missile_ammo = 0
+            unit._mag_reload_left = unit._mag_reload_s
         unit._reload_timer = MISSILE_RELOAD_S
         self._inflight.append((sam, best_key))
         world.events.append(("pantsir_launch", launch_pos.copy()))
@@ -570,6 +596,12 @@ class _UnitDefense:
         # Tick down the fire-control reload timer
         if unit._reload_timer > 0.0:
             unit._reload_timer = max(0.0, unit._reload_timer - dt)
+
+        # Tick the magazine refill timer (active only when _mag_reload_s > 0).
+        if unit._mag_reload_left > 0.0:
+            unit._mag_reload_left = max(0.0, unit._mag_reload_left - dt)
+            if unit._mag_reload_left == 0.0:
+                unit.missile_ammo = unit._mag_cap  # full refill
 
         # Inbound hostile missiles: is_hostile AND is_air AND alive AND
         # radar_size == 'missile'.  SamMissile instances (friendly 57E6, player

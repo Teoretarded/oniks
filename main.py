@@ -88,15 +88,30 @@ class App:
         self.sandbox = SandboxState(self)
         self.states.switch(self.sandbox)
 
-    def start_combat(self) -> None:
-        """Menu COMBAT item: start a fresh fog-of-war combat session.
+    def open_combat_setup(self) -> None:
+        """Menu COMBAT item: the two-page setup screen (World/Armory) before
+        the battle.  START there calls ``start_combat(config)``; ESC returns
+        to the main menu.  A fresh CombatSetupState each time so a re-entry
+        starts on the World page with the default selection."""
+        from game.combat_setup import CombatSetupState  # GL deferred to enter
+        setup = CombatSetupState(self, self.start_combat)
+        self._combat_setup = setup        # held so it is not GC'd mid-session
+        self.states.switch(setup)
+
+    def start_combat(self, config=None) -> None:
+        """Start a fresh fog-of-war combat session from a CombatConfig.
+
+        ``config`` None keeps the screen-less path working (smoke tools and
+        tests that call ``start_combat()`` bare, plus the REMATCH callback
+        passing the just-played config): the CombatState falls back to the
+        default config, so behaviour is unchanged for existing callers.
         Reuses the ``sandbox`` slot so pause/resume/quit flows apply."""
         from game.combat import CombatState     # after the GL context exists
         self._draw_loading_frame()
         if self.sandbox is not None:
             self.sandbox.dispose()
         self.paused = False
-        self.sandbox = CombatState(self)
+        self.sandbox = CombatState(self, config=config)
         self.states.switch(self.sandbox)
 
     def _draw_loading_frame(self) -> None:

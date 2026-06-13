@@ -32,6 +32,7 @@ tests.
 from __future__ import annotations
 
 from engine.mesh import Mesh
+from game.combat_end import CombatEndOverlay
 from game.controls import PLATFORMS_COMBAT
 from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
 from models.airfield import build_airfield
@@ -42,6 +43,7 @@ from models.destroyer import build_destroyer
 from models.drone import build_recon_drone
 from models.fighter import build_fighter
 from models.pantsir import build_pantsir
+from models.structures import build_radar_station
 from sim.enemy_air import FS_GONE, FS_PARKED, FS_REARMING, Fighter
 from sim.recon import DRONE_GONE
 from world.combat import CombatWorld
@@ -59,10 +61,19 @@ class CombatState(SandboxState):
     PLATFORMS = PLATFORMS_COMBAT    # bastion -> s300 -> drone (Phase 4)
 
     def _build_world(self):
-        return CombatWorld()
+        """Build the combat world from the setup-screen config.  ``_config``
+        is stashed BEFORE super().__init__ runs (which calls this), so it is
+        available here; falls back to the CombatWorld default when None (the
+        screen-less smoke/test path)."""
+        config = getattr(self, "_config", None)
+        return CombatWorld(config) if config is not None else CombatWorld()
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, app, config=None):
+        # _config must exist before super().__init__ -> _build_meshes/
+        # _build_world reads it (the world is constructed inside the base
+        # __init__).  None is the legacy default-config path.
+        self._config = config
+        super().__init__(app)
         # HUD 'ENGAGING' flash: a real-time countdown refreshed whenever a
         # Pantsir launches a 57E6 (detected as a drop in pooled missile ammo
         # across the units — a launch is exactly one round consumed).  Read
@@ -70,6 +81,13 @@ class CombatState(SandboxState):
         # property.
         self._pantsir_engage_left = 0.0
         self._pantsir_ammo_prev = self._pantsir_ammo_total()
+        # Phase 7 end screen: a CombatEndOverlay is created the first time
+        # ``victorious`` or ``defeated`` latches (subsuming the 5b inline HUD
+        # banner — a brief in-HUD line may still read underneath).  The
+        # overlay is OWNED by this state (not an app-state switch) so the sim
+        # keeps running underneath, dimmed, exactly as the spec asks; input
+        # routes to it while it is up.  None until the battle ends.
+        self._end_overlay: CombatEndOverlay | None = None
 
     def _pantsir_ammo_total(self) -> int:
         """Pooled 57E6 rounds remaining across all Pantsir units (alive or
@@ -86,7 +104,8 @@ class CombatState(SandboxState):
     def sim_step(self, dt: float) -> None:
         """Base sim step, then refresh the Pantsir 'ENGAGING' HUD flash: any
         drop in pooled 57E6 ammo this step is a fresh launch -> relatch the
-        window; otherwise let it count down in real time."""
+        window; otherwise let it count down in real time.  Finally latch the
+        end screen the first time the battle is decided."""
         super().sim_step(dt)
         ammo = self._pantsir_ammo_total()
         if ammo < self._pantsir_ammo_prev:
@@ -95,6 +114,63 @@ class CombatState(SandboxState):
             self._pantsir_engage_left = max(0.0,
                                             self._pantsir_engage_left - dt)
         self._pantsir_ammo_prev = ammo
+        self._check_end_state()
+
+    # ------------------------------------------------------------- end screen
+
+    def _check_end_state(self) -> None:
+        """Latch the CombatEndOverlay the first time the battle is decided.
+        Defeat outranks victory if both somehow trip in one frame (losing the
+        Bastion is final — same precedence as the HUD banner)."""
+        if self._end_overlay is not None:
+            return
+        world = self.world
+        if getattr(world, "defeated", False):
+            self._open_end_overlay(victory=False)
+        elif getattr(world, "victorious", False):
+            self._open_end_overlay(victory=True)
+
+    def _open_end_overlay(self, victory: bool) -> None:
+        """Build the end overlay with callbacks wired onto the App flows:
+        REMATCH replays the SAME config, NEW BATTLE re-opens the setup
+        screen, MAIN MENU discards the session.  enter() is called so its
+        deferred GL/text bind runs (the overlay is owned by this state, not
+        switched in via the state machine)."""
+        app = self.app
+        config = self._config
+        overlay = CombatEndOverlay(
+            app, victory,
+            rematch_cb=lambda: app.start_combat(config),
+            new_battle_cb=app.open_combat_setup,
+            menu_cb=app.quit_to_menu)
+        overlay.enter()
+        self._end_overlay = overlay
+
+    def handle_event(self, ev) -> None:
+        """Route input to the end overlay once the battle is decided (its
+        REMATCH/NEW BATTLE/MAIN MENU rows + ESC); otherwise the normal
+        sandbox controls."""
+        if self._end_overlay is not None:
+            self._end_overlay.handle_event(ev)
+            return
+        super().handle_event(ev)
+
+    def render(self, dt_real: float) -> None:
+        """Normal sandbox render; once the battle is decided, draw the live
+        scene (the sim keeps running underneath — spec §2.2) and lay the
+        end overlay's dim + panel on top.  The overlay's _tick_pending runs
+        inside its render, advancing the 80 ms press-flash before firing."""
+        if self._end_overlay is not None:
+            self.controls.update(dt_real)        # free-cam still flies
+            self.rig.update(dt_real, self.followed)
+            audio = self.app.audio
+            audio.set_listener(self.camera.eye)
+            audio.update_loops(self._loop_sources())
+            w, h = self.window.size()
+            self._draw_scene(w, h)
+            self._end_overlay.render(dt_real)
+            return
+        super().render(dt_real)
 
     def _build_meshes(self) -> None:
         super()._build_meshes()
@@ -115,6 +191,17 @@ class CombatState(SandboxState):
         # already terrain-pinned (world/combat.py).
         self._site_draws.append((Mesh(build_airfield()),
                                  self.world.airfield.pos.copy()))
+        # Phase 7 enemy ground radars (spec §5.5): each is a radar-station
+        # structure on the enemy continent.  The 3D geometry ALWAYS exists
+        # (only the tactical MAP marker is fog-gated via known_enemy_sites),
+        # so each draws at its terrain pin in the same _site_draws list the
+        # airfield uses — one Mesh per unit, all freed by the base dispose().
+        # Reuses build_radar_station (the friendly station's model); a hulk
+        # stays rendered after a kill (destruction visuals are backlog, like
+        # the other structures).
+        for struct, _radar in getattr(self.world, "enemy_radars", ()):
+            self._site_draws.append((Mesh(build_radar_station()),
+                                     struct.pos.copy()))
 
     def dispose(self) -> None:
         self._mesh_drone.delete()

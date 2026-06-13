@@ -96,7 +96,11 @@ def test_order_of_battle():
     assert len(w.air_bases[1].parked) == 2
     # The airfield is an ENEMY structure (player-missile sweep target),
     # never part of the player base structure list.
-    assert w.enemy_structures == [w.airfield]
+    # Phase 7: DEFAULT config includes n_enemy_radars=2 ground radar structures
+    # in enemy_structures alongside the airfield — check airfield is FIRST and
+    # present, not that it's the only entry (updated to Phase 7 truth).
+    assert w.enemy_structures[0] is w.airfield
+    assert w.airfield in w.enemy_structures
     assert w.airfield not in w.structures
 
 
@@ -304,7 +308,12 @@ def test_sar_overflight_reveals_airfield_and_latches():
     for _ in range(int(5.0 / DT_COARSE)):
         w.step(DT_COARSE)
     assert w.airfield_known
-    assert [s["id"] for s in w.known_enemy_sites] == ["airfield_enemy_00"]
+    # The airfield marker is now revealed.  (Phase 7 fog-of-war extends the
+    # same SAR-imaging latch to enemy ground radars; the DEFAULT config's
+    # enemy_radar_01 sits ~9 km from this overflight point, inside the 25 km
+    # SAR strip, so it is legitimately imaged here too — assert the airfield
+    # is present rather than over-specifying the exact set.)
+    assert "airfield_enemy_00" in [s["id"] for s in w.known_enemy_sites]
     # Latched: fly the drone home, the marker stays.
     drone.pos[0], drone.pos[2] = BASE_POS[0], BASE_POS[2]
     drone.set_route([])

@@ -19,10 +19,12 @@ from sim.commander import (AIRFIELD_HARM, AIRFIELD_JASSM, CARRIER_HARM,
 from sim.enemy_air import (FIGHTER_ALT_M, FS_PARKED, FS_REARMING, FS_RTB,
                            Fighter)
 from sim.recon import RWR_LOCK, RWR_SPIKE
+from sim.ships import ST_GONE
 from sim.strike import HarmMissile, StrikeMissile
 from world.combat import (AIRFIELD_XZ, DRONE_RESPAWN_S, SEEKER_BASKET_M,
                           CombatWorld)
-from world.generation import BASE_POS
+from world.combat_config import CombatConfig
+from world.generation import BASE_POS, terrain_height_scalar
 from world.world import SAM_TEL_POS
 
 
@@ -39,9 +41,11 @@ def main() -> int:
         ok = ok and cond
 
     check("state is CombatState", type(state).__name__ == "CombatState")
-    check("two destroyers + exactly one carrier, nothing else",
+    # DEFAULT config (Phase 7 seeded fleet): 3 destroyers + exactly 1 carrier
+    # (carrier is always 1), nothing else.
+    check("3 destroyers + exactly one carrier, nothing else",
           [s.ship_type for s in world.ships]
-          == ["destroyer", "destroyer", "carrier"])
+          == ["destroyer", "destroyer", "destroyer", "carrier"])
     check("no legacy aircraft (enemy air lives in enemy_air)",
           world.aircraft == [])
     check("carrier + fighter + awacs + airfield meshes registered",
@@ -100,17 +104,26 @@ def main() -> int:
           and drone.pos[1] == 18_000.0 and drone.route == [])
     check("drone is NOT in the aircraft list", world.aircraft == [])
 
+    # Phase 7: the fleet is SEEDED (sample_fleet) — hull anchors vary with
+    # the seed, so these drone legs are built RELATIVE to the live hulls
+    # (the retired DESTROYER_SPAWNS fixed-anchor geometry no longer holds).
+    DT4 = 0.25                              # coarse: nothing ballistic flies
     w4 = CombatWorld()
     d4 = w4.drone
     check("destroyers EMIT at spawn; carrier runs silent (5a doctrine)",
           all(s.radar.emitting for s in w4.ships
               if s.ship_type == "destroyer")
           and not w4.carrier.radar.emitting)
-    # ELINT: a 120 km crossing leg south of the fleet — bearings sweep a
-    # wide angle while the hulls stay far past the ground radar horizon.
-    d4.pos[0], d4.pos[2] = -60_000.0, 80_000.0
-    d4.set_route([(60_000.0, 80_000.0)])
-    DT4 = 0.25                              # coarse: nothing ballistic flies
+    # ELINT: a wide crossing leg ~40 km in FRONT of destroyer_00 (toward
+    # the base — still 40 km clear of the hull's 30 km stealth bubble so the
+    # drone survives, and past the ground-radar horizon) — the 180 km leg
+    # sweeps a wide bearing angle so the triangulation converges tightly for
+    # whatever seed placed the hull.
+    ship00 = next(s for s in w4.ships if s.ship_id == "destroyer_00")
+    hx, hz = float(ship00.pos[0]), float(ship00.pos[2])
+    leg_z = hz - 40_000.0                   # in front of the hull, toward base
+    d4.pos[0], d4.pos[2] = hx - 90_000.0, leg_z
+    d4.set_route([(hx + 90_000.0, leg_z)])
     fix_t = None
     for _ in range(int(600.0 / DT4)):
         w4.step(DT4)
@@ -121,7 +134,6 @@ def main() -> int:
         w4.step(DT4)
     check("ELINT fix actionable within sim minutes",
           fix_t is not None and fix_t < 600.0)
-    ship00 = w4.ships[0]
     est = w4.elint.est_pos("destroyer_00_spy1")
     err = (float("inf") if est is None else
            float(np.hypot(est[0] - ship00.pos[0], est[2] - ship00.pos[2])))
@@ -131,11 +143,14 @@ def main() -> int:
           and not w4.radar_net.visible(ship00.pos, "ship"))
 
     # SAR: a SILENT ship found by overflight (fresh world: no ELINT help).
+    # Overfly the live destroyer_01 hull on a north-running leg through it.
     w5 = CombatWorld()
     d5 = w5.drone
-    w5.ships[1].radar.emitting = False      # destroyer_01 goes dark
-    d5.pos[0], d5.pos[2] = 20_000.0, 140_000.0
-    d5.set_route([(20_000.0, 200_000.0)])   # overfly its anchor
+    ship01 = next(s for s in w5.ships if s.ship_id == "destroyer_01")
+    s1x, s1z = float(ship01.pos[0]), float(ship01.pos[2])
+    ship01.radar.emitting = False           # destroyer_01 goes dark
+    d5.pos[0], d5.pos[2] = s1x, s1z - 30_000.0
+    d5.set_route([(s1x, s1z + 30_000.0)])   # overfly its hull
     sar_t = None
     for _ in range(int(400.0 / DT4)):
         w5.step(DT4)
@@ -144,12 +159,12 @@ def main() -> int:
             break
     check("SAR overflight tracks the silent ship",
           sar_t is not None and d5.alive
-          and not w5.radar_net.visible(w5.ships[1].pos, "ship"))
+          and not w5.radar_net.visible(ship01.pos, "ship"))
 
     # Engagement: the silent ship lights up with the drone inside its
     # 30 km stealth bubble — RWR SPIKE, then SM-2s and LOCK (120 Hz: a
     # round is flying).
-    w5.ships[1].radar.emitting = True
+    ship01.radar.emitting = True
     saw_spike = saw_lock = False
     max_inflight = 0
     killed = False
@@ -281,14 +296,21 @@ def main() -> int:
           w8.commander.picture.emitters[rid].alive is True)
 
     # FIND -> KILL: 3 Oniks launches back-plot the Bastion; JASSM + TLAM
-    # missions are scheduled at the cluster.
-    w9 = CombatWorld()
+    # missions are scheduled at the cluster.  Phase 7: seed=5 places a
+    # destroyer at ~135 km so a SPY-1 catches the Oniks climb below the 2 km
+    # back-plot ceiling (DEFAULT seed=1337 spreads the fleet to 260-340 km —
+    # the canonical probe-measured geometry, mirrors test_phase5b_e2e.py).
+    w9 = CombatWorld(CombatConfig(seed=5))
     w9.radar_station.emitting = False    # never located: KILL ungated
     for s in w9.ships:
         s.sm2_ammo = 0
         s.ciws_ammo = 0
+    for p in w9.pantsirs:                # isolate from the Phase-6 layer
+        p.missile_ammo = 0
+        p.gun.ammo = 0
     tlam0 = sum(s.tomahawk_ammo for s in w9.ships)
-    tgt9 = w9.ships[0].pos.copy()
+    tgt9 = next(s for s in w9.ships
+                if s.ship_id == "destroyer_00").pos.copy()
     tgt9[1] = 0.0
     for _ in range(3):
         w9.reload_left = 0.0
@@ -323,18 +345,26 @@ def main() -> int:
           and sum(s.tomahawk_ammo for s in w9.ships) < tlam0)
 
     # DEFEND: the AIM-9X drone hunt — kill with NO RWR LOCK beforehand.
-    w10 = CombatWorld()
+    # Phase 7: seed=5 (a destroyer at ~135 km), drone crossing 15 km ahead
+    # of the CLOSEST hull so an enemy radar forms the drone track and the
+    # commander vectors the hunter (mirrors test_phase5b_e2e.py — the old
+    # hardcoded z=128 km leg assumed the retired DESTROYER_SPAWNS anchors).
+    w10 = CombatWorld(CombatConfig(seed=5))
     for s in w10.ships:
         s.sm2_ammo = 0                  # isolate the passive IR channel
         s.ciws_ammo = 0
     d10 = w10.drone
-    d10.pos[0], d10.pos[2] = -40_000.0, 128_000.0
-    d10.set_route([(60_000.0, 128_000.0)])
+    close10 = min(w10.ships, key=lambda s: float(
+        np.hypot(s.pos[0], s.pos[2])))
+    cx10, cz10 = float(close10.pos[0]), float(close10.pos[2])
+    d10.pos[0], d10.pos[2] = cx10 - 40_000.0, cz10 - 15_000.0
+    d10.set_route([(cx10 + 40_000.0, cz10 - 15_000.0)])
     f10 = w10._fighter_list[0]
-    f10.launch((0.0, 160_000.0))
+    f10.launch((cx10, cz10))
     f10.pos[1] = FIGHTER_ALT_M
     w10.step(DT4)
-    f10.pos[0], f10.pos[1], f10.pos[2] = -50_000.0, 15_000.0, 128_000.0
+    # Tail-chase forcing: 50 km behind the drone at the snap-up ceiling band.
+    f10.pos[0], f10.pos[1], f10.pos[2] = cx10 - 50_000.0, 15_000.0, cz10 - 15_000.0
     saw_lock10 = False
     ir10 = None
     for _ in range(int(240.0 / DT4)):
@@ -458,6 +488,85 @@ def main() -> int:
           and not any(r is pk.radar and r.detects(tgt14, "missile")
                       for r in w14.radar_net.radars)
           and w14.pantsirs[1].alive)
+
+    # --- Phase 7: the setup-screen config drives the world (pure sim).
+    # Build a non-default battle and assert the order of battle, the finite
+    # Oniks magazine refill cycle, the full victory condition and seeded
+    # determinism — the contracts the setup screen relies on.
+    cfg7 = CombatConfig(seed=7, n_destroyers=6, n_enemy_radars=3,
+                        oniks_ammo=3, oniks_mag_reload_s=30.0)
+    w15 = CombatWorld(cfg7)
+    check("config: 6 destroyers + 1 carrier placed",
+          [s.ship_type for s in w15.ships]
+          == ["destroyer"] * 6 + ["carrier"])
+    for s in w15.ships:                      # all hulls in open water
+        check(f"  {s.ship_id} in open water",
+              terrain_height_scalar(float(s.pos[0]), float(s.pos[2])) < -5.0)
+    check("config: 3 enemy radars on dry land, in the enemy picture",
+          len(w15.enemy_radars) == 3
+          and all(terrain_height_scalar(float(st.pos[0]),
+                                        float(st.pos[2])) > 0.0
+                  for st, _r in w15.enemy_radars)
+          and all(r in w15._enemy_cue_radars()
+                  for _st, r in w15.enemy_radars))
+    check("enemy radars absent from the player map until imaged (fog)",
+          w15.known_enemy_sites == [])
+
+    # Oniks magazine: 3 rounds -> 0 -> locked -> refills after 30 s.
+    tgt15 = np.array([0.0, 0.0, 150_000.0])
+    check("Oniks magazine loaded to 3", w15._oniks_ammo == 3)
+    for _ in range(3):
+        m15 = w15.launch("hi-lo", tgt15)
+        w15.reload_left = 0.0               # skip the per-shot tube reload
+        if m15 is None:
+            break
+    check("Oniks magazine drains to 0 and locks",
+          w15._oniks_ammo == 0 and not w15.launcher_armed
+          and w15.launch("hi-lo", tgt15) is None)
+    for _ in range(int(30.5 / PHYS_DT)):    # run past the 30 s refill
+        w15.step(PHYS_DT)
+    check("Oniks magazine refills to 3 after 30 s",
+          w15._oniks_ammo == 3 and w15.launcher_armed)
+
+    # Victory needs EVERY enemy ship + radar + airfield dead.
+    w16 = CombatWorld(cfg7)
+    for s in w16.ships:
+        s.state = ST_GONE
+    check("victory withheld while airfield + radars stand",
+          not w16.victorious)
+    w16.airfield.alive = False
+    check("victory withheld while radars stand", not w16.victorious)
+    for st, r in w16.enemy_radars:
+        st.alive = False
+        r.alive = False
+    check("victory once ALL ships + airfield + radars are dead",
+          w16.victorious)
+
+    # Seeded determinism: same config -> identical fleet anchors; a different
+    # seed diverges.
+    def _anchors(cw):
+        return sorted((round(float(s.pos[0])), round(float(s.pos[2])))
+                      for s in cw.ships)
+    check("same config -> identical fleet anchors",
+          _anchors(CombatWorld(cfg7)) == _anchors(CombatWorld(cfg7)))
+    cfg7b = CombatConfig(seed=8, n_destroyers=6, n_enemy_radars=3)
+    check("different seed -> different fleet anchors",
+          _anchors(CombatWorld(cfg7)) != _anchors(CombatWorld(cfg7b)))
+
+    # The full determinism contract: same config -> bit-identical battle after
+    # stepping (ships + missiles + structures + enemy air all line up).
+    def _battle_snapshot(cw):
+        return (
+            [tuple(np.round(s.pos, 6)) for s in cw.ships],
+            [tuple(np.round(m.pos, 6)) for m in cw.missiles],
+            sorted(s.structure_id for s in cw.structures if s.alive),
+            [tuple(np.round(e.pos, 6)) for e in cw.enemy_air])
+    da, db = CombatWorld(cfg7), CombatWorld(cfg7)
+    for _ in range(600):                     # 5 s with commander + defenses
+        da.step(PHYS_DT)
+        db.step(PHYS_DT)
+    check("same config -> bit-identical battle after 5 s of stepping",
+          _battle_snapshot(da) == _battle_snapshot(db))
 
     # --- GL pass over the Phase-4 UI: TAB cycle, drone HUD panel, map
     # overlays (drone diamond/route + ELINT rays/circles) and the [ / ]

@@ -353,7 +353,7 @@ class MenuState(_ListScreen):
         elif name == "SANDBOX":
             self.app.start_sandbox()    # fresh world
         elif name == "COMBAT":
-            self.app.start_combat()     # fresh combat session
+            self.app.open_combat_setup()  # setup screen, then the battle
         elif name == "SETTINGS":
             self.app.open_settings(self)
 
