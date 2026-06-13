@@ -43,7 +43,12 @@ def test_radar_station_pin_is_on_dry_land():
 def test_contact_board_is_radar_gated():
     cw = CombatWorld()
     assert cw.contacts.visible_fn is not None
-    assert cw.radar_net.radars == [cw.radar_station]
+    # The ground station is the primary network node; Phase 6 adds the
+    # Pantsir radars as additional nodes (their documented dual role —
+    # point-defense sensor + contact-picture node, world/combat.py).
+    assert cw.radar_station in cw.radar_net.radars
+    pantsir_radars = [p.radar for p in cw.pantsirs]
+    assert cw.radar_net.radars == [cw.radar_station] + pantsir_radars
     assert cw.radar_station.ranges == PLAYER_RADAR_RANGES
     # the station stands ON the terrain (not floating / buried)
     assert cw.radar_station.pos[1] == terrain_height_scalar(*RADAR_STATION_XZ)
