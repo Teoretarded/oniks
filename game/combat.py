@@ -41,9 +41,16 @@ from models.common import rot_x, rot_y, rot_z
 from models.destroyer import build_destroyer
 from models.drone import build_recon_drone
 from models.fighter import build_fighter
+from models.pantsir import build_pantsir
 from sim.enemy_air import FS_GONE, FS_PARKED, FS_REARMING, Fighter
 from sim.recon import DRONE_GONE
 from world.combat import CombatWorld
+
+
+# Phase 6: how long the HUD 'ENGAGING' label latches after a Pantsir launch
+# (real time, decremented per sim step).  Long enough to read at a glance
+# across the short reload cadence, short enough to clear between salvos.
+PANTSIR_ENGAGE_FLASH_S = 1.5
 
 
 class CombatState(SandboxState):
@@ -54,6 +61,41 @@ class CombatState(SandboxState):
     def _build_world(self):
         return CombatWorld()
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # HUD 'ENGAGING' flash: a real-time countdown refreshed whenever a
+        # Pantsir launches a 57E6 (detected as a drop in pooled missile ammo
+        # across the units — a launch is exactly one round consumed).  Read
+        # by game/hud.py pantsir_status_row via the ``pantsir_engaging``
+        # property.
+        self._pantsir_engage_left = 0.0
+        self._pantsir_ammo_prev = self._pantsir_ammo_total()
+
+    def _pantsir_ammo_total(self) -> int:
+        """Pooled 57E6 rounds remaining across all Pantsir units (alive or
+        not — a dead unit launches nothing, so its count is frozen and the
+        delta detector never false-fires on a death)."""
+        return sum(u.missile_ammo
+                   for u in getattr(self.world, "pantsirs", ()))
+
+    @property
+    def pantsir_engaging(self) -> bool:
+        """True while the post-launch HUD flash window is open."""
+        return self._pantsir_engage_left > 0.0
+
+    def sim_step(self, dt: float) -> None:
+        """Base sim step, then refresh the Pantsir 'ENGAGING' HUD flash: any
+        drop in pooled 57E6 ammo this step is a fresh launch -> relatch the
+        window; otherwise let it count down in real time."""
+        super().sim_step(dt)
+        ammo = self._pantsir_ammo_total()
+        if ammo < self._pantsir_ammo_prev:
+            self._pantsir_engage_left = PANTSIR_ENGAGE_FLASH_S
+        elif self._pantsir_engage_left > 0.0:
+            self._pantsir_engage_left = max(0.0,
+                                            self._pantsir_engage_left - dt)
+        self._pantsir_ammo_prev = ammo
+
     def _build_meshes(self) -> None:
         super()._build_meshes()
         # Registered into the shared dict so _draw_ships picks it up by
@@ -63,6 +105,10 @@ class CombatState(SandboxState):
         self._mesh_drone = Mesh(build_recon_drone())
         self._mesh_fighter = Mesh(build_fighter())
         self._mesh_awacs = Mesh(build_awacs())
+        # Phase 6: the player's Pantsir-S1 SHORAD vehicles (friendly, static
+        # ground units guarding the base).  One shared mesh drawn at each
+        # unit's terrain-pinned position in _draw_pantsirs.
+        self._mesh_pantsir = Mesh(build_pantsir())
         # Enemy airfield: drawn like the land sites (appended into
         # _site_draws so the base _draw_scene renders it and dispose()
         # frees it with the other site meshes). The structure's pos is
@@ -74,6 +120,7 @@ class CombatState(SandboxState):
         self._mesh_drone.delete()
         self._mesh_fighter.delete()
         self._mesh_awacs.delete()
+        self._mesh_pantsir.delete()
         super().dispose()
 
     # ------------------------------------------------------------- platform
@@ -90,6 +137,17 @@ class CombatState(SandboxState):
         return super()._platform_subject()
 
     # --------------------------------------------------------------- render
+
+    def _draw_tel(self) -> None:
+        """The base TEL/S-300 ground assets (super) plus the Pantsir-S1
+        SHORAD vehicles.  Each Pantsir is static and terrain-pinned; the
+        model's forward (+Z) already faces the +z threat-ingress bearing,
+        so it draws with identity rotation.  Destroyed units stay rendered
+        as a hulk (base structures do the same — destruction visuals are
+        Phase-7 polish), but their radar has already gone dark in the sim."""
+        super()._draw_tel()
+        for unit in getattr(self.world, "pantsirs", ()):
+            self.renderer.draw_mesh(self._mesh_pantsir, unit.pos)
 
     def _draw_aircraft(self) -> None:
         """The sandbox aircraft pass (none spawn in COMBAT), plus the

@@ -570,10 +570,12 @@ class SandboxState(GameState):
             elif kind in ("splash", "aircraft_splash"):
                 self.effects.splash(pos, scale=SPLASH_SCALE)
                 self.app.audio.play("splash", pos=pos)
-            elif kind in ("sam_kill", "oniks_intercepted", "ciws_kill"):
+            elif kind in ("sam_kill", "oniks_intercepted", "ciws_kill",
+                          "pantsir_kill"):
                 # Air burst, no water spray: a fuse kill on an aircraft, an
-                # interceptor downing an Oniks and a CIWS kill all read as
-                # the same mid-air explosion (COMBAT Phase 2 event kinds).
+                # interceptor downing an Oniks, a CIWS kill and a Pantsir
+                # 57E6/30 mm kill all read as the same mid-air explosion
+                # (COMBAT Phase 2/6 event kinds).
                 self.effects.explosion(pos, EXPLOSION_SCALE_AIR)
                 self.app.audio.play("boom_far", pos=pos)
             elif kind == "sam_self_destruct":
@@ -588,14 +590,22 @@ class SandboxState(GameState):
                 # the structure's secondary blast stacks on the warhead's.
                 self.effects.explosion(pos, EXPLOSION_SCALE_SHIP)
                 self.app.audio.boom(pos)
-            elif kind == "ciws_burst":
+            elif kind in ("ciws_burst", "pantsir_gun"):
                 # Shell burst near the target: a few grey flak puffs, no
                 # audio (the gun is kilometers away from any camera that
                 # is not already deafened by the explosion that follows).
+                # The Pantsir 30 mm reuses the same CIWS flak visual.
                 self.effects.smoke.emit(
                     3, pos, 6.0, (0.0, 2.0, 0.0), 5.0, (0.4, 0.9),
                     (1.5, 5.0), ((0.55, 0.55, 0.57), (0.40, 0.40, 0.42)),
                     self.effects.rng)
+            elif kind == "pantsir_launch":
+                # 57E6 rail launch (Phase 6): an ignition fireball + boom at
+                # the launcher.  The round itself ALSO gets the standard SAM
+                # ignition fireball when its EJECT->BOOST seam is detected in
+                # _missile_effects, so this is the muzzle cue at the vehicle.
+                self.effects.ignition_fireball(pos)
+                self.app.audio.play("boom_near", pos=pos)
             else:                           # ground_hit / aircraft_down
                 self.effects.explosion(pos, EXPLOSION_SCALE_GROUND)
                 self.app.audio.boom(pos)
