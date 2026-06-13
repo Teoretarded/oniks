@@ -375,8 +375,70 @@ N40N6_AMMO: int = 2
 N40N6_TEL = LauncherDef("40n6_tel", "5P85 TEL (40N6)", ("40n6",), 12.0,
                         tubes=2, ammo=N40N6_AMMO)
 
+# --- 57E6 short-range SAM for Pantsir-S1 (player point defense, Phase 6) ------
+# Real 57E6 (9M335 / Vikhr): length 3.17 m, diameter 0.076 m, mass 74 kg
+# (warhead + motor). Game represents the full round with a 90 kg total mass
+# which includes the container canister adapter dropped at launch.
+#
+# Motor sizing (derived from SM2 reference; SM2 burns to Mach 5 from rest):
+#   Target speed: Mach 2.7 class (~900 m/s at sea level).
+#   Mass: 90 kg launch, ~30 kg propellant (same propellant fraction as SM2).
+#   Working backward from a ~20 km range shot needing ~25 s total flight:
+#     motor_thrust = 18 000 N (solid booster — smaller but same Isp class as SM2)
+#     motor_time   = 3.5 s (short fast boost; 57E6 is a sprint interceptor)
+#     mdot = 18 000 / (240 * 9.81) = 7.65 kg/s; 3.5 s burns ~26.8 kg ≈ 27 kg.
+#     Burnout speed at sea level: Δv ~ F*t / avg_mass = 18000*3.5/76.5 ~824 m/s
+#     → Mach ~2.4 at burnout, then coasts; drag-limited to Mach 2.7 peak after
+#     momentum builds through the early loft. Consistent with spec §4.2 "Mach
+#     2.7 class".
+#   Eject: Pantsir mounts the rounds on an elevated turret arm; no cold-launch
+#     tube. The round is rail-ejected at ~15 m/s and the motor lights almost
+#     immediately (0.3 s — a brief rail-clear delay, far shorter than S-300's
+#     1.5 s ballistic hang). Values set at 15 m/s / 0.3 s accordingly.
+#   ref_area: pi*(0.076/2)^2 = 0.00454 m^2.
+#   max_g: 40 g — the 57E6 is a point-defense sprint missile designed to
+#     kill maneuvering cruise missiles and ballistic pop-ups; the real 9M335
+#     is quoted at ≥35 g agility (open unclassified references).
+#   fuse_radius: 8 m — smaller than SM2/S300 because the Pantsir targets
+#     sub-sonic/transonic cruise missiles at close range where the engagement
+#     geometry is tight (a large fuse radius at 500 m would trigger on
+#     terrain; 8 m is consistent with Russian point-defense SAMs of this class).
+#   min_intercept_alt: 5 m — reaches sea-skimmers and pop-up HARMs; the
+#     real system is cleared for near-surface engagements (spec §4.2).
+#   max_intercept_alt: 15 000 m (15 km) — the published engagement ceiling for
+#     the Pantsir-S1 in open references is 15 km; consistent with spec §4.2.
+#   terminal_range: 5 000 m — at this proximity the seeker tracks precisely; the
+#     smaller terminal handover (vs 20 km for SM2) reflects the shorter sprint.
+#   max_range: 20 000 m — spec §4.2 explicit.
+#   self_destruct_t: 60 s — 20 km at ~900 m/s average coast is ~22 s; 60 s
+#     provides adequate margin and prevents perpetual drifters.
+#   self_destruct_speed: 100 m/s — low floor because 57E6 starts subsonic on
+#     the rail; the missile must reach Mach 2.7 during boost, so a post-
+#     burnout floor of 100 m/s is conservative (it will still be supersonic).
+PANTSIR_57E6 = SamDef(
+    weapon_id="pantsir_57e6", display_name="57E6 (Pantsir-S1)",
+    length=3.17, diameter=0.076,
+    launch_mass=90.0,           # kg total (see derivation above)
+    propellant_mass=27.0,       # kg solid propellant (see derivation above)
+    # Rail-eject: motor lights almost immediately after rail-clear.
+    eject_speed=15.0,           # m/s rail-eject speed
+    eject_time=0.3,             # s rail-clear delay before ignition
+    motor_thrust=18_000.0,      # N solid booster (see derivation above)
+    motor_time=3.5,             # s burn (see derivation above)
+    isp=240.0,                  # s (same propellant class as S300/SM2)
+    ref_area=0.004_536,         # m^2 = pi*(0.076/2)^2
+    max_g=40.0,                 # g — sprint intercept vs maneuvering targets
+    fuse_radius=8.0,            # m — tight point-defense fuse (see above)
+    terminal_range=5_000.0,     # m — seeker handover range
+    max_range=20_000.0,         # m — spec §4.2
+    self_destruct_t=60.0,       # s (see above)
+    self_destruct_speed=100.0,  # m/s post-burnout minimum (see above)
+    min_intercept_alt=5.0,      # m — reaches sea-skimmers (spec §4.2)
+    max_intercept_alt=15_000.0, # m — published engagement ceiling (spec §4.2)
+)
+
 WEAPONS = {"oniks": ONIKS}
-SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6}
+SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6}
 STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
              "40n6_tel": N40N6_TEL}
