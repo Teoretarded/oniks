@@ -149,6 +149,25 @@ structures in sim/bases.py), then the integrator.
   rest (tubes sit low); a raised/erect-on-engage pose would pop the
   silhouette.
 
+## Phase 7 gate — setup + armory + seeded gen + win/lose (2026-06-13)
+
+- Workflow PASS: 791 tests, smoke 70/70. Determinism bit-identical across
+  seeds 1337/7/99999/2024 (layout AND 60 s of sim). Armory bites: Oniks
+  finite in COMBAT (magazine + empty-refill), still infinite in SANDBOX;
+  S-300 48N6/40N6 + Pantsir 57E6/gun magazines refill. Victory needs ALL
+  enemy ships + ground radars + airfield dead; defeat = all Bastion TELs.
+  Enemy ground radars fog-of-war (map only after SAR/overflight), cue the
+  commander while alive. Perf: extreme 13-ship config 0.50 ms/step.
+  Verifier fixed the default Pantsir gun belt clamped 700->200 (added
+  CLAMP_GUN_AMMO 1-1000 — approved: locked ammo clamp 1-200 contradicted
+  the locked 700 default; honor the default + spec "gun ammo configurable").
+- Orchestrator gate: 791 re-run green; BOTH setup pages viewed personally
+  (probe_setup_screen.py) — World + Armory render clean, on-aesthetic,
+  correct footer hints, gun belt 700. End overlay renders over a live
+  frame only — captured at the playtest; logic verified in tests.
+- **ALL 7 CORE PHASES COMPLETE.** Next: 30-min playtest -> code audit ->
+  QOL pass -> additions brainstorm -> Phase 8 polish.
+
 ## Phase 8 — polish backlog (rolling)
 
 - Destroyer model: bow flare subtle, aft stack indistinct (reference-photo
