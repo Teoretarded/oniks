@@ -109,6 +109,29 @@ structures in sim/bases.py), then the integrator.
   smoke_combat extended with a pure-sim ESM section (radar starts
   EMITTING; fix at 90 s; >=1 Tomahawk in flight; silencing halts salvos).
 
+## Phase 5b gate — commander + the SM-2 contact seam (2026-06-13)
+
+- Workflow PASS: 664 tests, smoke 47/47. Commander holds zero world refs
+  (beliefs only); back-plot lands 264 m off the true base after 3 observed
+  launches; a totally silent player is mathematically unfindable
+  (defeated=False forever). 40N6 kills the AWACS at >200 km; IR drone-kill
+  fires with no RWR LOCK; all seven 5a flight fixes verified.
+- **Orchestrator gate — user-reported crash chased down.** Repro: map-click
+  an enemy SM-2 contact -> orbit -> zoom in. Could not reproduce the
+  original crash on current master (likely fixed incidentally by the
+  Missile.velocity duck-type in phase 2), BUT the hunt found the real
+  adjacent defect: enemy SM-2s were never tagged is_hostile, so the
+  tactical map treated them as friendly rounds — clickable, camera-follow,
+  and drawn at TRUE position (fog-of-war leak). Fix:
+  sim/enemy_defense._mark_hostile_round() tags every enemy interceptor
+  (is_hostile + the is_air/radar_size/aircraft_id air duck-type) so it
+  rides the gated ContactBoard as a fog-of-war contact and every existing
+  player-facing filter excludes it. Surfaced a latent crash on the way:
+  SamMissile lacked velocity() (the ContactBoard feed dead-reckons through
+  it) — added. Pinned by test_enemy_sm2_is_hostile_with_air_duck_type +
+  the permanent tools/probe_sm2_camera_crash.py harness.
+- Gate: 665 tests green, smoke 47/47, crash probe survives both variants.
+
 ## Phase 8 — polish backlog (rolling)
 
 - Destroyer model: bow flare subtle, aft stack indistinct (reference-photo

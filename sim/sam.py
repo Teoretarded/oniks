@@ -210,6 +210,9 @@ class SamMissile:
         self.pos = np.asarray(pos_f64, dtype=np.float64).copy()
         self.prev_pos = self.pos.copy()
         self.vel = np.zeros(3)
+        # NOTE: velocity() below completes the targetable duck-type
+        # (Ship/Aircraft/Missile expose it): enemy SM-2s ride the gated
+        # ContactBoard feed as hostile air contacts (world/combat.py).
         self.target = target
         self.contact_estimate_fn = contact_estimate_fn
         self.rng = rng
@@ -237,6 +240,12 @@ class SamMissile:
         # airframe by this, NOT by the velocity vector.
         self.body_dir = np.array([0.0, 1.0, 0.0])
         self._body_target = None   # boost-tilt aim dir (body leads the path)
+
+    def velocity(self):
+        """World-space velocity (3,) float64 — the shared targetable
+        duck-type (Ship/Aircraft/Missile expose the same): the gated
+        ContactBoard dead-reckons hostile SM-2 contacts through it."""
+        return self.vel
 
     @property
     def mass(self):
