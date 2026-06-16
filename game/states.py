@@ -368,6 +368,8 @@ def scroll_list(text, items, *, x, y, w, view_h, row_h, scroll, focus,
     Returns the (clamped) scroll index actually used. Pure / headless.
     """
     n = len(items)
+    if n == 0 or row_h <= 0:                     # nothing to show / bad pitch
+        return 0
     cap = max(1, int(view_h // row_h))          # whole rows that fit
     top_max = max(0, n - cap)                   # tail-anchored max scroll
     s = max(0, min(int(scroll), top_max))
