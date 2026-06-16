@@ -250,14 +250,23 @@ def _fmt_clock(t: float) -> str:
 
 def _missile_target_pos(m):
     """Duck-typed aim point: locked ship (Oniks terminal) > target aircraft
-    (SamMissile) > planned target point."""
+    (SamMissile) > planned target point (Oniks) > target_x/z (enemy strike).
+    Returns None when the round exposes no aim point (e.g. a HARM riding a
+    radar bearing) so callers degrade instead of crashing."""
     ship = getattr(m, "locked_ship", None)
     if ship is not None:
         return ship.pos
     tgt = getattr(m, "target", None)
     if tgt is not None:
         return tgt.pos
-    return m.target_point
+    tp = getattr(m, "target_point", None)
+    if tp is not None:
+        return tp
+    tx = getattr(m, "target_x", None)
+    if tx is not None:
+        return np.array([tx, getattr(m, "target_y", 0.0),
+                         getattr(m, "target_z", 0.0)], dtype=np.float64)
+    return None
 
 
 def _bracket_target(m):
@@ -339,7 +348,8 @@ class HUD:
         speed = float(np.linalg.norm(m.vel))
         alt = float(m.pos[1])
         tgt = _missile_target_pos(m)
-        rng_km = float(np.hypot(tgt[0] - m.pos[0], tgt[2] - m.pos[2])) / 1e3
+        rng_km = (float(np.hypot(tgt[0] - m.pos[0], tgt[2] - m.pos[2])) / 1e3
+                  if tgt is not None else None)
         label = m.phase_label
         phase_col = TERMINAL_COL if label == "TERMINAL" else VALUE_COL
         rows = [
@@ -347,7 +357,8 @@ class HUD:
             ("MACH", f"{float(mach(speed, alt)):.2f}", VALUE_COL),
             ("ALT", f"{alt:,.0f} m", VALUE_COL),
             ("SPD", f"{speed:,.0f} m/s", VALUE_COL),
-            ("RNG", f"{rng_km:,.1f} km", VALUE_COL),
+            ("RNG", f"{rng_km:,.1f} km" if rng_km is not None else "---",
+             VALUE_COL),
         ]
         fuel = getattr(m, "fuel", None)
         if fuel is not None:                # ramjet sustainer fuel
@@ -557,7 +568,8 @@ class HUD:
         dist = float(np.linalg.norm(center - sandbox.camera.eye))
         px_per_m = ((h * 0.5)
                     / (np.tan(sandbox.camera.fov_y * 0.5) * max(dist, 1.0)))
-        extent = max(target.length, getattr(target, "wingspan", 0.0))
+        extent = max(getattr(target, "length", 0.0),
+                     getattr(target, "wingspan", 0.0))
         half = float(np.clip(extent * BRACKET_SIZE_FACTOR * px_per_m,
                              BRACKET_MIN_PX, BRACKET_MAX_PX))
         if (x < -half or x > w + half or y < -half or y > h + half):

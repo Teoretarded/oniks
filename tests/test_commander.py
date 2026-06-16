@@ -31,6 +31,7 @@ import pytest
 
 from sim.commander import (
     AWACS_FLEE_RANGE_M,
+    AWACS_EMCON_DWELL_S,
     BACKPLOT_CLUSTER_R_M,
     BACKPLOT_ERR_FRAC,
     BACKPLOT_FIXES_NEEDED,
@@ -270,6 +271,43 @@ def test_backplot_high_altitude_detection_never_targetable():
     )
 
 
+def test_backplot_level_seaskimmer_localizes_to_launch_coast():
+    """A lo-lo Oniks is first detected mid-cruise, far downrange, in LEVEL
+    flight (vy ~ 0) — the realistic AWACS look-down geometry, not the boost
+    climb caught over the launch point. The launch site must still be localized
+    by back-projecting the ground track to the home coastline, NOT slid tens of
+    km downrange by a vertical time-to-surface projection that is degenerate for
+    level flight. Regression (measured): the old fy/vy math put the estimate
+    ~150 km past the true base, so every Tomahawk/JASSM missed and the player
+    could never lose."""
+    true_base_xz = (0.0, -600.0)            # the bastion TEL, just inland of z=0
+    detector_pos = np.array([0.0, 9_100.0, 420_000.0], dtype=np.float64)  # AWACS
+    commander = _make_commander(seed=3)
+    for i in range(BACKPLOT_FIXES_NEEDED):
+        sim_time = 100.0 + i * 60.0
+        # 200 km downrange toward the fleet, 60 m sea-skim, LEVEL, tracking
+        # north at cruise speed (the launch is far behind, off the y=0 math).
+        first_seen_pos = np.array([0.0, 60.0, 200_000.0], dtype=np.float64)
+        first_seen_vel = np.array([0.0, 1.0, 800.0], dtype=np.float64)
+        commander.process_missile_track(
+            track_id=f"skimmer_{i:04d}",
+            pos=first_seen_pos + first_seen_vel * 5.0,
+            vel=first_seen_vel.copy(),
+            sim_time=sim_time + 5.0,
+            first_seen_t=sim_time,
+            first_seen_pos=first_seen_pos,
+            first_seen_vel=first_seen_vel,
+            detector_pos=detector_pos,
+        )
+    clusters = commander.picture.targetable_clusters()
+    assert len(clusters) >= 1, "level sea-skimmer launches must localize the base"
+    dist = math.hypot(float(clusters[0].centre[0]) - true_base_xz[0],
+                      float(clusters[0].centre[1]) - true_base_xz[1])
+    assert dist <= 5_000.0, (
+        f"back-plot centre is {dist:.0f} m from the true base; a level "
+        f"sea-skimmer must localize to the launch coast, not slide downrange")
+
+
 # ---------------------------------------------------------------------------
 # 3. Doctrine ordering: blind before kill
 # ---------------------------------------------------------------------------
@@ -362,12 +400,14 @@ def test_doctrine_kill_only_after_radar_believed_destroyed():
     )
 
 
-def test_doctrine_no_jassm_without_harm_stock_and_radar_alive():
-    """With HARM stock exhausted but the radar alive, the commander must
-    issue NO HARM package (cannot blind) AND no JASSM package (blind before kill
-    means we wait until blinded, but if stock is exhausted we cannot blind —
-    the test asserts no JASSM is generated while radar believed alive regardless
-    of HARM availability)."""
+def test_doctrine_jassm_released_when_harm_winchester_and_radar_alive():
+    """Blind-before-kill must not DEADLOCK. With HARM stock exhausted (the
+    commander can no longer blind) but the radar still alive, the gate RELEASES
+    the JASSM branch — "we cannot blind, but we can still attempt to kill" (the
+    _doctrine_kill docstring's stated intent). The strike fighters then run the
+    player's S-300 gauntlet, which is the intended skill check (and what makes
+    the enemy able to win at all — without this the base is never struck while
+    the player keeps the radar on). No HARM package is possible (empty stock)."""
     true_base_xz = (40_000.0, -6_000.0)
     detector_pos = np.array([0.0, 9_100.0, 420_000.0], dtype=np.float64)
 
@@ -400,10 +440,10 @@ def test_doctrine_no_jassm_without_harm_stock_and_radar_alive():
     jassm_orders = [o for o in orders if o["type"] == "jassm_package"]
 
     assert len(harm_orders) == 0, "No HARM package possible with empty stock"
-    # Blind-before-kill: radar believed alive -> no JASSM even if HARM stock empty
-    assert len(jassm_orders) == 0, (
-        "JASSM must not be issued while radar station is believed alive "
-        f"(blind-before-kill), got: {jassm_orders}"
+    # Blind FAILED (HARM winchester) -> the gate releases and we kill anyway.
+    assert len(jassm_orders) >= 1, (
+        "JASSM must be released once HARM is exhausted and the radar cannot be "
+        f"blinded (else the commander deadlocks and never strikes), got: {jassm_orders}"
     )
 
 
@@ -435,8 +475,10 @@ def test_awacs_flee_on_closing_missile_track():
 
 
 def test_awacs_resume_when_threat_clears():
-    """AWACS resume order is issued after a flee was active but the missile
-    track has moved beyond the flee range (or aged out)."""
+    """AWACS resume order is issued after a flee was active and the missile
+    track cleared — but only after the EMCON silent-dwell elapses (anti-strobe,
+    so a sole-sensor AWACS doesn't un-blind itself when its dark track ages
+    out)."""
     awacs_pos = (0.0, 9_100.0, 420_000.0)
     commander = _make_commander(awacs_pos=awacs_pos, seed=7)
 
@@ -448,14 +490,18 @@ def test_awacs_resume_when_threat_clears():
     orders1 = commander.tick(sim_time=0.0, dt=COMMANDER_TICK_S)
     assert any(o["type"] == "awacs_flee" for o in orders1), "Setup: flee expected"
 
-    # Second tick (t=2 s): missile track aged out (> 30 s max_age is the default,
-    # but we just clear it manually from the picture to simulate "gone")
+    # Threat gone, but still WITHIN the dwell: no resume yet.
     commander.picture.missile_tracks.clear()
-    orders2 = commander.tick(sim_time=COMMANDER_TICK_S * 2, dt=COMMANDER_TICK_S)
+    mid = commander.tick(sim_time=AWACS_EMCON_DWELL_S * 0.5, dt=COMMANDER_TICK_S)
+    assert not any(o["type"] == "awacs_resume" for o in mid), \
+        "must hold silent through the EMCON dwell"
 
+    # After the dwell with no threat: resume.
+    orders2 = commander.tick(sim_time=AWACS_EMCON_DWELL_S + COMMANDER_TICK_S,
+                             dt=COMMANDER_TICK_S)
     resume_orders = [o for o in orders2 if o["type"] == "awacs_resume"]
     assert len(resume_orders) >= 1, (
-        f"Expected awacs_resume after threat cleared; got: "
+        f"Expected awacs_resume after the dwell; got: "
         f"{[o['type'] for o in orders2]}"
     )
 

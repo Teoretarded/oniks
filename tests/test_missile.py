@@ -3,7 +3,7 @@ import math
 import numpy as np, pytest
 from sim.missile import (Missile, PH_EJECT, PH_RIDEOUT, PH_PITCHOVER,
                          PH_BOOST, PH_CLIMB, PH_CRUISE, PH_TERMINAL, PH_DEAD)
-from sim.arsenal import ONIKS
+from sim.arsenal import ONIKS, ZIRCON
 from sim.physics import mach_scalar
 
 DT = 1/120
@@ -144,6 +144,50 @@ def test_hi_lo_long_range_unchanged():
         if m.phase == PH_CRUISE and m.t > 120: break
     assert m.phase == PH_CRUISE
     assert abs(m.pos[1] - ONIKS.cruise_alt_hi) < 800.0
+
+# --- 3M22 Zircon: hypersonic anti-ship (Phase 8) -----------------------------
+# The Zircon reuses the Oniks flight machine at Mach 8. Its hi-lo descent must
+# bleed altitude proportionally faster (it covers the descent corridor ~3x
+# faster than the Mach-2.5 Oniks the descent gains were tuned for) or it
+# overflies the target still kilometres high and wallows. Regression measured
+# by tools/probe_zircon_traj.py: a 150 km hi-lo shot splashed ~20 km past the
+# target after crossing it at 4.4 km overfly altitude.
+
+@pytest.mark.slow
+def test_zircon_hi_lo_medium_range_hits():
+    target = np.array([0., 0., 150_000.])
+    m = Missile(ZIRCON, np.array([0., 60., 0.]), heading=0.0, profile="hi-lo",
+                target_point=target)
+    w = _World()
+    for _ in range(int(400 / DT)):
+        m.update(DT, w)
+        if not m.alive:
+            break
+    assert not m.alive and m.impact_pos is not None
+    assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 600.0
+
+@pytest.mark.slow
+def test_zircon_hi_lo_long_range_hits_and_stays_high():
+    """Near the top of the Zircon's hi-lo fuel envelope (~250 km; it is
+    fuel-starved past ~100 km and coasts) the long shot keeps its high Mach-8
+    cruise (the SM-6 counterplay axis, GAME_ANALYSIS §7) and still dives onto
+    the target: the descent fix gives a steeper terminal dive WITHIN the same
+    descent corridor, so it must neither throw the high profile away nor
+    overfly."""
+    target = np.array([0., 0., 250_000.])
+    m = Missile(ZIRCON, np.array([0., 60., 0.]), heading=0.0, profile="hi-lo",
+                target_point=target)
+    w = _World()
+    reached_high = False
+    for _ in range(int(400 / DT)):
+        m.update(DT, w)
+        if m.phase == PH_CRUISE and m.pos[1] > 12_000.0:
+            reached_high = True
+        if not m.alive:
+            break
+    assert reached_high                       # flew the high Mach-8 cruise
+    assert not m.alive and m.impact_pos is not None
+    assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 600.0
 
 def test_waypoints_pop_as_the_route_is_flown():
     """Regression (found by Task 20): route waypoints are (x, z) pairs but

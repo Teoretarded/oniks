@@ -70,7 +70,12 @@ def _run(ctrl, world, destroyer, seconds):
 
 
 def _sams(world):
-    return [m for m in world.missiles if isinstance(m, SamMissile)]
+    # SM-2 rounds only: these tests pin the SM-2 fire-control discipline. The
+    # SM-6 area channel (Phase 8) legitimately co-fires at HIGH inbound missiles
+    # from its own magazine/cap, so counting all SamMissiles would conflate two
+    # independent channels — count the SM-2s the assertions are actually about.
+    return [m for m in world.missiles
+            if isinstance(m, SamMissile) and m.weapon is SM2]
 
 
 # ---------------------------------------------------------------------------

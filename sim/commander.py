@@ -144,10 +144,32 @@ BACKPLOT_ERR_FRAC: float = 0.02       # error = detection range × this fraction
 BACKPLOT_CLUSTER_R_M: float = 3_000.0  # m cluster radius — back-plots within
 #                                         this distance belong to one launch site
 BACKPLOT_FIXES_NEEDED: int = 3        # distinct launches before targetable
+# The player ("home") coastline sits at z = 0 in world.generation (land at
+# z < 0, the enemy continent to the north). A level sea-skimmer's launch point
+# lies back along its ground track where that track crosses this shoreline — the
+# enemy knows the coast geometry; the bearing fixes WHERE along it the round was
+# fired. (A boost-phase climb is instead back-projected in time to the surface.)
+HOME_COAST_Z: float = 0.0
+BACKPLOT_CLIMB_VY: float = 50.0       # m/s; above this the round is still in its
+#                                       boost climb near launch -> time-project
+#                                       to the surface (accurate close in). At or
+#                                       below it the round is in level cruise far
+#                                       downrange -> project the track to the coast.
+BACKPLOT_MIN_CLOSE_VZ: float = 50.0   # m/s; a level track must be closing toward
+#                                       the coast at least this fast to localize
+#                                       (a coast-parallel / receding dogleg is not).
 
 # AWACS flee range (spec section 6 "AWACS: order flee when any player missile
 # track closes within ...").
 AWACS_FLEE_RANGE_M: float = 100_000.0  # m
+AWACS_EMCON_DWELL_S: float = 60.0     # s the AWACS holds SILENT after a threat
+#   was last seen, before re-emitting. EMCON anti-strobe: a silenced AWACS that
+#   is the sole sensor on the threat loses its own (now-dark) track when it ages
+#   out (~30 s), which would otherwise make it un-blind itself and re-detect the
+#   still-inbound missile — a radiating blink at the worst moment. The dwell
+#   rides out the whole terminal threat window (a missile within the 100 km flee
+#   range closes in well under this) so the radar comes back up only once the
+#   sky is genuinely clear. Re-emits immediately if NO threat for the dwell.
 
 # Strike geometry (spec section 6 mission generator).
 HARM_INGRESS_ALT_M: float = 150.0     # m AGL ingress altitude for HARM package
@@ -423,11 +445,22 @@ class EnemyPicture:
         ]
 
     def prune_missile_tracks(self, live_ids: set, now: float) -> None:
-        """Remove tracks for missiles that no longer exist."""
+        """Remove tracks for missiles that no longer exist, and bound the raw
+        back-plot guard list (append-only, one entry per detected launch) so it
+        cannot grow unbounded over a long match. A back-plot entry is kept while
+        its track is still live OR it is recent (a fix only seeds within
+        BACKPLOT_MAX_AGE_S of launch, so an older entry for a gone track can
+        never re-trigger and is safe to drop — the clusters retain their own
+        fixes independently)."""
         self.missile_tracks = {
             k: v for k, v in self.missile_tracks.items()
             if k in live_ids or now - v["t"] <= 30.0
         }
+        self._back_plots = [
+            bp for bp in self._back_plots
+            if bp.track_id in live_ids
+            or now - bp.sim_time <= BACKPLOT_MAX_AGE_S
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +585,7 @@ class EnemyCommander:
 
         # AWACS flee state (tracks whether a flee order is currently in effect)
         self._awacs_fleeing: bool = False
+        self._awacs_silent_until: float = 0.0   # EMCON dwell clock (see _defend_awacs)
 
     # ------------------------------------------------------------------ tick
 
@@ -628,7 +662,7 @@ class EnemyCommander:
         missile_tracks = self.picture.live_missile_tracks(sim_time)
         awacs_pos = self.awacs.pos   # (3,) XYZ
 
-        threat_close = False
+        threat_pos = None
         for mt in missile_tracks:
             mpos = mt["pos"]
             dist = math.hypot(
@@ -636,17 +670,26 @@ class EnemyCommander:
                 float(mpos[2]) - float(awacs_pos[2]),
             )
             if dist <= AWACS_FLEE_RANGE_M:
-                threat_close = True
+                threat_pos = mpos
+                break
+
+        if threat_pos is not None:
+            # Refresh the EMCON silent-dwell while the threat is seen.
+            self._awacs_silent_until = sim_time + AWACS_EMCON_DWELL_S
+            if not self._awacs_fleeing:
+                # Enter flee+silent ONCE (anti-strobe: don't re-spam the order
+                # every tick — the AWACS just runs flat-out from the bearing).
+                self._awacs_fleeing = True
                 self.pending_orders.append({
                     "type": "awacs_flee",
-                    "threat_pos": mpos.copy(),
+                    "threat_pos": threat_pos.copy(),
                 })
-                self._awacs_fleeing = True
-                break   # one order is enough; the awacs picks the bearing
-
-        if not threat_close and self._awacs_fleeing:
-            self.pending_orders.append({"type": "awacs_resume"})
+        elif self._awacs_fleeing and sim_time >= self._awacs_silent_until:
+            # No threat seen AND the silent dwell has elapsed: come back up.
+            # Holding through the dwell stops a sole-sensor AWACS from un-blinding
+            # itself the instant its own dark track ages out (the ~31 s strobe).
             self._awacs_fleeing = False
+            self.pending_orders.append({"type": "awacs_resume"})
 
     def _defend_ship_radars(self, sim_time: float) -> None:
         """Manage per-ship radar silence.
@@ -769,8 +812,15 @@ class EnemyCommander:
         # If HARM stock is exhausted the gate remains: the commander is
         # effectively stalled at BLIND and cannot proceed to KILL until the
         # radar station is either destroyed or belief changes.
+        # Blind-before-kill, but NOT a deadlock: the gate holds JASSM only while
+        # the radar is believed alive AND we still have the HARM stock to keep
+        # trying to blind it. Once HARM is winchester we can no longer blind, so
+        # the gate releases and the commander strikes anyway (the documented
+        # intent above). With the radar alive the strike fighters run the
+        # player's S-300 gauntlet — the intended skill check, and the only way
+        # the enemy ever reaches the base while the player keeps the radar on.
         radar_alive = self._believed_radar_station() is not None
-        jassm_gated = radar_alive   # strict blind-before-kill
+        jassm_gated = radar_alive and self.stock.can_arm_harm_package(harms_needed=4)
 
         for cluster in targetable:
             cid = f"cluster_{id(cluster)}"
@@ -918,14 +968,11 @@ class EnemyCommander:
         )
 
         # --- Back-plot eligibility check ---
-        track_age_at_first = first_seen_t - (sim_time - (sim_time - first_seen_t))
-        # track_age_at_first is zero here; what we want is:
-        # time elapsed since the track was FIRST SEEN = sim_time - first_seen_t
-        # The spec says "first detected while its altitude < 2 km and within
-        # BACKPLOT_MAX_AGE_S of launch".  We interpret this as:
+        # Spec: "first detected while its altitude < 2 km and within
+        # BACKPLOT_MAX_AGE_S of launch", interpreted as:
         #   (a) first_seen altitude < BACKPLOT_LOW_ALT_M, AND
         #   (b) the track has only been known for < BACKPLOT_MAX_AGE_S
-        #       (i.e. sim_time - first_seen_t < BACKPLOT_MAX_AGE_S).
+        #       (sim_time - first_seen_t).
         # We only back-plot on the FIRST detection event (fresh track), not on
         # every subsequent update — one fix per launch event.
         track_known_s = sim_time - first_seen_t
@@ -956,19 +1003,28 @@ class EnemyCommander:
         fy = float(first_seen_pos[1])
         fz = float(first_seen_pos[2])
 
-        if abs(vy) < 1.0:
-            # Near-horizontal flight at detection: extrapolate as-is to y=0
-            t_back = -fy / max(abs(vy), 1.0) * math.copysign(1.0, vy)
-        else:
-            # Project backward to y=0: t_back = fy / vy (vy > 0 → launch below)
+        # Back-project the launch point from the first-detection track. Two
+        # regimes — the old single fy/vy time-to-surface projection was
+        # degenerate for level flight and slid level-cruise estimates tens of km
+        # the WRONG way (measured ~150 km downrange, into the enemy's quadrant),
+        # so the enemy could never localize a sea-skimming launch:
+        if vy >= BACKPLOT_CLIMB_VY:
+            # Boost climb caught near launch: project backward in time to the
+            # surface (y = 0). Accurate while the round is still climbing.
             t_back = fy / vy
-
-        if t_back < 0.0:
-            # Missile was climbing; t_back is positive for going back in time
-            t_back = abs(t_back)
-
-        launch_x = fx - vx * t_back
-        launch_z = fz - vz * t_back
+            launch_x = fx - vx * t_back
+            launch_z = fz - vz * t_back
+        else:
+            # Level sea-skimmer: the launch is far behind it, off the bottom of
+            # the time-to-surface math. Intersect the horizontal ground track
+            # with the known home coastline instead. A coast-parallel or
+            # receding track (a deliberate dogleg) cannot be localized -> no fix.
+            dz = fz - HOME_COAST_Z
+            if vz <= BACKPLOT_MIN_CLOSE_VZ or dz <= 0.0:
+                return
+            s = dz / vz
+            launch_x = fx - vx * s
+            launch_z = HOME_COAST_Z
 
         error_m = det_range * BACKPLOT_ERR_FRAC
 

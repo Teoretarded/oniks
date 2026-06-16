@@ -505,3 +505,174 @@ fighter employment, 23 tests), then the integrator.
   locked pantsir_gun_ammo=700 default; integrator should confirm the deviation.
 - Gate after fix: 791 tests green (1 new), smoke 70/70 exit 0; end-to-end
   setup build_config() default now preserves 700.
+
+## Phase 8 — Zircon hi-lo terminal-dive fix (anti-overfly, 2026-06-15)
+
+- BUG (fresh Phase-8 code): the 3M22 Zircon on a hi-lo profile OVERFLEW the
+  target at common ranges. Measured (tools/probe_zircon_traj.py): a 150 km
+  hi-lo shot crossed directly over the target still at 4.4 km altitude, then
+  wallowed in TERMINAL on the far side and splashed ~20 km past it (t=309 s).
+  300 km "hit" only by luck (a shallow dive that bottomed out near the target).
+- ROOT CAUSE (measured, not guessed): the hi-lo descent gains
+  (DESCENT_RAMP_RATE / DESCENT_MAX_SINK / the descent alt-hold authority) are
+  calibrated for the ~Mach-2.5 Oniks. The Mach-8 Zircon covers the fixed
+  ~118 km descent corridor ~3x faster than the 220 m/s ramp can bleed altitude,
+  so it reaches the target's ground position still kilometres high. The author's
+  earlier mitigation (cruise_alt 14 km + terminal_range 100 km, arsenal.py)
+  could not help: terminal_range is only consulted on the lo-lo profile — the
+  hi-lo descent trigger is _descent_range(), which terminal_range never touches.
+- FIX (sim/missile.py): a per-missile descent SCALE = max(1.0,
+  weapon.cruise_mach_hi / DESCENT_BASELINE_MACH=2.55) multiplies the descent
+  ramp rate, the descent alt-hold pull-down authority, and the sink clamp — only
+  in PH_DESCENT. A faster round dives proportionally steeper INSIDE the same
+  descent corridor, so it still arrives at sea-skim with the full
+  SKIM_CAPTURE_RANGE speed-bleed margin and does not overshoot horizontally
+  (an early experiment that shrank the corridor instead made it arrive low but
+  too fast and overshoot — reverted). The descent START range is unchanged, so
+  the Zircon keeps its long high Mach-8 cruise (the SM-6 counterplay axis,
+  GAME_ANALYSIS §7). The Oniks scale is exactly 1.0 -> BIT-IDENTICAL.
+- ENVELOPE (measured): hi-lo now hits cleanly across 80-250 km (was a MISS at
+  150 km); lo-lo 80-150 km. The Zircon is fuel-starved past ~100 km and coasts,
+  so ~250 km hi-lo is its honest reach (comfortably outranges the 150 km SM-2);
+  300 km is an honest out-of-range MISS, not the prior overfly bug.
+- TDD: tests/test_missile.py test_zircon_hi_lo_medium_range_hits (150 km, the
+  RED test) + test_zircon_hi_lo_long_range_hits_and_stays_high (250 km, also
+  asserts the high cruise survives). Watched the 150 km test fail (impact
+  19768 m off) before the fix.
+- Gate: 804 tests green (+2 new), Oniks flight + determinism bit-identical
+  (same suite dot-pattern as the pre-fix baseline). verify_new_weapons.py +
+  probe_zircon_traj.py updated to the corrected envelope.
+
+### Phase 8 follow-ups (same session, 2026-06-15)
+
+- FIX (correctness/memory): the enemy commander's picture.missile_tracks dict
+  grew unbounded — prune_missile_tracks() existed but was never called. Wired it
+  into CombatWorld._feed_enemy_picture (0.25 s cadence) using the live player-
+  missile track-id set; drops records whose missile is gone AND last seen > 30 s
+  ago (mirrors the world intel prune + live_missile_tracks' 30 s window, so
+  back-plots/orders are unaffected). Test: tests/test_combat_world.py
+  test_dead_missile_tracks_are_pruned (RED first: stale track persisted).
+- FIX (stale tool): tools/smoke_combat.py still re-armed the Oniks with the
+  pre-salvo-battery idiom `world.reload_left = 0.0`, which is now a no-op (the
+  launcher arms off per-tube _oniks_tubes state). After firing the 2 initially-
+  loaded tubes the third launch returned None and the harness crashed
+  (m9.alive on None). Replaced both launch loops with the per-tube instant
+  re-cock used in test_combat_config.py (zero each tube's reload_left, then
+  _step_oniks_tubes(0.0) to reload from the magazine pool). Smoke back to 70/70.
+- Gate: 806 tests green (+2 this follow-up), smoke 70/70 exit 0.
+
+## Phase 8 — enemy lethality / "you can actually lose now" (2026-06-15)
+
+User report: the enemy had never killed the player once; planes died/orbited
+without effect. An independent Opus-4.8 clean-room audit + headless measurement
+traced it to ONE keystone bug, plus a secondary deadlock.
+
+- RANK 1 (keystone) — launch-site back-plot was geometrically broken for LEVEL
+  flight. process_missile_track (sim/commander.py) back-projected the launch
+  point by extrapolating the first-detection velocity to the surface
+  (t_back = fy/vy). A sea-skimming Oniks cruises at vy~0, so the math was
+  degenerate and slid the estimate ~75-84 km the WRONG way (into the enemy's own
+  quadrant) — measured. Clusters formed but their centroids were 20-80 km off,
+  far outside the 1 km seeker basket, so every Tomahawk/JASSM hit empty ocean
+  and the bastion TEL was unhittable even with 0 Pantsir. FIX: a climbing
+  boost-phase detection (vy >= BACKPLOT_CLIMB_VY=50) still time-projects to the
+  surface (accurate near launch — the seed-5 smoke path is unchanged); a LEVEL
+  sea-skimmer instead intersects its horizontal ground track with the known home
+  coastline (HOME_COAST_Z=0; the enemy knows the coast, the bearing fixes where
+  along it). A coast-parallel/receding dogleg is NOT localized (player
+  counterplay). Test: tests/test_commander.py
+  test_backplot_level_seaskimmer_localizes_to_launch_coast (RED first: 152.6 km
+  off). MEASURED end-to-end (tools/probe_base_attack.py, seed 1337, 12 lo-lo
+  Oniks, radar on): base LOCALIZED at cluster_err 643 m; a Tomahawk closes to
+  4 m of the TEL. With 0 Pantsir the base is DESTROYED (defeated=True) — you can
+  lose. With the default 2 Pantsir the TEL is hit but survives (point defense
+  earns its keep). Before the fix the closest any strike got was ~21 km.
+- RANK 2 — JASSM blind-before-kill DEADLOCK. _doctrine_kill's docstring says the
+  gate releases once HARM is winchester ("we cannot blind, but can still kill"),
+  but the code was strict (jassm_gated = radar_alive) and the radar belief
+  re-latches alive every 0.25 s while it emits — so with the radar on, JASSM was
+  suppressed forever. FIX: jassm_gated = radar_alive AND can_arm_harm_package(4)
+  (matches the docstring). Test flipped to the new truth
+  (test_doctrine_jassm_released_when_harm_winchester_and_radar_alive).
+  NOTE: in a full battle the dedicated fighter JASSM base-strike is still
+  availability-limited (only 4 fighters, busy on CAP/HARM), so the Tomahawk path
+  is the primary loss axis; more plane aggression is a fighter-allocation tuning
+  follow-up, not done here.
+- RANK 3 (JASSM 30 m/s descent "wallow") — INVESTIGATED, NO CHANGE. The audit
+  claimed a JASSM can't reach the base even with perfect targeting; direct
+  measurement (a JASSM flown at the base) refuted this — it impacts within 1 m
+  from 150 km and 250 km standoff at the current descent rate. The audit's
+  number was a release-geometry artifact. No fix applied (measure, don't guess).
+- DESIGN — setup fields n_awacs / n_player_radars / n_drones were accepted by the
+  armory UI + CombatConfig but IGNORED by CombatWorld (one awacs/radar/drone
+  hardcoded). Made the UI honest: those three are now FIXED rows (the sim fields
+  one of each; multi-unit cascades into the enemy datalink/ESM model and the
+  drone control UX — a focused follow-up). CombatConfig + clamp_config keep
+  their full ranges so the wiring can land later without a schema change.
+- QOL — clicking an air contact with the Oniks armed flashed a vague
+  "SELECT SURFACE TARGET"; now "ONIKS HITS SHIPS ONLY - TAB TO S-300 FOR AIR"
+  (the documented cause of the "can't launch" confusion).
+
+## Phase 8 — smarter sensor-driven enemy AI (planes + AWACS) + systems audit (2026-06-15)
+
+Driven by a user request to make the enemy genuinely smarter WITHOUT cheating
+(fog of war preserved — the AI reads only the sensor-derived EnemyPicture, never
+truth) and to verify every sensor/weapon system. Method: a measured systems
+audit (12 probe agents), then TDD'd implementation, then TWO adversarial review
+workflows (no-cheat audit + code review + game-test) per the user's process.
+
+- SYSTEMS AUDIT (tools/probe_audit_*.py): ship SPY-1 radar, fighter nose radar
+  (60 deg cone, 110/80/60 km), AWACS, drone stealth, drone RWR (SPIKE/LOCK) +
+  ELINT geolocation (~1.3-3.6 km after ~2 min cross-track), Pantsir, CIWS, the
+  commander brain — all WORK, fog-of-war intact, no truth leak, deterministic.
+  SM-6 and Zircon were PARTIAL (below).
+- T3 SM-6 area defense (sim/enemy_defense.py): was a paper weapon — iterated only
+  the drone track store (stealthy, seen <=40 km) so its 240 km reach was
+  unreachable. Now _try_sm6_launch ALSO engages HIGH inbound cruise missiles
+  (alt >= SM6_AREA_MIN_ALT_M=1500 m, range SM6_MIN_RANGE_M=50 km..240 km) from
+  the missile track store with a plain SamMissile (clean track, no stealth
+  noise). MEASURED: hi-lo Oniks killed at t=207 s; lo-lo Oniks survives (the
+  'go low to survive' loop holds). tests/test_sm6_area_defense.py.
+- T1 AWACS EMCON (world/combat.py + sim/commander.py): the AWACS was a free
+  always-on beacon. Now it runs SILENT while fleeing a threat and re-emits when
+  clear, with an anti-strobe dwell (AWACS_EMCON_DWELL_S=60 s) so a sole-sensor
+  AWACS doesn't un-blind itself when its own dark track ages out. Sensor-driven
+  off picture.live_missile_tracks. tests/test_awacs_emcon.py.
+- T2 fighter RWR-driven evasion (world/combat.py _assign_air_threats): a fighter
+  breaks when a player SAM is GUIDING ON it (RWR lock = SAM.target is the
+  fighter), reacting out to FIGHTER_RWR_REACT_RANGE_M. CONTRACT FIX (review
+  MF-1): the break GEOMETRY comes from the commander's dead-reckoned missile
+  TRACK store (the same picture the SM-2/SM-6 fire off), NEVER the SAM's true
+  position; the old truth-reading 25 km geometric backstop was removed. A SAM
+  locked-but-not-tracked yields no break. tests/test_fighter_rwr_evasion.py.
+- CLEANUP: removed the dead no-op line in process_missile_track; prune_missile_
+  tracks now also bounds the append-only _back_plots guard list.
+- T6 Zircon fuel-range warning (game/sandbox.py): firing a Zircon beyond its
+  measured envelope (hi-lo ~250 km / lo-lo ~150 km) flashes a HUD warning
+  instead of a silent fall-short whiff.
+- DELIBERATELY NOT CHANGED: the CIWS flat-Pk burst roll. A true constant-
+  dispersion physics model changes the Pk envelope (~1/R^2 vs the calibrated
+  linear ramp = a balance regression); preserving the exact envelope makes any
+  conversion cosmetic. GAME_ANALYSIS deems the guns 'deliberately probabilistic
+  last-ditch layers' and the CIWS is rarely reached. Left as-is with this note.
+- REVIEW LOOP: two adversarial review workflows. Review 1 found MF-1 (fighter
+  evasion truth-leak) + SF-1 (AWACS strobe) — both fixed above; review 2
+  re-verifies. Gate: full suite green (~820 tests), smoke green, Oniks-vs-SM-2
+  duel + Oniks descent bit-identical, determinism bit-identical.
+
+### Phase 8 enemy-AI — review-2 closeout (2026-06-15)
+- Second adversarial review verdict: SHIP IT. MF-1 (fighter no-cheat) and SF-1
+  (AWACS dwell) confirmed resolved in source AND by probe; no new truth leak /
+  determinism break / regression; SM-2 duel 7/7; full suite 815/0; two same-seed
+  worlds bit-identical over 6000 steps. Measured capability gain is physics-
+  grounded: evasion ON-miss >= OFF-miss at every range (+6 survivals via energy
+  bleed, e.g. 90 km shot falls 6 km short), not a buffed hit-table.
+- Cleanups applied from review 2: disarmed silent Carrier now also has
+  sm6_ammo=0 (was firing SM-6 on AWACS cues while dark — incoherent);
+  _defend_awacs flee order uses the captured threat_pos.copy() (not the leaked
+  loop var); deleted the now-dead FIGHTER_EVADE_RANGE_M constant (+ its probe ref).
+- Deferred (review-blessed): residual ~1-tick AWACS blink every ~91 s while a
+  threat lingers (already 3x better than the old 31 s strobe; a full fix needs
+  positive-clear gating); SM-6 fleet saturation measured BOUNDED (no runaway);
+  CIWS flat-Pk roll left intact (see prior note) — flagged for a separate audit.
+- Final gate: full suite 815 green, smoke 70/70 exit 0.

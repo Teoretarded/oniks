@@ -224,6 +224,10 @@ class StrikeMissile:
     is_hostile = True
     is_air = True
     radar_size = "missile"
+    # Phase 8 launch-warning: Tomahawk/JASSM/HARM are radar-gated — the player
+    # only sees them once the radar physically detects them. SM-2 and AIM-9X
+    # override this to True (seen the instant they fire).
+    launch_warning = False
 
     def __init__(self, weapon, pos_f64, vel_f64, target_xz, target_y=0.0):
         self.weapon = weapon

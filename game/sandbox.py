@@ -51,12 +51,17 @@ from game.tactical_map import TacticalMap
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
 from models.common import PALETTE, rot_x, rot_y, rot_z
+from models.missiles import (build_40n6, build_48n6, build_57e6,
+                             build_aim9x, build_harm, build_jassm,
+                             build_sm2, build_sm6, build_tomahawk,
+                             build_zircon)
 from models.oniks import build_oniks, build_oniks_nose_cap
-from models.s300 import build_s300_missile, build_s300_tel
+from models.s300 import build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
 from models.structures import (build_fuel_depot, build_harbor,
                                build_radar_station)
 from sim.aircraft import AC_FALLING, AC_GONE
+from sim.a2a import IrMissile
 from sim.arsenal import N40N6
 from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
                          PH_PITCHOVER, PH_RIDEOUT, PH_TERMINAL)
@@ -81,6 +86,21 @@ LAUNCH_TRAIL_PHASES = (PH_RIDEOUT, PH_PITCHOVER)   # cream-column ribbon feed
 # shot off at the PITCHOVER -> BOOST seam, then the bare round.
 CAP_ON_PHASES = (PH_EJECT, PH_RIDEOUT, PH_PITCHOVER)
 WING_DEPLOY_AFTER_EXIT = 0.2   # s after muzzle clear: surfaces snap to X
+DEDICATED_MISSILE_IDS = frozenset(
+    ("tomahawk", "jassm", "harm", "s300", "40n6", "sm2", "pantsir_57e6",
+     "zircon", "sm6")
+)
+
+
+def _missile_mesh_key(m) -> str:
+    """Return the render mesh key for a live missile-like object."""
+    weapon = getattr(m, "weapon", None)
+    weapon_id = getattr(weapon, "weapon_id", None)
+    if weapon_id in DEDICATED_MISSILE_IDS:
+        return weapon_id
+    if isinstance(m, IrMissile):
+        return "aim9x"
+    return "oniks"
 
 # Sustainer exhaust: a small, very short-lived additive jet right at the
 # nozzle (the boost plume's big puffs read as a fireball chain at Mach 2
@@ -184,7 +204,15 @@ HINT_ROUND_48N6 = "S-300: 48N6 SELECTED"
 HINT_ROUND_40N6 = "S-300: 40N6 SELECTED (HIGH TARGETS, 380 KM)"
 HINT_40N6_LOW = "40N6: TARGET BELOW 4 KM ENGAGEMENT FLOOR"
 HINT_40N6_EMPTY = "40N6: ROUNDS EXPENDED"
-HINT_ONIKS_SURFACE = "ONIKS: SELECT SURFACE TARGET"
+HINT_ONIKS_SURFACE = "ONIKS HITS SHIPS ONLY - TAB TO S-300 FOR AIR"
+HINT_ZIRCON = "ZIRCON SELECTED - hypersonic"
+HINT_ZIRCON_RANGE = "ZIRCON: TARGET BEYOND FUEL RANGE - WILL FALL SHORT"
+HINT_ONIKS_SEL = "ONIKS SELECTED"
+# Zircon fuel-limited effective reach vs a surface target (measured,
+# tools/probe_zircon_traj.py): hi-lo ~250 km, lo-lo ~150 km — past these it
+# coasts fuel-starved and splashes short. Warn the player instead of a silent whiff.
+ZIRCON_RANGE_HILO_M = 250_000.0
+ZIRCON_RANGE_LOLO_M = 150_000.0
 HINT_RADAR_EMITTING = "RADAR: EMITTING"
 HINT_RADAR_SILENT = "RADAR: SILENT"
 HINT_RADAR_DESTROYED = "RADAR: DESTROYED"
@@ -272,6 +300,7 @@ class SandboxState(GameState):
         tactical_map.ensure_map_pixels_async()
         self.active_platform = "bastion"   # TAB toggles bastion <-> s300
         self.sam_round = "48n6"         # V toggles the S-300 round (5b)
+        self.oniks_weapon = "oniks"     # B toggles Oniks <-> Zircon (Phase 8)
         self.hint_text = ""             # transient HUD hint line
         self.hint_left = 0.0            # real seconds the hint stays up
 
@@ -342,13 +371,29 @@ class SandboxState(GameState):
                             for e in np.linspace(0.0, LAUNCH_ELEV_DEG,
                                                  TEL_ELEV_STEPS)]
         self._tel_pos = np.array(BASE_POS, dtype=np.float64)
+        # Phase 8: the renderer draws one TEL per position here (default single;
+        # CombatState replaces these with the multi-launcher battery layout).
+        self._tel_positions = [self._tel_pos]
         # S-300 battery: pad slab + permanently erected 4-tube TEL + 48N6
         self._mesh_sam_pad = Mesh(make_box(SAM_PAD_SIZE, PALETTE["concrete"],
                                            offset=(0.0, -SAM_PAD_SIZE[1] * 0.5,
                                                    0.0)))
         self._mesh_s300_tel = Mesh(build_s300_tel(elevation_deg=90.0))
-        self._mesh_s300_missile = Mesh(build_s300_missile())
+        self._missile_meshes = {
+            "tomahawk": Mesh(build_tomahawk()),
+            "jassm": Mesh(build_jassm()),
+            "harm": Mesh(build_harm()),
+            "aim9x": Mesh(build_aim9x()),
+            "s300": Mesh(build_48n6()),
+            "40n6": Mesh(build_40n6()),
+            "sm2": Mesh(build_sm2()),
+            "sm6": Mesh(build_sm6()),
+            "pantsir_57e6": Mesh(build_57e6()),
+            "zircon": Mesh(build_zircon()),
+        }
+        self._mesh_s300_missile = self._missile_meshes["s300"]
         self._sam_tel_pos = SAM_TEL_POS.copy()
+        self._sam_tel_positions = [self._sam_tel_pos]
         self._aircraft_meshes = {"patrol": Mesh(build_patrol_aircraft()),
                                  "fast": Mesh(build_fast_aircraft())}
 
@@ -416,6 +461,17 @@ class SandboxState(GameState):
         self.app.audio.ui_click()
         return self.sam_round
 
+    def cycle_oniks_weapon(self) -> str:
+        """B (oniks_weapon binding): toggle the Bastion round between the P-800
+        Oniks (default) and the hypersonic 3M22 Zircon (scarce, M5+ - punches
+        through the SM-2 screen). Both fire from the same TEL tubes."""
+        self.oniks_weapon = ("zircon" if self.oniks_weapon == "oniks"
+                             else "oniks")
+        self.show_hint(HINT_ZIRCON if self.oniks_weapon == "zircon"
+                       else HINT_ONIKS_SEL)
+        self.app.audio.ui_click()
+        return self.oniks_weapon
+
     def _selected_air_track(self):
         """The selected contact's track if it is a live air track, else None."""
         sid = self.tactical_map.selected_contact
@@ -469,8 +525,20 @@ class SandboxState(GameState):
             return None
         if self.target_point is None:
             return None
+        if self.oniks_weapon == "zircon":
+            # Fuel-aware range warning (the Zircon coasts to a stall past its
+            # envelope and splashes short — see ZIRCON_RANGE_*). Informational:
+            # the shot still fires (the target may be closing), the player is told.
+            base = np.asarray(BASE_POS, dtype=np.float64)
+            rng_to_tgt = float(np.hypot(self.target_point[0] - base[0],
+                                        self.target_point[2] - base[2]))
+            envelope = (ZIRCON_RANGE_LOLO_M if self.profile == "lo-lo"
+                        else ZIRCON_RANGE_HILO_M)
+            if rng_to_tgt > envelope:
+                self.show_hint(HINT_ZIRCON_RANGE)
         m = self.world.launch(self.profile, self.target_point,
-                              tuple(self.waypoints))
+                              tuple(self.waypoints),
+                              weapon_id=self.oniks_weapon)
         if m is not None:
             self.followed = m
             self.rig.retarget()         # smooth swing onto the new round
@@ -847,8 +915,8 @@ class SandboxState(GameState):
         """Free this session's GL objects (called when SANDBOX restarts)."""
         meshes = ([self._mesh_oniks, self._mesh_oniks_capped,
                    self._mesh_oniks_folded, self._mesh_cap, self._mesh_slug,
-                   self._mesh_cover, self._mesh_sam_pad, self._mesh_s300_tel,
-                   self._mesh_s300_missile]
+                   self._mesh_cover, self._mesh_sam_pad, self._mesh_s300_tel]
+                  + list(self._missile_meshes.values())
                   + list(self._aircraft_meshes.values())
                   + list(self._ship_meshes.values()) + self._tel_meshes
                   + [mesh for mesh, _ in self._site_draws])
@@ -927,9 +995,11 @@ class SandboxState(GameState):
 
     def _draw_tel(self) -> None:
         idx = int(round(self._tel_frac * (TEL_ELEV_STEPS - 1)))
-        self.renderer.draw_mesh(self._tel_meshes[idx], self._tel_pos)
-        self.renderer.draw_mesh(self._mesh_sam_pad, self._sam_tel_pos)
-        self.renderer.draw_mesh(self._mesh_s300_tel, self._sam_tel_pos)
+        for pos in self._tel_positions:
+            self.renderer.draw_mesh(self._tel_meshes[idx], pos)
+        for pos in self._sam_tel_positions:
+            self.renderer.draw_mesh(self._mesh_sam_pad, pos)
+            self.renderer.draw_mesh(self._mesh_s300_tel, pos)
 
     def _draw_missiles(self) -> None:
         for m in self.world.missiles:
@@ -940,14 +1010,9 @@ class SandboxState(GameState):
             if v is None:
                 v = _vhat(m)
             rot = math3d.rotation_from_forward(v)
-            if isinstance(m, SamMissile):
-                mesh = self._mesh_s300_missile
-            elif isinstance(m, StrikeMissile):
-                # Phase 3 placeholder: enemy Tomahawk/JASSM/HARM reuse the
-                # bare Oniks round (closest existing cruise-missile body);
-                # dedicated models are Phase-7 polish. Strike phases (20-25)
-                # can never collide with CAP_ON_PHASES below.
-                mesh = self._mesh_oniks
+            mesh_key = _missile_mesh_key(m)
+            if mesh_key != "oniks":
+                mesh = self._missile_meshes[mesh_key]
             elif m.phase in CAP_ON_PHASES:
                 # launch variants: folded surfaces snap to X shortly after
                 # muzzle clear; the SUO cap stays on until PITCHOVER ends

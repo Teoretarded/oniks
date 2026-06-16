@@ -28,9 +28,12 @@ class CombatConfig:
     n_player_radars: int = 1
     n_pantsir: int = 2
     n_drones: int = 1
+    n_oniks: int = 1             # Oniks TEL launchers, 2 tubes each (salvo fire)
+    n_s300: int = 1              # S-300 TEL launchers, 4 tubes each (salvo fire)
     # Armory: magazine capacity + empty-refill reload per PLAYER weapon.
     oniks_ammo: int = 8
     oniks_mag_reload_s: float = 120.0
+    zircon_ammo: int = 4         # scarce hypersonic anti-ship rounds (B selects)
     s300_48n6_ammo: int = 4
     s300_40n6_ammo: int = 2
     s300_mag_reload_s: float = 45.0
@@ -47,6 +50,8 @@ CLAMP_ENEMY_RADARS:  tuple = (0, 6)
 CLAMP_PLAYER_RADARS: tuple = (1, 4)
 CLAMP_PANTSIR:       tuple = (0, 6)
 CLAMP_DRONES:        tuple = (0, 3)
+CLAMP_ONIKS:         tuple = (1, 5)     # Oniks launchers (2 tubes each)
+CLAMP_S300:          tuple = (1, 2)     # S-300 launchers (4 tubes each)
 CLAMP_AMMO:          tuple = (1, 200)
 # Pantsir 30 mm belt: a real 2A38M belt holds far more than a missile
 # magazine, and the LOCKED schema default is 700 rounds — outside CLAMP_AMMO.
@@ -77,8 +82,11 @@ def clamp_config(
     n_player_radars: int = CombatConfig.n_player_radars,
     n_pantsir: int = CombatConfig.n_pantsir,
     n_drones: int = CombatConfig.n_drones,
+    n_oniks: int = CombatConfig.n_oniks,
+    n_s300: int = CombatConfig.n_s300,
     oniks_ammo: int = CombatConfig.oniks_ammo,
     oniks_mag_reload_s: float = CombatConfig.oniks_mag_reload_s,
+    zircon_ammo: int = CombatConfig.zircon_ammo,
     s300_48n6_ammo: int = CombatConfig.s300_48n6_ammo,
     s300_40n6_ammo: int = CombatConfig.s300_40n6_ammo,
     s300_mag_reload_s: float = CombatConfig.s300_mag_reload_s,
@@ -96,6 +104,8 @@ def clamp_config(
     lo_pr, hi_pr = CLAMP_PLAYER_RADARS
     lo_pa, hi_pa = CLAMP_PANTSIR
     lo_dr, hi_dr = CLAMP_DRONES
+    lo_on, hi_on = CLAMP_ONIKS
+    lo_s3, hi_s3 = CLAMP_S300
     lo_am, hi_am = CLAMP_AMMO
     lo_gun, hi_gun = CLAMP_GUN_AMMO
     lo_re, hi_re = CLAMP_RELOAD_S
@@ -108,7 +118,10 @@ def clamp_config(
         n_player_radars=clamp_field(int(n_player_radars), lo_pr, hi_pr),
         n_pantsir=clamp_field(int(n_pantsir), lo_pa, hi_pa),
         n_drones=clamp_field(int(n_drones), lo_dr, hi_dr),
+        n_oniks=clamp_field(int(n_oniks), lo_on, hi_on),
+        n_s300=clamp_field(int(n_s300), lo_s3, hi_s3),
         oniks_ammo=clamp_field(int(oniks_ammo), lo_am, hi_am),
+        zircon_ammo=clamp_field(int(zircon_ammo), lo_am, hi_am),
         oniks_mag_reload_s=clamp_field(float(oniks_mag_reload_s), lo_re, hi_re),
         s300_48n6_ammo=clamp_field(int(s300_48n6_ammo), lo_am, hi_am),
         s300_40n6_ammo=clamp_field(int(s300_40n6_ammo), lo_am, hi_am),

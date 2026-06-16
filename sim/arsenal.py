@@ -48,6 +48,27 @@ ONIKS = WeaponDef(
 )
 
 
+# 3M22 Zircon - hypersonic anti-ship (player). Reuses the Oniks Missile flight
+# machine; the scramjet sustainer holds a hypersonic cruise, so it out-speeds the
+# SM-2 reaction window even on a high profile (the "break the screen" round).
+ZIRCON = WeaponDef(
+    weapon_id="zircon", display_name="3M22 Zircon",
+    length=9.0, diameter=0.70, launch_mass=3400.0, fuel_mass=900.0,
+    eject_speed=30.0, eject_time=0.35,
+    booster_thrust=360_000.0, booster_time=11.0,
+    max_thrust=200_000.0, isp=1300.0,
+    # Fast medium-altitude cruise (not a 28 km lofter: the shared descent gains,
+    # tuned for the M2.5 Oniks, cannot bleed 28 km at M5+, so a high lofter
+    # overshoots. 14 km + an early 100 km terminal handover lets the hypersonic
+    # dive capture in time — the SPEED, not the apogee, is the Zircon's edge).
+    cruise_mach_hi=8.0, cruise_alt_hi=14_000.0, cruise_mach_lo=4.5, lo_alt=80.0,
+    skim_alt=15.0, terminal_range=100_000.0,
+    seeker_range=60_000.0, seeker_half_angle_deg=30.0,
+    max_g=14.0, warhead_mass=300.0,
+    ref_area=0.3848,   # pi * (0.70/2)^2
+)
+
+
 @dataclass(frozen=True)
 class SamDef:
     """Surface-to-air interceptor definition (Task S2). A separate type from
@@ -75,6 +96,18 @@ class SamDef:
     self_destruct_speed: float  # m/s, post-burnout minimum speed
     min_intercept_alt: float    # m, engagement envelope floor
     max_intercept_alt: float    # m, engagement envelope ceiling
+    # Loft / energy-management arc shaping — read PER ROUND by
+    # sim.sam._aim_direction so different rounds fly DIFFERENT arcs (the 48N6
+    # medium loft vs the 40N6 high loft).  Commanded midcourse altitude sits
+    # ``loft_gain`` m above the aim point per m of ground range-to-go beyond
+    # ``loft_fade_range``, capped at ``loft_bias_max``; inside the fade range
+    # the bias is zero, so the dive onto the real target is established before
+    # terminal PN takes over.  Defaults = the baseline medium-loft profile
+    # (48N6 / SM-2 / SM-6 / Pantsir; tuned by sweep, see sim/sam.py loft note);
+    # only the 40N6 overrides them for its high lofted long-range trajectory.
+    loft_gain: float = 0.55             # m of altitude bias per m of range-to-go
+    loft_bias_max: float = 14_000.0     # m, peak loft above the aim point
+    loft_fade_range: float = 25_000.0   # m, range-to-go below which loft -> 0
 
 
 S300 = SamDef(
@@ -329,9 +362,12 @@ HARM = StrikeDef(
 #       ~20 km apogee at 380 km in ~270-300 s total flight (vs 180 s for
 #       S300 at 150 km): the 40N6's practical design apogee ~30 km (published
 #       in open references; the higher loft is what extends range in thin air).
-#     Loft parameters: LOFT_GAIN and LOFT_BIAS_MAX in sam.py must be higher to
-#       drive the apogee to ~30 km.  The missile uses the SAME SamMissile phase
-#       machine; eject/boost/midcourse/terminal phases work identically.  The
+#     Loft parameters: the loft is PER ROUND (loft_gain / loft_bias_max /
+#       loft_fade_range below) — the 40N6 overrides the medium-loft default
+#       with a higher bias and a fade range pushed outside its terminal gate,
+#       driving the visible high apogee.  The missile uses the SAME SamMissile
+#       phase machine; eject/boost/midcourse/terminal phases work identically.
+#       The
 #       active seeker (no illuminator) is modelled by passing illuminator_pos_fn=None
 #       to SamMissile (the code already handles this: without an illuminator the
 #       terminal LOS check runs from the missile's own seeker — exactly the ARH
@@ -367,6 +403,20 @@ N40N6 = SamDef(
     # Real-world open-source references confirm a floor ~5 km; using 4 km
     # as a slightly optimistic game value.
     min_intercept_alt=4_000.0, max_intercept_alt=40_000.0,
+    # HIGH lofted trajectory (the discriminator vs the 48N6's medium arc):
+    # ``loft_bias_max`` 24 km lofts the midcourse arc to a ~37 km apogee on a
+    # long high shot vs the 48N6's ~32 km — the player SEES it climb clearly
+    # higher.  ``loft_fade_range`` 45 km sits 5 km OUTSIDE the 40 km terminal
+    # gate (mirroring the 48N6's 25 km fade / 20 km terminal), so the loft has
+    # faded and the dive is established in midcourse BEFORE the ARH seeker
+    # takes over — fixes the BUGHUNT 'overshoots/wallows on close targets'
+    # note (a 40 km handover at apogee would wallow).  A short shot stays flat
+    # (bias ~0 inside the fade ramp), so it does not over-loft a nearby
+    # target: the high loft is the LONG-range energy-management arc, as in
+    # reality.  Measured (tools/compare_s300_rounds.py): 37 km apogee, dive
+    # handover ~15 km below apogee, kills close movers and reaches past the
+    # 48N6's self-destruct range.  Locked by tests/test_s300_rounds_distinct.py.
+    loft_gain=0.55, loft_bias_max=24_000.0, loft_fade_range=45_000.0,
 )
 
 # 40N6 TEL: same 5P85 body, 2 rounds (the heavier missile halves the load).
@@ -437,8 +487,25 @@ PANTSIR_57E6 = SamDef(
     max_intercept_alt=15_000.0, # m — published engagement ceiling (spec §4.2)
 )
 
-WEAPONS = {"oniks": ONIKS}
-SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6}
+# SM-6 (RIM-174) - enemy ship long-range area-air + anti-surface SAM. Reuses the
+# SamMissile machine; 240 km reach lets the fleet engage the recon drone / high
+# Oniks at distance and counters the Zircon's high profile.
+SM6 = SamDef(
+    weapon_id="sm6", display_name="SM-6 (RIM-174)",
+    length=6.55, diameter=0.343, launch_mass=1500.0, propellant_mass=1000.0,
+    eject_speed=20.0, eject_time=0.5,
+    motor_thrust=150_000.0, motor_time=16.0, isp=240.0,
+    ref_area=0.0924,   # pi * (0.343/2)^2
+    max_g=30.0, fuse_radius=20.0,
+    terminal_range=30_000.0, max_range=240_000.0,
+    self_destruct_t=300.0, self_destruct_speed=250.0,
+    min_intercept_alt=15.0, max_intercept_alt=33_000.0,
+)
+
+
+WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON}
+SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6,
+        "sm6": SM6}
 STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
              "40n6_tel": N40N6_TEL}

@@ -74,6 +74,12 @@ class CombatState(SandboxState):
         # __init__).  None is the legacy default-config path.
         self._config = config
         super().__init__(app)
+        # Phase 8: draw one Bastion TEL per Oniks launcher + one S-300 TEL per
+        # S-300 launcher (salvo batteries).
+        self._tel_positions = [p.copy()
+                               for p in self.world._oniks_launcher_positions]
+        self._sam_tel_positions = [p.copy()
+                                   for p in self.world._s300_launcher_positions]
         # HUD 'ENGAGING' flash: a real-time countdown refreshed whenever a
         # Pantsir launches a 57E6 (detected as a drop in pooled missile ammo
         # across the units — a launch is exactly one round consumed).  Read

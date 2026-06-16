@@ -77,6 +77,11 @@ FIGHTER_ALT_M: float = 9_000.0
 # Fighter turn rate: ~3 deg/s sustained bank-to-bank at cruise altitude.
 # Real F/A-18 sustained turn is ~6 deg/s at sea-level; at altitude ~3 deg/s.
 FIGHTER_TURN_RATE: float = math.radians(3.0)   # rad/s
+# Phase 8 defensive break: a hard evasive turn (far harder than the sustained
+# cruise rate), a steep descent to bleed the incoming SAM's energy, a hard deck.
+FIGHTER_EVADE_TURN_RATE: float = math.radians(9.0)   # rad/s (hard break)
+FIGHTER_EVADE_DIVE_MPS: float = 130.0                # m/s descent in the break
+FIGHTER_EVADE_FLOOR_M: float = 1_500.0               # m hard deck for the dive
 
 # Fighter endurance: 3 600 s (60 min) of airborne time before dry tanks.
 # Rationale: real F/A-18E interdiction combat radius is ~720-740 km — a
@@ -392,6 +397,11 @@ class Carrier(Destroyer):
             ciws_ammo=0,
             tomahawk_ammo=0,
         )
+        # The carrier is the disarmed, silent high-value unit under its escort
+        # umbrella — it is no SM-6 shooter either (sm6_ammo is not a Destroyer
+        # ctor arg, so zero it here; otherwise it would fire SM-6 on AWACS cues
+        # while running dark, contradicting the silent-carrier doctrine).
+        self.sm6_ammo = 0
         # Overwrite the ship-type-derived dimensions and HP with carrier spec.
         spec = SHIP_TYPES["carrier"]
         self.ship_type = "carrier"
@@ -620,6 +630,10 @@ class Fighter:
         # Missiles spawned by this fighter (handed to the world's missile list
         # by the caller of release_weapons(); stored here for emission state mgmt).
         self._released_missiles: List = []
+        # Phase 8 defensive break: (x, z) of an incoming player SAM, or None.
+        # The world sets it each step (it owns the missile list); update() then
+        # breaks perpendicular + dives while it is set.
+        self._evade_threat = None
 
     # -----------------------------------------------------------------------
     # Duck-type interface (ContactBoard / seeker)
@@ -700,6 +714,26 @@ class Fighter:
     def _move_horizontal(self, speed: float, dt: float) -> None:
         self.pos[0] += math.sin(self.heading) * speed * dt
         self.pos[2] += math.cos(self.heading) * speed * dt
+
+    def _evade_break(self, dt: float) -> None:
+        """Hard defensive break + descent away from an incoming player SAM
+        (Phase 8). Turns perpendicular to the threat at the hard-break rate and
+        dives to bleed the missile's energy - it must chase, so it misses more."""
+        mx, mz = self._evade_threat
+        px, pz = float(self.pos[0]), float(self.pos[2])
+        ax, az = px - mx, pz - mz                 # missile -> us (incoming axis)
+        hx, hz = math.sin(self.heading), math.cos(self.heading)
+        p1, p2 = (-az, ax), (az, -ax)             # the two perpendiculars
+        p = p1 if (p1[0] * hx + p1[1] * hz) >= (p2[0] * hx + p2[1] * hz) else p2
+        bearing = math.atan2(p[0], p[1])
+        err = (bearing - self.heading + math.pi) % (2.0 * math.pi) - math.pi
+        limit = FIGHTER_EVADE_TURN_RATE * dt
+        self.heading = ((self.heading + min(max(err, -limit), limit)
+                         + math.pi) % (2.0 * math.pi) - math.pi)
+        self._speed = FIGHTER_CRUISE_MPS
+        self._move_horizontal(self._speed, dt)
+        self.pos[1] = max(self.pos[1] - FIGHTER_EVADE_DIVE_MPS * dt,
+                          FIGHTER_EVADE_FLOOR_M)
 
     def _bingo(self, bases: Optional[list] = None) -> bool:
         """True when remaining fuel forces RTB.
@@ -1226,6 +1260,12 @@ class Fighter:
                 if bases:
                     self._rtb(bases)
                 return  # handle RTB next tick
+
+        # Defensive break (Phase 8): a player SAM is closing - break hard
+        # perpendicular and dive. Overrides the mission flight while flagged.
+        if airborne and self._evade_threat is not None:
+            self._evade_break(dt)
+            return
 
         # State dispatch.
         if self.state == FS_PARKED:

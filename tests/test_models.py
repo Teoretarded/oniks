@@ -7,6 +7,10 @@ import models.oniks as oniks_model
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
 from models.bastion import build_bastion_tel
 from models.common import PALETTE
+from models.missiles import (build_40n6, build_48n6, build_57e6,
+                             build_aim9x, build_harm, build_jassm,
+                             build_sm2, build_sm6, build_tomahawk,
+                             build_zircon)
 from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_missile, build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
@@ -36,6 +40,9 @@ def test_all_builders_finite_unit_normals():
                build_s300_tel(elevation_deg=0.0),
                build_s300_tel(elevation_deg=90.0),
                build_s300_missile(),
+               build_48n6(), build_40n6(), build_sm2(), build_57e6(),
+               build_tomahawk(), build_jassm(), build_harm(), build_aim9x(),
+               build_zircon(), build_sm6(),
                build_patrol_aircraft(), build_fast_aircraft(),
                build_cargo(), build_tanker(), build_warship(),
                build_radar_station(), build_fuel_depot(), build_harbor()):
@@ -202,6 +209,89 @@ def test_s300_missile_dimensions():
     assert fins.any()
     rf = np.linalg.norm(md.vertices[fins, 0:2], axis=1)
     assert 0.5 <= rf.max() <= 0.80
+
+
+# --- Dedicated non-Oniks missile models --------------------------------------
+
+
+def _span(md, axis):
+    p = md.vertices[:, axis]
+    return float(p.max() - p.min())
+
+
+def _radius(md):
+    verts = md.vertices if hasattr(md, "vertices") else md
+    return np.linalg.norm(verts[:, 0:2], axis=1)
+
+
+def test_dedicated_missile_lengths():
+    expected = (
+        (build_tomahawk, 6.25),
+        (build_jassm, 4.27),
+        (build_harm, 4.17),
+        (build_aim9x, 3.00),
+        (build_48n6, 7.50),
+        (build_40n6, 8.00),
+        (build_sm2, 6.55),
+        (build_57e6, 3.17),
+        (build_zircon, 9.00),
+        (build_sm6, 6.55),
+    )
+    for build, length in expected:
+        md = build()
+        assert abs(_span(md, 2) - length) <= 0.04, build.__name__
+
+
+def test_cruise_missile_silhouettes_are_distinct():
+    tom = build_tomahawk()
+    jas = build_jassm()
+    harm = build_harm()
+    aim = build_aim9x()
+
+    assert _span(tom, 0) >= 2.45      # deployed straight wings
+    assert _span(jas, 0) >= 2.25      # broad stealth trapezoid wings
+    assert _span(jas, 1) < _span(tom, 1) * 1.15
+    assert _radius(harm).max() < 0.55 # slim HARM, smaller than Tomahawk/JASSM
+    assert _radius(aim).max() < 0.34  # AIM-9X stays very small
+    canards = aim.vertices[(aim.vertices[:, 2] > 0.55)
+                           & (_radius(aim) > 0.12)]
+    tail = aim.vertices[(aim.vertices[:, 2] < -0.95)
+                        & (_radius(aim) > 0.15)]
+    assert len(canards) and len(tail)
+
+
+def test_sam_missile_silhouettes_are_distinct():
+    n48 = build_48n6()
+    n40 = build_40n6()
+    sm2 = build_sm2()
+    e57 = build_57e6()
+
+    assert _span(n40, 2) > _span(n48, 2) + 0.45
+    assert 0.50 <= _radius(n48).max() <= 0.85
+    assert 0.45 <= _radius(sm2).max() <= 0.75
+    assert _span(sm2, 0) < _span(n48, 0) * 1.05
+    rear = e57.vertices[e57.vertices[:, 2] < -0.75]
+    front = e57.vertices[e57.vertices[:, 2] > 0.30]
+    assert _radius(rear).max() > _radius(front).max() * 1.8
+
+
+def test_future_missile_prototype_silhouettes_are_distinct():
+    zircon = build_zircon()
+    sm6 = build_sm6()
+
+    # Zircon: speculative scramjet/lifting-body look, not a round Standard tube.
+    assert _span(zircon, 0) >= 1.45
+    assert _span(zircon, 1) < _span(zircon, 0) * 0.75
+    underside = zircon.vertices[(zircon.vertices[:, 1] < -0.20)
+                                & (zircon.vertices[:, 2] > -1.5)
+                                & (zircon.vertices[:, 2] < 1.7)]
+    assert len(underside)
+
+    # SM-6: fatter Mk 72 booster aft, narrower Standard/AMRAAM nose forward.
+    rear = sm6.vertices[sm6.vertices[:, 2] < -1.75]
+    front = sm6.vertices[sm6.vertices[:, 2] > -0.6]
+    assert _radius(rear).max() > _radius(front).max() * 1.35
+    assert 0.70 <= _radius(sm6).max() <= 0.82
 
 
 def test_s300_tel_fits_box_when_erect():

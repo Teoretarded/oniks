@@ -76,6 +76,8 @@ ACTIONS: tuple[ActionDef, ...] = (
     # S-300 round select (Phase 5b): toggles the 48N6 <-> 40N6 round the
     # next SAM launch uses. V is unclaimed by every other default.
     ActionDef("sam_round", "S-300 ROUND SELECT", "ENGAGEMENT", pygame.K_v),
+    # Oniks/Zircon select (Phase 8): B toggles the Bastion round. B is unclaimed.
+    ActionDef("oniks_weapon", "ONIKS/ZIRCON SELECT", "ENGAGEMENT", pygame.K_b),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),

@@ -85,18 +85,20 @@ TGO_CLOSING_FLOOR = 50.0       # m/s
 TGO_MAX = 90.0                 # s
 
 # Loft shaping (energy management): the commanded altitude sits above the
-# aim point by LOFT_GAIN per meter of ground range-to-go beyond the fade
-# range, capped. Coasting at ~20 km keeps dynamic pressure low enough that
-# a 130 km shot arrives ~30 s inside the self-destruct window at ~775 m/s,
-# the practical edge sits almost exactly at the locked "max guided range vs
-# air ~ 150 km" (a 150 km shot connects at t ~ 179.7 s), and a 200 km shot
-# honestly times out ~44 km short — the envelope emerges from drag, not
-# from a range gate (tuned by sweep, Task S2). The fade range sits just
-# outside terminal handover so the dive onto the real target is already
-# established when PN takes over.
-LOFT_GAIN = 0.55               # m of altitude bias per m of range-to-go
-LOFT_BIAS_MAX = 14_000.0       # m (peak loft 20.5 km < 25 km envelope ceiling)
-LOFT_FADE_RANGE = 25_000.0     # m
+# aim point by ``loft_gain`` per meter of ground range-to-go beyond the fade
+# range, capped at ``loft_bias_max``. Coasting high keeps dynamic pressure
+# low enough that the envelope emerges from drag, not from a range gate
+# (tuned by sweep, Task S2). The fade range sits just OUTSIDE terminal
+# handover so the dive onto the real target is already established when PN
+# takes over — handing over at apogee is the 'wallow' the high-loft 40N6
+# would suffer if its fade range were not pushed out past its terminal gate.
+#
+# These three numbers are PER ROUND: they live on the SamDef (loft_gain,
+# loft_bias_max, loft_fade_range) so the 48N6 and 40N6 fly genuinely
+# different arcs (the 48N6 medium loft ~32 km apogee; the 40N6 a high loft
+# toward its 40 km ceiling, reaching far past where the 48N6 self-destructs).
+# The baseline default profile (48N6 / SM-2 / SM-6 / Pantsir) is
+# loft_gain=0.55, loft_bias_max=14_000, loft_fade_range=25_000.
 
 # Altitude capture: the commanded flight path closes the gap to the loft
 # profile over this ground run, clamped to sane climb/dive angles (the steep
@@ -353,7 +355,9 @@ class SamMissile:
         gx = ax - px
         gz = az - pz
         rg = math.hypot(gx, gz)
-        bias = min(LOFT_GAIN * max(rg - LOFT_FADE_RANGE, 0.0), LOFT_BIAS_MAX)
+        w = self.weapon                # per-round loft (48N6 medium / 40N6 high)
+        bias = min(w.loft_gain * max(rg - w.loft_fade_range, 0.0),
+                   w.loft_bias_max)
         slope = (ay + bias - py) / LOFT_CAPTURE_RUN
         slope = min(max(slope, -DIVE_MAX_TAN), CLIMB_MAX_TAN)
         if rg < 1e-6:

@@ -72,7 +72,7 @@ import math
 
 import numpy as np
 
-from sim.arsenal import SM2
+from sim.arsenal import SM2, SM6
 from sim.ciws import Ciws
 from sim.missile import Missile
 from sim.sam import SamMissile
@@ -93,6 +93,7 @@ DRONE_SM2_MAX_INFLIGHT = 2  # rounds in flight per drone (spec 4.3 brief:
 #                             shoot-shoot-look vs one slow target — the full
 #                             4-round raid cap stays reserved for missiles)
 DRONE_ENGAGE_RANGE_M = 22_000.0  # m: NO drone shots beyond this ground range
+SM6_MAX_INFLIGHT = 2             # long-range SM-6 rounds in flight per ship
 #                             (5b ammo discipline, 5a verifier OPEN item).
 #                             The Phase-4 measured kill-per-shot curve
 #                             (tools/probe_drone_sm2.py seeded batches,
@@ -106,6 +107,18 @@ DRONE_ENGAGE_RANGE_M = 22_000.0  # m: NO drone shots beyond this ground range
 #                             the geometry pays.  AWACS far cues made this
 #                             waste real in 5a (a 40 km cue could trigger
 #                             launches the seeker could never finish).
+
+# SM-6 AREA air-defense band (Phase 8): the SM-6's design role is to reach out
+# and kill HIGH inbound cruise missiles (hi-profile Oniks/Zircon) far beyond the
+# SM-2 band, forcing the player low — the "go low to survive" loop (GAME_ANALYSIS
+# §7). It engages a tracked missile only when the dead-reckoned altitude is above
+# SM6_AREA_MIN_ALT_M (a sea-skimmer stays the SM-2/CIWS/multipath domain) and the
+# ground range sits in [SM6_MIN_RANGE_M, SM6.max_range]. A high flyer is a clean
+# track (no stealth multipath), so the round is a plain SamMissile like the SM-2
+# anti-missile channel — no low-SNR noise scaling.
+SM6_AREA_MIN_ALT_M = 1_500.0     # m: above the sea-skim band -> SM-6 area target
+SM6_MIN_RANGE_M = 50_000.0       # m: SM-6 reaches OUT (50-240 km); the SM-2's
+#                                  150 km layer backs it up closer in.
 
 # Stealth low-SNR tracking noise (the multipath analog for tiny targets,
 # user law: outcomes emerge from guidance physics, never kill rolls).
@@ -144,6 +157,7 @@ def _mark_hostile_round(sam) -> None:
     sam.is_air = True
     sam.radar_size = "missile"
     sam.aircraft_id = f"hostile_sam_{id(sam):x}"
+    sam.launch_warning = True    # Phase 8: enemy SM-2 seen the instant it fires
 
 
 class StealthTargetSam(SamMissile):
@@ -257,6 +271,7 @@ class ShipDefense:
         # store re-binds to the new airframe each step).
         self._drone_tracks: dict[str, dict] = {}
         self._drone_inflight: list[tuple] = []  # (SamMissile, aircraft_id)
+        self._sm6_inflight: list[tuple] = []    # (SamMissile, key) long-range
 
     # -------------------------------------------------------------- tracking
 
@@ -473,6 +488,95 @@ class ShipDefense:
             self._drone_inflight.append((sam, did))
             return                          # one round per free channel
 
+    def _try_sm6_launch(self, world, now):
+        """SM-6 long-range channel (240 km).  Two roles, both decided purely on
+        the sensor PICTURE (a formed track, never ground truth):
+
+          1. AREA air defense (primary): reach out and kill HIGH inbound cruise
+             missiles (hi-profile Oniks/Zircon) far beyond the SM-2 band — the
+             round that forces the player low (GAME_ANALYSIS §7).  A high flyer
+             is a clean track, so it is a plain SamMissile like the SM-2
+             anti-missile channel (no stealth low-SNR noise).
+          2. Anti-drone standoff: a drone a sensor still holds past the SM-2's
+             22 km cap (rare — the drone is stealthy, seen <=40 km).
+        """
+        ship = self.ship
+        if (ship.sm6_ammo <= 0 or ship.sm6_reload_timer > 0.0
+                or len(self._sm6_inflight) >= SM6_MAX_INFLIGHT):
+            return
+        sx, sz = float(ship.pos[0]), float(ship.pos[2])
+
+        # --- 1. AREA defense: the HIGH inbound flyers, farthest first ---
+        best_key = None
+        best_rank = None
+        for key, st in self._tracks.items():
+            if not self._tracked(st, now) or not st["missile"].alive:
+                continue
+            ex = float(st["pos"][0]) + float(st["vel"][0]) * st["age"]
+            ey = float(st["pos"][1]) + float(st["vel"][1]) * st["age"]
+            ez = float(st["pos"][2]) + float(st["vel"][2]) * st["age"]
+            if ey < SM6_AREA_MIN_ALT_M:
+                continue                # sea-skimmer: SM-2/CIWS/multipath domain
+            rng_ground = math.hypot(ex - sx, ez - sz)
+            if not SM6_MIN_RANGE_M <= rng_ground <= SM6.max_range:
+                continue
+            if not SM6.min_intercept_alt <= ey <= SM6.max_intercept_alt:
+                continue
+            assigned = sum(1 for _, k in self._sm6_inflight if k == key)
+            # Reach out and kill early: prefer the farthest-out high threat.
+            rank = (assigned, -rng_ground)
+            if best_rank is None or rank < best_rank:
+                best_key, best_rank = key, rank
+        if best_key is not None:
+            deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
+            sam = SamMissile(
+                SM6, deck, self._tracks[best_key]["missile"],
+                contact_estimate_fn=self._estimate(best_key),
+                rng=np.random.default_rng(int(self.rng.integers(2 ** 63))),
+                illuminator_pos_fn=self._illuminator())
+            sam.launch_cinematic = False
+            sam.launch_platform = ship
+            _mark_hostile_round(sam)
+            world.missiles.append(sam)
+            ship.sm6_ammo -= 1
+            ship.sm6_reload_timer = ship.sm6_reload_s
+            self._sm6_inflight.append((sam, best_key))
+            return
+
+        # --- 2. Anti-drone standoff (existing) ---
+        detect_range = ship.radar.ranges.get("stealth", 0.0)
+        for did, st in self._drone_tracks.items():
+            drone = st["drone"]
+            if not self._tracked(st, now) or not drone.alive:
+                continue
+            if sum(1 for _, k in self._sm6_inflight if k == did) \
+                    >= SM6_MAX_INFLIGHT:
+                continue
+            ex = float(st["pos"][0]) + float(st["vel"][0]) * st["age"]
+            ey = float(st["pos"][1]) + float(st["vel"][1]) * st["age"]
+            ez = float(st["pos"][2]) + float(st["vel"][2]) * st["age"]
+            rng_ground = math.hypot(ex - sx, ez - sz)
+            # The SM-2 owns the close-in band; the SM-6 takes the standoff zone.
+            if not DRONE_ENGAGE_RANGE_M <= rng_ground <= SM6.max_range:
+                continue
+            if not SM6.min_intercept_alt <= ey <= SM6.max_intercept_alt:
+                continue
+            deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
+            sam = StealthTargetSam(
+                SM6, deck, drone,
+                contact_estimate_fn=self._estimate(did, self._drone_tracks),
+                rng=np.random.default_rng(int(self.rng.integers(2 ** 63))),
+                illuminator_pos_fn=self._illuminator(),
+                detection_range_m=detect_range)
+            sam.launch_cinematic = False
+            sam.launch_platform = ship
+            _mark_hostile_round(sam)
+            world.missiles.append(sam)
+            ship.sm6_ammo -= 1
+            ship.sm6_reload_timer = ship.sm6_reload_s
+            self._sm6_inflight.append((sam, did))
+            return
+
     # ----------------------------------------------------------------- CIWS
 
     def _run_ciws(self, world, now, dt):
@@ -513,6 +617,7 @@ class ShipDefense:
             self._inflight.clear()
             self._drone_tracks.clear()
             self._drone_inflight.clear()
+            self._sm6_inflight.clear()
             return
         now = world.sim_time
         # Hostiles = player cruise missiles. SamMissile is a separate type
@@ -533,6 +638,11 @@ class ShipDefense:
         self._drone_inflight = [(sam, key) for sam, key in
                                 self._drone_inflight if sam.alive]
         self._try_sm2_drone_launch(world, now)
+        # Phase 8: SM-6 long-range channel — engages the drone (and high air
+        # tracks) past the SM-2's 22 km drone cap / 150 km envelope.
+        self._sm6_inflight = [(sam, key) for sam, key in self._sm6_inflight
+                              if sam.alive]
+        self._try_sm6_launch(world, now)
         self._run_ciws(world, now, dt)
 
 

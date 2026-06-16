@@ -313,7 +313,9 @@ def main() -> int:
                 if s.ship_id == "destroyer_00").pos.copy()
     tgt9[1] = 0.0
     for _ in range(3):
-        w9.reload_left = 0.0
+        for t in w9._oniks_tubes:       # instant re-cock spent tubes from the
+            t["reload_left"] = 0.0      # pool (the salvo battery replaced the
+        w9._step_oniks_tubes(0.0)       # old single-launcher reload_left timer)
         m9 = w9.launch("hi-lo", tgt9)
         for _ in range(int(40.0 / PHYS_DT_120)):
             w9.step(PHYS_DT_120)
@@ -516,8 +518,10 @@ def main() -> int:
     tgt15 = np.array([0.0, 0.0, 150_000.0])
     check("Oniks magazine loaded to 3", w15._oniks_ammo == 3)
     for _ in range(3):
+        for t in w15._oniks_tubes:          # instant re-cock from the pool
+            t["reload_left"] = 0.0          # (salvo battery; reload_left timer
+        w15._step_oniks_tubes(0.0)          # is now per-tube, not world-wide)
         m15 = w15.launch("hi-lo", tgt15)
-        w15.reload_left = 0.0               # skip the per-shot tube reload
         if m15 is None:
             break
     check("Oniks magazine drains to 0 and locks",

@@ -122,6 +122,20 @@ DESCENT_KD = 0.6           # 1/s (zeta ~ 1.06 with kp 0.08)
 DESCENT_RAMP_RATE = 220.0  # m/s target-altitude ramp
 DESCENT_MAX_SINK = 260.0   # m/s hard vertical-speed clamp
 
+# The descent gains above are calibrated for the ~Mach-2.5 Oniks. A faster
+# weapon (the Mach-8 Zircon) covers the descent corridor proportionally faster
+# at the same range-to-go, so it must bleed altitude proportionally faster or it
+# overflies the target still kilometres high and wallows (measured:
+# tools/probe_zircon_traj.py — a 150 km hi-lo Zircon crossing the target at
+# 4.4 km, splashing ~20 km past). The descent ramp / pull-down authority / sink
+# clamp therefore scale by the weapon's hi cruise Mach over this baseline; the
+# Oniks ratio is exactly 1.0 (bit-identical), and only the DESCENT phase is
+# affected (climb/cruise/terminal altitude-hold keep the unscaled gains). The
+# descent START range (``_descent_range``) is left unscaled on purpose: the
+# faster missile keeps its long high cruise and only dives crisper — preserving
+# the Zircon's high profile as the SM-6 counterplay axis (GAME_ANALYSIS §7).
+DESCENT_BASELINE_MACH = 2.55   # ONIKS.cruise_mach_hi (the calibration Mach)
+
 # Task RTG profile accuracy (oniks_reference.md §3: brief seeker fix at
 # 50-75 km, then below the radio horizon at skim height): the descent start
 # is timed so the missile is AT skim altitude SKIM_CAPTURE_RANGE out —
@@ -217,7 +231,12 @@ def _steer_heading_scalar(vx: float, vz: float, desired_heading: float):
 
 def _descent_range(weapon, cruise_alt):
     """Range-to-go at which the hi profile starts down, timed so the skim
-    is captured at SKIM_CAPTURE_RANGE (Task RTG seeker-fix window)."""
+    is captured at SKIM_CAPTURE_RANGE (Task RTG seeker-fix window). The
+    capture margin is held constant across weapons on purpose: it is the
+    speed-bleed / terminal-run-in room the homing phase needs, and shrinking
+    it lets a hypersonic round arrive low but too fast and overshoot the
+    target horizontally (measured). Faster weapons instead get a STEEPER dive
+    inside this same corridor (self._descent_scale in the DESCENT guidance)."""
     ramp_s = (cruise_alt - weapon.skim_alt) / DESCENT_RAMP_RATE
     return (SKIM_CAPTURE_RANGE
             + (ramp_s + DESCENT_SETTLE_T) * DESCENT_RUN_SPEED)
@@ -295,6 +314,11 @@ class Missile:
         self.locked_ship = None
         self.alive = True
         self.impact_pos = None
+        # Speed-proportional descent authority (see DESCENT_BASELINE_MACH):
+        # >= 1.0 so a slower-than-Oniks weapon never gets a GENTLER dive. Set
+        # before _plan_vertical_profile so the descent-range timing reads it.
+        self._descent_scale = max(
+            1.0, weapon.cruise_mach_hi / DESCENT_BASELINE_MACH)
         self._plan_vertical_profile()
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
@@ -499,11 +523,14 @@ class Missile:
                                      ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_DESCENT:
             self._descent_elapsed += dt
-            ramp = self._descent_alt0 - DESCENT_RAMP_RATE * self._descent_elapsed
+            ramp = (self._descent_alt0
+                    - DESCENT_RAMP_RATE * self._descent_scale
+                    * self._descent_elapsed)
             target_alt = max(w.skim_alt, ramp)
             gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
             gy = altitude_hold_accel(alt, vs, target_alt,
-                                     DESCENT_KP, DESCENT_KD, ALT_MAX_A) + GRAVITY
+                                     DESCENT_KP, DESCENT_KD,
+                                     ALT_MAX_A * self._descent_scale) + GRAVITY
         else:   # PH_TERMINAL
             if self.locked_ship is None:
                 self._acquire_lock(world, speed)
@@ -708,8 +735,10 @@ class Missile:
             max_vy = math.hypot(vx, vz) * CLIMB_MAX_TAN
             if vy > max_vy:
                 vy = max_vy
-        elif self.phase == PH_DESCENT and vy < -DESCENT_MAX_SINK:
-            vy = -DESCENT_MAX_SINK
+        elif self.phase == PH_DESCENT:
+            max_sink = DESCENT_MAX_SINK * self._descent_scale
+            if vy < -max_sink:
+                vy = -max_sink
         self.vel[0] = vx
         self.vel[1] = vy
         self.vel[2] = vz

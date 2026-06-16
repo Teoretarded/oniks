@@ -276,7 +276,12 @@ def test_oniks_magazine_depletes_and_locks():
     for _ in range(3):
         m = cw.launch("hi-lo", target)
         assert m is not None, "launch should succeed within magazine"
-        cw.reload_left = 0.0  # skip per-shot reload
+        # Skip the per-tube reload: instantly re-cock spent tubes from the pool
+        # (the salvo battery's equivalent of the old reload_left skip; a single
+        # Bastion now has 2 tubes, so a 3-round magazine spans two re-cocks).
+        for t in cw._oniks_tubes:
+            t["reload_left"] = 0.0
+        cw._step_oniks_tubes(0.0)
 
     assert cw._oniks_ammo == 0
     assert not cw.launcher_armed

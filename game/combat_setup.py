@@ -38,9 +38,9 @@ from game.states import (
 )
 from world.combat_config import (
     CombatConfig,
-    CLAMP_AMMO, CLAMP_AWACS, CLAMP_DESTROYERS, CLAMP_DRONES,
-    CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_PANTSIR, CLAMP_PLAYER_RADARS,
-    CLAMP_RELOAD_S, clamp_config,
+    CLAMP_AMMO, CLAMP_DESTROYERS,
+    CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_ONIKS, CLAMP_PANTSIR,
+    CLAMP_RELOAD_S, CLAMP_S300, clamp_config,
 )
 
 # --- Layout -------------------------------------------------------------------
@@ -82,16 +82,24 @@ _WORLD_ROWS = [
     {"kind": "fixed",   "label": "CARRIER",       "value": "1  (FIXED)"},
     {"kind": "stepper", "label": "DESTROYERS",    "field": "n_destroyers",
      "step": 1, "lo": CLAMP_DESTROYERS[0],    "hi": CLAMP_DESTROYERS[1]},
-    {"kind": "stepper", "label": "AWACS",         "field": "n_awacs",
-     "step": 1, "lo": CLAMP_AWACS[0],         "hi": CLAMP_AWACS[1]},
+    # AWACS / PLAYER RADARS / DRONES are FIXED at 1 for now: the simulation
+    # fields a single unit of each (world/combat.py builds one self.awacs, one
+    # self.radar_station, one self.drone). Multi-unit is real future work (it
+    # cascades into the enemy datalink/ESM model and the drone control UX), so
+    # the setup shows them fixed rather than offering steppers that silently do
+    # nothing. The CombatConfig fields + clamp_config keep their full ranges so
+    # the wiring can land later without a schema change.
+    {"kind": "fixed",   "label": "AWACS (enemy)",  "value": "1  (FIXED)"},
     {"kind": "stepper", "label": "ENEMY RADARS",  "field": "n_enemy_radars",
      "step": 1, "lo": CLAMP_ENEMY_RADARS[0],  "hi": CLAMP_ENEMY_RADARS[1]},
-    {"kind": "stepper", "label": "PLAYER RADARS", "field": "n_player_radars",
-     "step": 1, "lo": CLAMP_PLAYER_RADARS[0], "hi": CLAMP_PLAYER_RADARS[1]},
+    {"kind": "fixed",   "label": "PLAYER RADARS", "value": "1  (FIXED)"},
     {"kind": "stepper", "label": "PANTSIR TELs",  "field": "n_pantsir",
      "step": 1, "lo": CLAMP_PANTSIR[0],       "hi": CLAMP_PANTSIR[1]},
-    {"kind": "stepper", "label": "DRONES",        "field": "n_drones",
-     "step": 1, "lo": CLAMP_DRONES[0],        "hi": CLAMP_DRONES[1]},
+    {"kind": "fixed",   "label": "DRONES",        "value": "1  (FIXED)"},
+    {"kind": "stepper", "label": "ONIKS TELs",    "field": "n_oniks",
+     "step": 1, "lo": CLAMP_ONIKS[0],         "hi": CLAMP_ONIKS[1]},
+    {"kind": "stepper", "label": "S-300 TELs",    "field": "n_s300",
+     "step": 1, "lo": CLAMP_S300[0],          "hi": CLAMP_S300[1]},
     {"kind": "action",  "label": _START},
 ]
 
@@ -152,6 +160,8 @@ class CombatSetupState(GameState):
             "n_player_radars":    defaults.n_player_radars,
             "n_pantsir":          defaults.n_pantsir,
             "n_drones":           defaults.n_drones,
+            "n_oniks":            defaults.n_oniks,
+            "n_s300":             defaults.n_s300,
             "oniks_ammo":         defaults.oniks_ammo,
             "oniks_mag_reload_s": defaults.oniks_mag_reload_s,
             "s300_48n6_ammo":     defaults.s300_48n6_ammo,
@@ -361,6 +371,8 @@ class CombatSetupState(GameState):
             n_player_radars    = int(f["n_player_radars"]),
             n_pantsir          = int(f["n_pantsir"]),
             n_drones           = int(f["n_drones"]),
+            n_oniks            = int(f["n_oniks"]),
+            n_s300             = int(f["n_s300"]),
             oniks_ammo         = int(f["oniks_ammo"]),
             oniks_mag_reload_s = float(f["oniks_mag_reload_s"]),
             s300_48n6_ammo     = int(f["s300_48n6_ammo"]),

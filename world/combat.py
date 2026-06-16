@@ -138,7 +138,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sim.arsenal import TOMAHAWK
+from sim.arsenal import N40N6, ONIKS, S300, S300_TEL, TOMAHAWK, ZIRCON
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S
@@ -159,13 +159,16 @@ from sim.strike import StrikeMissile
 from world.combat_config import CombatConfig, DEFAULT as _DEFAULT_CONFIG
 from world.generation import BASE_POS, SEED, terrain_height_scalar
 from world.spawn_zones import sample_fleet
-from world.world import SAM_TEL_POS, WorldState
+from world.world import (CANISTER_MOUTH_OFFSET, SAM_MOUTH_OFFSETS, SAM_TEL_POS,
+                         WorldState)
 
 # Player ground radar station: home-coast shelf east of the base (the same
 # raised cliff band that carries the S-300 pad; the on-land pin is LOCKED
 # by tests/test_combat_world.py — nudge z south if generation ever changes).
 RADAR_STATION_XZ = (40_000.0, -6_000.0)
 RADAR_ANTENNA_M = 18.0          # radome center above the slab
+ONIKS_LAUNCHER_SPACING_M = 6.0  # side-by-side gap between Oniks TELs (~2.9 m wide)
+S300_LAUNCHER_SPACING_M = 8.0   # side-by-side gap between S-300 TELs (~3.05 m wide)
 PLAYER_RADAR_RANGES = {         # size class -> max detection range (m)
     "ship": 350_000.0, "fighter": 350_000.0,
     "missile": 120_000.0, "stealth": 35_000.0,
@@ -239,6 +242,10 @@ AWACS_ANCHOR_B_XZ = (40_000.0, 435_000.0)
 # the fleet it protects.
 FIGHTER_CAP_ANCHOR_XZ = (0.0, 160_000.0)
 CAP_TARGET_AIRBORNE = 2     # fighters kept up (out of the 4 fielded)
+FIGHTER_RWR_REACT_RANGE_M = 60_000.0  # a player SAM GUIDING ON this fighter (RWR
+#                                       lock) makes it break this far out — react
+#                                       to the lock, not just the close geometry,
+#                                       so the jet has time to actually defeat it.
 CAP_SCHED_PERIOD_S = 5.0    # s between scheduler checks; also staggers
 #                             launches (at most one fighter rolls per check)
 
@@ -402,6 +409,14 @@ class CombatWorld(WorldState):
             s300_40n6_ammo=config.s300_40n6_ammo,
             s300_mag_reload_s=config.s300_mag_reload_s,
         )
+        # Phase 8: multi-launcher salvo battery. Each Oniks TEL has 2 tubes;
+        # each SPACE press fires the next READY tube (no firerate gate while
+        # tubes are loaded), and that tube alone reloads from the shared
+        # magazine pool. ``_build_oniks_battery`` sets _oniks_launcher_positions
+        # (used by the structures below + the renderer).
+        self._build_oniks_battery(config.n_oniks)
+        self._build_s300_battery(config.n_s300)
+        self._zircon_ammo = int(config.zircon_ammo)   # scarce hypersonic pool
 
         destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
         # The enemy side's fire control: CIWS randomness derives from the
@@ -419,15 +434,22 @@ class CombatWorld(WorldState):
         # structure's death clears the Radar itself: coverage vanishes,
         # the picture coasts and drops (already automatic downstream).
         rx, rz = RADAR_STATION_XZ
+        # One destructible bastion_tel Structure per Oniks launcher: ``defeated``
+        # trips only when ALL are rubble, so the battery keeps firing while at
+        # least one TEL survives.
         self.structures = [
-            Structure("bastion_tel_00", "bastion_tel",
-                      np.array(BASE_POS, dtype=np.float64)),
-            Structure("s300_tel_00", "s300_tel", SAM_TEL_POS.copy()),
+            Structure(f"bastion_tel_{i:02d}", "bastion_tel", lpos.copy())
+            for i, lpos in enumerate(self._oniks_launcher_positions)
+        ]
+        self.structures += [
+            Structure(f"s300_tel_{i:02d}", "s300_tel", lpos.copy())
+            for i, lpos in enumerate(self._s300_launcher_positions)
+        ]
+        self.structures.append(
             Structure("radar_station_00", "radar_station",
                       np.array([rx, terrain_height_scalar(rx, rz), rz]),
                       on_destroyed=lambda _s: setattr(
-                          self.radar_station, "alive", False)),
-        ]
+                          self.radar_station, "alive", False)))
 
         # ---- Phase 6: Pantsir-S1 point defense (spec §4.2, config-driven) ----
         # Player-side mirror of the destroyers' SM-2/CIWS auto-defense: each
@@ -857,6 +879,7 @@ class CombatWorld(WorldState):
         if self.sim_time >= self._cap_next_t:
             self._cap_next_t = self.sim_time + CAP_SCHED_PERIOD_S
             self._commander_cap()
+        self._assign_air_threats()
         for e in self.enemy_air:
             had_impact = e.impact_pos is not None
             if isinstance(e, Fighter):
@@ -867,6 +890,51 @@ class CombatWorld(WorldState):
                 kind = ("aircraft_down" if e.impact_pos[1] > 1e-6
                         else "aircraft_splash")
                 self.events.append((kind, e.impact_pos.copy()))
+
+    def _assign_air_threats(self) -> None:
+        """Flag each airborne Fighter with the player SAM it should break from
+        (Phase 8 aircraft evasion) — SENSOR-DRIVEN, no truth read:
+
+          * TRIGGER = RWR lock: a player SAM whose seeker/illuminator is guiding
+            on THIS fighter (its .target is this airframe). Detecting that you
+            are being locked is a genuine radar-warning-receiver event.
+          * GEOMETRY = the enemy's own dead-reckoned missile TRACK of that SAM
+            (the SAME picture store the SM-2/SM-6 fire off, populated by
+            _feed_enemy_picture) — never the SAM's real position. A SAM that is
+            locked on the fighter but NOT held as a track (the fleet can't see
+            it) yields no firing-solution geometry, so no break: the fighter
+            cannot dodge what neither it nor its datalink can place.
+
+        Reacts out to FIGHTER_RWR_REACT_RANGE_M so the jet has room to defeat
+        the shot. None clears the flag."""
+        now = self.sim_time
+        # Dead-reckoned XZ of every inbound player SAM the enemy SENSES.
+        track_xz: dict[str, tuple] = {}
+        for tr in self.commander.picture.live_missile_tracks(now):
+            p, v = tr["pos"], tr["vel"]
+            age = now - tr["t"]
+            track_xz[tr["id"]] = (float(p[0]) + float(v[0]) * age,
+                                  float(p[2]) + float(v[2]) * age)
+        locks = [m for m in self.missiles
+                 if isinstance(m, SamMissile) and m.alive
+                 and not getattr(m, "is_hostile", False)]
+        for e in self.enemy_air:
+            if not isinstance(e, Fighter):
+                continue
+            threat_xz = None
+            best = FIGHTER_RWR_REACT_RANGE_M
+            for m in locks:
+                tgt_id = getattr(getattr(m, "target", None),
+                                 "aircraft_id", None)
+                if tgt_id != e.aircraft_id:
+                    continue            # not locked on this fighter: no RWR cue
+                tp = track_xz.get(f"hostile_{id(m):x}")
+                if tp is None:
+                    continue            # locked but unseen: no track geometry
+                d = float(np.hypot(tp[0] - e.pos[0], tp[1] - e.pos[2]))
+                if d < best:
+                    best, threat_xz = d, tp
+            e._evade_threat = threat_xz
 
     def _commander_cap(self) -> None:
         """Commander-managed standing CAP (5b — replaces the 5a scheduler
@@ -1043,6 +1111,12 @@ class CombatWorld(WorldState):
         self._cmd_missile_intel = {
             k: v for k, v in self._cmd_missile_intel.items()
             if k in live_keys}
+        # Bound the commander's track store: drop records for missiles that no
+        # longer exist and have aged out (mirrors the world intel prune above
+        # and live_missile_tracks' 30 s window). Without this the picture's
+        # missile_tracks dict grows unbounded over a long match.
+        pic.prune_missile_tracks(
+            {f"hostile_{k:x}" for k in live_keys}, now)
 
         # The drone -> a last-known-position track while any enemy radar
         # holds it at its 'stealth' class range.
@@ -1096,9 +1170,15 @@ class CombatWorld(WorldState):
         elif kind == "awacs_flee":
             if self.awacs.alive:
                 self.awacs.flee(order["threat_pos"])
+                # EMCON: a fleeing AWACS runs SILENT — emitting while bugging
+                # out only refines the player's ELINT fix and feeds a
+                # radiation-homing terminal; the fleet leans on ship/ground
+                # cueing during the silent window (Phase 8 smarter AWACS).
+                self.awacs.radar.emitting = False
         elif kind == "awacs_resume":
             if self.awacs.alive:
                 self.awacs.stop_flee()
+                self.awacs.radar.emitting = True   # threat clear: sensor back up
         elif kind in ("ship_silent", "ship_emit"):
             ship = next((s for s in self.ships
                          if s.ship_id == order["ship_id"]), None)
@@ -1344,22 +1424,219 @@ class CombatWorld(WorldState):
 
     @property
     def launcher_armed(self) -> bool:
-        """Reload gate AND the TEL structure still standing: ``launch``
-        returns None forever once the Bastion is rubble."""
-        return WorldState.launcher_armed.fget(self) and not self.defeated
+        """Salvo gate: armed while ANY Oniks tube is loaded and re-cocked, and
+        the battery is not yet rubble (every bastion_tel structure dead)."""
+        if self.defeated:
+            return False
+        return any(t["loaded"] and t["reload_left"] <= 0.0
+                   for t in self._oniks_tubes)
+
+    # ----------------------------------------------------- Oniks salvo battery
+
+    def _build_oniks_battery(self, n: int) -> None:
+        """N Oniks TELs side by side at BASE_POS, each with 2 launch tubes
+        (port + starboard canister mouths). Sets _oniks_launcher_positions and
+        _oniks_tubes; the starting magazine (_oniks_ammo) loads as many tubes
+        as it can, the remainder is the reload reserve."""
+        base = np.array(BASE_POS, dtype=np.float64)
+        star = np.asarray(CANISTER_MOUTH_OFFSET, dtype=np.float64)
+        port = np.array([-star[0], star[1], star[2]])   # mirror across the hull
+        n = max(1, int(n))
+        self._oniks_launcher_positions = []
+        self._oniks_tubes = []
+        for i in range(n):
+            dx = (i - (n - 1) * 0.5) * ONIKS_LAUNCHER_SPACING_M
+            lpos = base + np.array([dx, 0.0, 0.0])
+            self._oniks_launcher_positions.append(lpos)
+            for mouth in (star, port):
+                self._oniks_tubes.append(
+                    {"pos": lpos + mouth, "loaded": False, "reload_left": 0.0})
+        cap = (self._oniks_ammo if self._oniks_ammo is not None
+               else len(self._oniks_tubes))
+        for i, t in enumerate(self._oniks_tubes):
+            t["loaded"] = i < cap
+        self._oniks_tube_reload_s = float(self._oniks_mag_reload_s)
+
+    def launch(self, profile, target_point, waypoints=(), weapon_id="oniks"):
+        """Fire the next READY Bastion tube (salvo: no firerate gate while tubes
+        are loaded), either an Oniks or - when selected (B) - the scarce
+        hypersonic Zircon (its own ammo pool). The fired tube reloads on its own
+        timer. Returns the Missile, or None when no tube is ready / Zircon dry."""
+        if self.defeated:
+            return None
+        if weapon_id == "zircon":
+            if self._zircon_ammo is None or self._zircon_ammo <= 0:
+                return None
+            weapon = ZIRCON
+        else:
+            weapon = ONIKS
+        tube = next((t for t in self._oniks_tubes
+                     if t["loaded"] and t["reload_left"] <= 0.0), None)
+        if tube is None:
+            return None
+        pos = tube["pos"]
+        tp = np.asarray(target_point, dtype=np.float64)
+        fx, fz = waypoints[0] if len(waypoints) else (tp[0], tp[2])
+        heading = float(np.arctan2(fx - pos[0], fz - pos[2]))
+        m = Missile(weapon, pos.copy(), heading, profile, tp,
+                    waypoints=waypoints, salvo=self.oniks_fired)
+        self.oniks_fired += 1
+        self.missiles.append(m)
+        tube["loaded"] = False
+        tube["reload_left"] = self._oniks_tube_reload_s
+        if weapon_id == "zircon":
+            self._zircon_ammo -= 1
+        elif self._oniks_ammo is not None:
+            self._oniks_ammo -= 1
+            # Pool empty: run the magazine refill (renewable ammo, preserved
+            # from the single-launcher mechanic). The base step restores
+            # _oniks_ammo to _oniks_mag_cap when the timer expires; the tubes
+            # then reload from it.
+            if self._oniks_ammo <= 0 and self._oniks_mag_cap is not None:
+                self._oniks_ammo = 0
+                self._oniks_mag_reload_left = self._oniks_mag_reload_s
+        return m
+
+    def _step_oniks_tubes(self, dt: float) -> None:
+        """Per-tube reload: a fired tube re-cocks over _oniks_tube_reload_s,
+        then pulls a round from the magazine reserve (rounds beyond the
+        currently-loaded tubes). A re-cocked-but-empty tube also reloads the
+        moment the magazine refills, so renewable ammo keeps feeding the
+        battery (mirrors the single-launcher refill)."""
+        for t in self._oniks_tubes:
+            if t["reload_left"] > 0.0:
+                t["reload_left"] = max(0.0, t["reload_left"] - dt)
+            if not t["loaded"] and t["reload_left"] <= 0.0:
+                loaded = sum(1 for u in self._oniks_tubes if u["loaded"])
+                if (self._oniks_ammo or 0) - loaded > 0:
+                    t["loaded"] = True
+
+    # ----------------------------------------------------- S-300 salvo battery
+
+    def _build_s300_battery(self, n: int) -> None:
+        """N S-300 TELs side by side at the SAM site, each with the erected
+        4-tube block. Sets _s300_launcher_positions and _s300_tubes; the
+        48N6/40N6 pools (sam_ammo / sam_ammo_40n6) are shared across all tubes,
+        and each tube re-cocks on its own timer (salvo: no firerate gate)."""
+        base = np.asarray(SAM_TEL_POS, dtype=np.float64)
+        mouths = [np.asarray(o, dtype=np.float64) for o in SAM_MOUTH_OFFSETS]
+        n = max(1, int(n))
+        self._s300_launcher_positions = []
+        self._s300_tubes = []
+        for i in range(n):
+            dx = (i - (n - 1) * 0.5) * S300_LAUNCHER_SPACING_M
+            lpos = base + np.array([dx, 0.0, 0.0])
+            self._s300_launcher_positions.append(lpos)
+            for mouth in mouths:
+                self._s300_tubes.append({"pos": lpos + mouth,
+                                         "reload_left": 0.0})
+        self._s300_tube_reload_s = float(S300_TEL.reload_s)
+        # The battery pool is the full configured magazine, not the legacy
+        # 4-tube block (_arm_magazines capped sam_ammo at S300_TEL.ammo=4 for a
+        # single launcher; a multi-launcher battery needs the whole pool).
+        if self._s300_48n6_mag_cap is not None:
+            self.sam_ammo = self._s300_48n6_mag_cap
+        if self._s300_40n6_mag_cap is not None:
+            self.sam_ammo_40n6 = self._s300_40n6_mag_cap
+
+    @property
+    def sam_launcher_armed(self) -> bool:
+        """48N6 salvo gate: a round in the pool, no magazine refill pending,
+        and at least one S-300 tube re-cocked."""
+        if self.sam_ammo <= 0:
+            return False
+        if self._s300_48n6_mag_reload_left > 0.0:
+            return False
+        return any(t["reload_left"] <= 0.0 for t in self._s300_tubes)
+
+    @property
+    def sam_40n6_launcher_armed(self) -> bool:
+        """40N6 salvo gate: a 40N6 round in the pool, no refill pending, and a
+        tube re-cocked."""
+        if self.sam_ammo_40n6 <= 0:
+            return False
+        if self._s300_40n6_mag_reload_left > 0.0:
+            return False
+        return any(t["reload_left"] <= 0.0 for t in self._s300_tubes)
+
+    def launch_sam(self, aircraft_id, round_id: str = "48n6"):
+        """Salvo S-300 launch: fire the selected round from the next READY tube
+        (no firerate gate while tubes are loaded); that tube then reloads on its
+        own timer. 48N6/40N6 draw from their own pools. Returns the SamMissile,
+        or None (cold / empty / invalid track / out of envelope / no ready tube)."""
+        if round_id == "40n6":
+            if not self.sam_40n6_launcher_armed:
+                return None
+            weapon_def = N40N6
+        else:
+            if not self.sam_launcher_armed:
+                return None
+            weapon_def = S300
+        track = self.contacts.tracks.get(aircraft_id)
+        if track is None or not track.get("is_air"):
+            return None
+        if round_id == "40n6" and \
+                float(track["pos"][1]) < weapon_def.min_intercept_alt:
+            return None                       # 40N6 refuses sub-4 km targets
+        target = self._find_air_entity(aircraft_id)
+        if target is None:
+            return None
+        tube = next((t for t in self._s300_tubes if t["reload_left"] <= 0.0),
+                    None)
+        if tube is None:
+            return None
+        m = SamMissile(weapon_def, tube["pos"].copy(), target,
+                       contact_estimate_fn=self._contact_estimate(aircraft_id))
+        self.missiles.append(m)
+        tube["reload_left"] = self._s300_tube_reload_s
+        if round_id == "40n6":
+            self.sam_ammo_40n6 -= 1
+            if self.sam_ammo_40n6 <= 0 and self._s300_40n6_mag_cap is not None:
+                self.sam_ammo_40n6 = 0
+                self._s300_40n6_mag_reload_left = self._s300_mag_reload_s
+        else:
+            self.sam_ammo -= 1
+            if self.sam_ammo <= 0 and self._s300_48n6_mag_cap is not None:
+                self.sam_ammo = 0
+                self._s300_48n6_mag_reload_left = self._s300_mag_reload_s
+        return m
+
+    def _step_s300_tubes(self, dt: float) -> None:
+        """Per-tube S-300 reload: each fired tube re-cocks over its own timer."""
+        for t in self._s300_tubes:
+            if t["reload_left"] > 0.0:
+                t["reload_left"] = max(0.0, t["reload_left"] - dt)
 
     def _update_strike_contacts(self, dt: float) -> None:
-        """Feed live hostile strike missiles to the gated board as air
-        entities (sim/strike.py carries is_air/radar_size/aircraft_id).
-        Rounds that died this step stay in the feed until the board drops
-        their track — mirroring how sunk ships linger in self.ships."""
+        """Feed hostile rounds to the player picture. Two channels:
+
+        * Launch-warning rounds (enemy SM-2, AIM-9X — ``launch_warning=True``)
+          are seen the INSTANT they fire: their track is injected straight into
+          the picture, bypassing the radar gate (an RWR / IR launch cue).
+        * Everything else (Tomahawk/JASSM/HARM) stays radar-gated via the board,
+          so the player only sees them once the radar physically detects them.
+
+        Rounds that died this step linger one refresh (gated) or are dropped
+        immediately (warning cue) — the threat is gone, so the cue clears."""
         for m in self.missiles:
             if m.alive and getattr(m, "is_hostile", False):
                 self._strike_board[m.aircraft_id] = m
         if not self._strike_board:
             return
-        self.contacts.update(list(self._strike_board.values()),
-                             dt, self.sim_time)
+        gated = []
+        for cid, m in self._strike_board.items():
+            if getattr(m, "launch_warning", False):
+                if m.alive:                       # instant launch cue (no gate)
+                    self.contacts.tracks[cid] = dict(
+                        pos=np.asarray(m.pos, dtype=np.float64).copy(),
+                        vel=np.asarray(m.velocity(), dtype=np.float64).copy(),
+                        age=0.0, t_next=self.sim_time, is_air=True)
+                else:
+                    self.contacts.tracks.pop(cid, None)   # round gone — clear
+            else:
+                gated.append(m)                   # radar-gated (Tomahawk/JASSM)
+        if gated:
+            self.contacts.update(gated, dt, self.sim_time)
         self._strike_board = {
             cid: m for cid, m in self._strike_board.items()
             if m.alive or cid in self.contacts.tracks}
@@ -1376,6 +1653,8 @@ class CombatWorld(WorldState):
         the strike rounds and the enemy air feed the player picture and
         the recon sensors run."""
         super().step(dt)
+        self._step_oniks_tubes(dt)        # per-tube Oniks salvo reload
+        self._step_s300_tubes(dt)         # per-tube S-300 salvo reload
         self._step_drones(dt)
         self._step_enemy_air(dt)
         self.defense.step(self, dt)
@@ -1397,8 +1676,12 @@ class CombatWorld(WorldState):
         # the sweep and ends the battle (the layer is a shield, not a wall;
         # verified both ways in tests/test_phase6_e2e.py).
         self.pantsir_defense.step(self, dt)
+        # Enemy land-attack rounds demolish the player base, but interceptors
+        # flagged is_hostile (enemy SM-2/SM-6 = SamMissile) must NOT score a base
+        # kill just because they cross a TEL's OBB (F3 fix) - exclude them.
         apply_missile_hits_structures(
-            [m for m in self.missiles if getattr(m, "is_hostile", False)],
+            [m for m in self.missiles if getattr(m, "is_hostile", False)
+             and not isinstance(m, SamMissile)],
             self.structures, self.events)
         # The mirror sweep: only PLAYER cruise missiles (sim.missile
         # Missile — the Oniks; never hostile by construction) demolish

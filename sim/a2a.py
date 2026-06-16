@@ -204,6 +204,9 @@ class IrMissile:
     # The RWR LOCK gate checks this flag; False = the missile is invisible
     # to passive-warning systems (spec §5.1: "IR seekers are passive").
     rwr_generates_lock: bool = False
+    # Phase 8: the player sees an AIM-9X the instant it is fired (IR launch
+    # flash / MAWS cue), unlike the radar-gated Tomahawk.
+    launch_warning: bool = True
 
     def __init__(
         self,

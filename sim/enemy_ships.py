@@ -64,6 +64,8 @@ _SPY1_RANGES = {
 _SM2_AMMO_DEFAULT  = 24
 _CIWS_AMMO_DEFAULT = 1500     # rounds; CIWS is a gun, not missiles
 _SM2_RELOAD_S      = 3.0      # seconds between SM-2 launches (fire-control limit)
+_SM6_AMMO_DEFAULT  = 6        # long-range SM-6 area-air rounds per destroyer
+_SM6_RELOAD_S      = 6.0      # seconds between SM-6 launches (separate channel)
 # Phase 3 land-attack magazine: 8 of the 90 Mk 41 cells loaded with TLAM —
 # a typical mixed strike/air-defense loadout for a Burke on station (the
 # rest of the magazine is the 24 SM-2s above plus unmodeled VLA/ESSM).
@@ -178,6 +180,11 @@ class Destroyer(Ship):
         # down from it each time the integration layer fires a round.
         self.sm2_reload_s    = _SM2_RELOAD_S
         self.sm2_reload_timer = 0.0   # > 0 means the fire-control channel is busy
+        # SM-6: separate long-range channel (240 km) — reaches the recon drone
+        # and high Oniks the 150 km SM-2 cannot.
+        self.sm6_ammo        = _SM6_AMMO_DEFAULT
+        self.sm6_reload_s    = _SM6_RELOAD_S
+        self.sm6_reload_timer = 0.0
 
     # -------------------------------------------------------------------------
     # Navigation helpers
@@ -215,6 +222,8 @@ class Destroyer(Ship):
         # --- SM-2 reload timer (fire-control channel) -----------------------
         if self.sm2_reload_timer > 0.0:
             self.sm2_reload_timer = max(0.0, self.sm2_reload_timer - dt)
+        if self.sm6_reload_timer > 0.0:
+            self.sm6_reload_timer = max(0.0, self.sm6_reload_timer - dt)
 
         # --- damage states (verbatim from Ship.update, early-returns removed
         #     so the radar sync at the bottom always runs) -------------------

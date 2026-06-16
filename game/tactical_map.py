@@ -121,6 +121,7 @@ MAP_HINT = ("LMB target/missile  RMB waypoint  X clear  SPACE launch  "
 # Task RTG: refusal flash when a selected round can no longer be redirected.
 COMMITTED_HINT = "COMMITTED"
 SAM_NO_WAYPOINTS_HINT = "S-300: NO WAYPOINTS"
+ONIKS_AIR_HINT = "ONIKS HITS SHIPS - TAB TO S-300 FOR AIR"
 
 # --- Terrain colorize ramps (uint8 RGB endpoints) ------------------------------
 
@@ -585,6 +586,14 @@ class TacticalMap:
         elif air:
             sandbox.target_point = None     # empty sky: nothing to shoot
         else:
+            # Oniks (anti-ship): a click with no surface contact is a ground
+            # aim point. But if the player clicked an AIR contact (e.g. an
+            # inbound SM-2), they meant to engage it — the Oniks can't, so cue
+            # the S-300 instead of silently aiming at the sea below it.
+            if pick_contact(self.view, world.contacts, world.sim_time, pos,
+                            air_only=True) is not None:
+                sandbox.show_hint(ONIKS_AIR_HINT)
+                return
             sandbox.target_point = ground_aim_point(
                 self.view.screen_to_world(pos))
 

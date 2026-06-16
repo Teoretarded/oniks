@@ -9,6 +9,8 @@ The test now asserts ship count and type rather than exact IDs from the old
 constant (updated to seeded-fleet truth).
 """
 
+import numpy as np
+
 from sim.enemy_ships import Destroyer
 from world.combat import (COMBAT_SITES, PLAYER_RADAR_RANGES,
                           RADAR_STATION_XZ, CombatWorld)
@@ -70,6 +72,23 @@ def test_contact_board_is_radar_gated():
     assert cw.radar_station.ranges == PLAYER_RADAR_RANGES
     # the station stands ON the terrain (not floating / buried)
     assert cw.radar_station.pos[1] == terrain_height_scalar(*RADAR_STATION_XZ)
+
+
+def test_dead_missile_tracks_are_pruned():
+    """Regression: the commander's picture.missile_tracks dict must not grow
+    unbounded over a long match. prune_missile_tracks is wired into the picture
+    feed, so a track with no live missile that was last seen > 30 s ago is
+    dropped (a still-recent dead track lingers, mirroring live_missile_tracks'
+    30 s age window)."""
+    cw = CombatWorld(DEFAULT_CONFIG)
+    pic = cw.commander.picture
+    pic.update_missile_track("hostile_stale", np.zeros(3), np.zeros(3),
+                             sim_time=0.0)
+    pic.update_missile_track("hostile_recent", np.zeros(3), np.zeros(3),
+                             sim_time=95.0)
+    cw._feed_enemy_picture(0.25, now=100.0)   # 100 s in, no live player missile
+    assert "hostile_stale" not in pic.missile_tracks   # 100 s old -> pruned
+    assert "hostile_recent" in pic.missile_tracks       # 5 s old -> kept
 
 
 def test_picture_stays_empty_and_s300_has_no_targets():

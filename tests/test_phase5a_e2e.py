@@ -42,7 +42,7 @@ from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_REARMING, FS_RTB,
                            AirBase, Awacs, Carrier, Fighter)
 from sim.enemy_defense import EnemyDefenseController, TRACK_FORM_S
 from sim.missile import PH_CRUISE, Missile
-from sim.arsenal import ONIKS
+from sim.arsenal import ONIKS, SM2
 from sim.sam import SamMissile
 from sim.ships import (BURN_TIME, ST_ALIVE, ST_BURNING, ST_SINKING)
 from world.combat import (AIRFIELD_XZ, CAP_TARGET_AIRBORNE,
@@ -373,7 +373,10 @@ def test_awacs_cue_forms_track_own_radar_silent():
         w.sim_time += DT
         d.update(DT)
         ctrl.step(w, DT)
-    sams = [m for m in w.missiles if isinstance(m, SamMissile)]
+    # SM-2 channel only (the SM-6 area channel may co-fire on the same cue;
+    # this test pins the SM-2 datalink seam).
+    sams = [m for m in w.missiles
+            if isinstance(m, SamMissile) and m.weapon is SM2]
     assert len(sams) == 1                       # engaged on the cue alone
     # Terminal seam: illumination is the OWN ship, not the cue source.
     ix, iy, iz = sams[0].illuminator_pos_fn()
@@ -461,6 +464,7 @@ def test_real_oniks_first_hit_on_the_carrier():
     w = CombatWorld()
     for d in w.ships:                           # disarm the escort screen
         d.sm2_ammo = 0
+        d.sm6_ammo = 0                          # incl. the SM-6 area channel
         d.ciws_ammo = 0
     c = w.carrier
     target = c.pos.copy()

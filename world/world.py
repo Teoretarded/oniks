@@ -26,7 +26,8 @@ import numpy as np
 from models import bastion
 from models import s300 as s300_model
 from sim.aircraft import AC_FALLING, AC_GONE, Aircraft
-from sim.arsenal import BASTION, ONIKS, S300, S300_TEL, N40N6, N40N6_AMMO, N40N6_TEL
+from sim.arsenal import (BASTION, ONIKS, S300, S300_TEL, N40N6, N40N6_AMMO,
+                         N40N6_TEL, WEAPONS)
 from sim.contacts import ContactBoard
 from sim.damage import apply_missile_hits
 from sim.missile import LAUNCH_PHASES, Missile
@@ -322,10 +323,11 @@ class WorldState:
 
     # ---------------------------------------------------------------- launch
 
-    def launch(self, profile: str, target_point, waypoints=()):
-        """Fire an Oniks from the base TEL at ``target_point`` (float64 (3,),
-        sea level) via optional (x, z) ``waypoints``. Returns the Missile, or
-        None while the launcher is reloading."""
+    def launch(self, profile: str, target_point, waypoints=(),
+               weapon_id="oniks"):
+        """Fire a Bastion round (Oniks or Zircon) from the base TEL at
+        ``target_point`` (float64 (3,), sea level) via optional (x, z)
+        ``waypoints``. Returns the Missile, or None while reloading."""
         if not self.launcher_armed:
             return None
         base = np.array(BASE_POS, dtype=np.float64)
@@ -333,8 +335,8 @@ class WorldState:
         tp = np.asarray(target_point, dtype=np.float64)
         fx, fz = waypoints[0] if len(waypoints) else (tp[0], tp[2])
         heading = float(np.arctan2(fx - pos[0], fz - pos[2]))
-        m = Missile(ONIKS, pos, heading, profile, tp, waypoints=waypoints,
-                    salvo=self.oniks_fired)
+        m = Missile(WEAPONS.get(weapon_id, ONIKS), pos, heading, profile, tp,
+                    waypoints=waypoints, salvo=self.oniks_fired)
         self.oniks_fired += 1
         self.missiles.append(m)
         self.reload_left = BASTION.reload_s
@@ -415,8 +417,11 @@ class WorldState:
             weapon_def = S300
             tube = S300_TEL.ammo - self.sam_ammo
 
-        # Guard against tube index going out of range.
-        tube = min(tube, len(SAM_MOUTH_OFFSETS) - 1)
+        # Guard the tube index on BOTH sides: a refilled magazine (mag_cap can
+        # exceed the 4-tube block) drives ``S300_TEL.ammo - sam_ammo`` negative
+        # past -len, which IndexErrors on the canister-offset tuple. The tube
+        # only picks a cosmetic mouth offset, so clamping is safe.
+        tube = max(0, min(tube, len(SAM_MOUTH_OFFSETS) - 1))
         pos = SAM_TEL_POS + SAM_MOUTH_OFFSETS[tube]
 
         # Active seeker (40N6) vs SARH (48N6 in sandbox context):
