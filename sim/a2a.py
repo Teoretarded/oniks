@@ -207,6 +207,10 @@ class IrMissile:
     # Phase 8: the player sees an AIM-9X the instant it is fired (IR launch
     # flash / MAWS cue), unlike the radar-gated Tomahawk.
     launch_warning: bool = True
+    # M1: weapon classification for the contact-board ``kind`` stamp (the
+    # threat strip / intel panel read it). IrMissile carries no WeaponDef, so
+    # it names itself here — mirrors StrikeMissile/SamMissile's weapon.weapon_id.
+    weapon_id: str = "aim9x"
 
     def __init__(
         self,

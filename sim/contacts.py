@@ -27,6 +27,25 @@ DETECT_DELAY_S = 2.0      # continuous visibility before a NEW track forms
 TRACK_DROP_S = 90.0       # unseen coasting age at which a track drops
 
 
+def _size_of(ent):
+    """Radar size class for the gate AND the track stamp: an explicit
+    ``radar_size`` (strike missiles -> 'missile'), else air -> 'fighter',
+    surface -> 'ship'. Same provenance the detection gate already uses."""
+    return getattr(ent, "radar_size",
+                   "fighter" if getattr(ent, "is_air", False) else "ship")
+
+
+def _kind_of(ent):
+    """Weapon classification for the track stamp: the weapon_id of a round
+    (Tomahawk/SM-2/HARM/AIM-9X/...), or None for a platform (ship/aircraft)
+    that carries no weapon. Reads the round's own def (``weapon.weapon_id``) or
+    a self-named ``weapon_id`` (IrMissile has no WeaponDef) — never truth pos."""
+    w = getattr(ent, "weapon", None)
+    if w is not None:
+        return getattr(w, "weapon_id", None)
+    return getattr(ent, "weapon_id", None)
+
+
 class ContactBoard:
     """contact_id -> dict(pos, vel, age, t_next, is_air), per-range refresh."""
 
@@ -58,10 +77,7 @@ class ContactBoard:
             # Size class for the radar gate: entities may carry an explicit
             # radar_size (strike missiles: "missile" — sim/strike.py), else
             # air entities rate "fighter" and surface entities "ship".
-            size = getattr(ent, "radar_size",
-                           "fighter" if getattr(ent, "is_air", False)
-                           else "ship")
-            seen = bool(self.visible_fn(ent.pos, size))
+            seen = bool(self.visible_fn(ent.pos, _size_of(ent)))
             if seen and st["since"] is None:
                 st["since"] = sim_time
             elif not seen:
@@ -95,7 +111,7 @@ class ContactBoard:
                 self.tracks[cid] = dict(
                     pos=ent.pos.copy(), vel=ent.velocity().copy(),
                     age=0.0, t_next=sim_time + self._period(ent.pos, is_air),
-                    is_air=is_air)
+                    is_air=is_air, kind=_kind_of(ent), size=_size_of(ent))
             elif sim_time >= track["t_next"]:
                 if dead:                          # drops after one refresh cycle
                     self._drop(cid)

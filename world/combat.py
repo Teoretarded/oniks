@@ -1630,7 +1630,11 @@ class CombatWorld(WorldState):
                     self.contacts.tracks[cid] = dict(
                         pos=np.asarray(m.pos, dtype=np.float64).copy(),
                         vel=np.asarray(m.velocity(), dtype=np.float64).copy(),
-                        age=0.0, t_next=self.sim_time, is_air=True)
+                        age=0.0, t_next=self.sim_time, is_air=True,
+                        kind=(getattr(getattr(m, "weapon", None), "weapon_id",
+                                      None)
+                              or getattr(m, "weapon_id", None)),
+                        size=getattr(m, "radar_size", "missile"))
                 else:
                     self.contacts.tracks.pop(cid, None)   # round gone — clear
             else:
