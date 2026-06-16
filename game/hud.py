@@ -19,12 +19,16 @@ camera-relative position), exactly like the scene pass.
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import numpy as np
 
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.keybinds import ACTIONS
-from game.states import (ACCENT_DIM, BG0, MUTED, TEXT_COL, draw_header_rule,
-                         draw_panel)
+from game.states import (ACCENT, ACCENT_DIM, BG0, DANGER, MUTED, OK_COL,
+                         TEXT_COL, WARN, draw_header_rule, draw_panel)
+from game.states import gauge_bar as _gauge_bar
+from game.states import mini_compass as _mini_compass
 from sim.arsenal import BASTION, N40N6, N40N6_AMMO, ONIKS, S300, S300_TEL
 from sim.physics import mach
 from sim.recon import RWR_LOCK
@@ -83,6 +87,195 @@ BRACKET_MAX_PX = 220.0      # px, never engulfs the screen
 BRACKET_CORNER_FRAC = 0.38  # corner leg length as a fraction of the half-size
 BRACKET_LINE_W = 2.0        # px stroke
 BRACKET_TEXT_GAP = 6.0      # px between the bracket and the range text
+
+# --- Threat-warning strip + contact-intel panel (M1) ---------------------------
+#
+# FOG OF WAR / NO CHEAT (load-bearing): both pure helpers below read ONLY the
+# sensor-gated contact picture (world.contacts.tracks + estimated_pos). They
+# NEVER touch world.missiles, a real entity .pos/.alive, or any truth — an
+# undetected hostile (in flight but not yet on the board) does not appear, and
+# CLASS/kind come from the track's is_air + size + kind stamps (M1-F2), never
+# the real entity. They are deterministic (no RNG) and GL-free; the DRAW
+# methods that consume them compose the M1-F1 widget primitives.
+
+TTI_CRIT_S = 20.0           # time-to-impact below this reads DANGER (red)
+TTI_WARN_S = 60.0           # ... below this reads WARN (amber); else MUTED
+CLOSING_EPS = 1.0           # m/s: a track closing slower than this has no TTI
+STRIP_W = 180               # px, threat-strip column width
+
+# Sensor-confidence ladder for the intel panel (track age in seconds):
+AGE_IDENTIFIED_S = 5.0      # fresher than this -> IDENTIFIED (a live fix)
+AGE_CLASSIFIED_S = 20.0     # fresher than this -> CLASSIFIED; else UNKNOWN
+CONFIDENCE_FADE_S = 25.0    # linear confidence fade: 1.0 fresh -> 0.0 here on
+#                             (so a brand-new fix reads >= 0.8, the panel's
+#                             "high confidence" band, well before AGE_CLASSIFIED)
+
+# Player weapons NEVER appear on the threat strip — this allowlist holds only
+# the enemy-launched rounds the player must react to (Tomahawk/JASSM land-attack,
+# HARM anti-radiation, SM-2/SM-6 area SAMs, AIM-9X fighter A2A, plus Kalibr for
+# forward-compatibility). The player's own kinds (oniks/zircon/s300/40n6/
+# pantsir_57e6) are deliberately absent, so a friendly round can never light up
+# the strip even if a future code path stamps one onto the contact board.
+HOSTILE_KINDS = frozenset({"sm2", "sm6", "tomahawk", "jassm", "harm",
+                           "aim9x", "kalibr"})
+
+# Severity token -> palette color (no hard-coded RGB at the strip call site;
+# these are the states.py palette tokens, the same ones SEMANTIC_COLORS routes
+# INBOUND/DESTROYED -> DANGER and TRANSIENT -> WARN through).
+SEVERITY_COLORS = {"DANGER": DANGER, "WARN": WARN, "MUTED": MUTED}
+
+# A single fog-pierced inbound row: sid (track id), kind (weapon_id stamp),
+# brg (compass deg from the friendly asset to the estimate), rng (ground-plane
+# metres), tti (seconds, or None when not closing) and severity (a SEMANTIC
+# state token: DANGER / WARN / MUTED).
+ThreatRow = namedtuple("ThreatRow", "sid kind brg rng tti severity")
+
+STRIP_MARGIN = 16           # px, strip inset from the right/top screen edges
+STRIP_ROW_H = 22            # px, threat-strip row pitch
+STRIP_PULSE_HZ = 2.0        # critical-row pulse frequency (sin breathing)
+STRIP_PULSE_LO = 0.55       # min alpha of the critical-row pulse
+STRIP_PULSE_HI = 1.0        # max alpha of the critical-row pulse
+
+# Docked contact-intel panel layout (composes draw_panel + gauge_bar + compass).
+INTEL_W = 240               # px, intel-panel width
+INTEL_PAD = 12              # px, inner padding
+INTEL_LINE_H = 20           # px, label/value row pitch
+INTEL_VALUE_X = 92          # px, label -> value column offset
+INTEL_COMPASS_R = 22.0      # px, bearing-rose radius
+INTEL_GAUGE_H = 8           # px, confidence gauge height
+
+
+def _ground_range(origin_xz, est) -> float:
+    """Ground-plane (xz) distance from a friendly (x, z) asset to a 3D
+    estimate ``est`` (x, y, z) — altitude is ignored (a TTI/threat is judged
+    on the map plane)."""
+    return float(np.hypot(est[0] - origin_xz[0], est[2] - origin_xz[1]))
+
+
+def _compass_bearing(dx: float, dz: float) -> int:
+    """Compass heading (deg, 0 = +z = North, clockwise) of the (dx, dz)
+    ground vector, as an int in [0, 360)."""
+    return int(round(np.degrees(np.arctan2(dx, dz)))) % 360
+
+
+def _threat_severity(tti) -> str:
+    """SEMANTIC state token for a time-to-impact: DANGER under TTI_CRIT_S,
+    WARN under TTI_WARN_S, else MUTED (a None tti — not closing — is MUTED)."""
+    if tti is None:
+        return "MUTED"
+    if tti < TTI_CRIT_S:
+        return "DANGER"
+    if tti < TTI_WARN_S:
+        return "WARN"
+    return "MUTED"
+
+
+def threat_rows(world, friendly_xz, now) -> list:
+    """The fog-pierced inbound board for the threat-warning strip (M1) — pure,
+    GL-free, deterministic. Reads ONLY the gated contact picture
+    (world.contacts.tracks + estimated_pos); NEVER world.missiles or truth.
+
+    Keeps only air tracks whose weapon ``kind`` is in HOSTILE_KINDS (enemy
+    rounds — friendly kinds and ship/fighter PLATFORM tracks are excluded), and
+    for each computes ground-plane range + compass bearing from ``friendly_xz``
+    to the dead-reckoned estimate, the closing speed (the component of the
+    track velocity toward the asset) and the time-to-impact (rng / closing, or
+    None when not closing). Sorted by (tti is None, tti, sid): soonest impact
+    first, non-closing tracks last, ``sid`` as the deterministic tiebreak.
+    """
+    rows = []
+    board = world.contacts
+    for sid, track in board.tracks.items():
+        if not (track.get("is_air") and track.get("kind") in HOSTILE_KINDS):
+            continue
+        est = board.estimated_pos(sid, now)
+        ox, oz = float(friendly_xz[0]), float(friendly_xz[1])
+        dx, dz = est[0] - ox, est[2] - oz          # asset -> track (for bearing)
+        rng = float(np.hypot(dx, dz))
+        brg = _compass_bearing(float(dx), float(dz))
+        vel = track["vel"]
+        # Closing speed = velocity projected onto the unit vector FROM the
+        # track TOWARD the asset (positive => inbound). Degenerate range (track
+        # on top of the asset) counts as closing 0 -> no TTI.
+        if rng > CLOSING_EPS:
+            ux, uz = -dx / rng, -dz / rng          # track -> asset, normalized
+            closing = float(vel[0]) * ux + float(vel[2]) * uz
+        else:
+            closing = 0.0
+        tti = rng / closing if closing > CLOSING_EPS else None
+        rows.append(ThreatRow(sid=sid, kind=track.get("kind"), brg=brg,
+                              rng=rng, tti=tti,
+                              severity=_threat_severity(tti)))
+    rows.sort(key=lambda r: (r.tti is None, r.tti if r.tti is not None else 0.0,
+                             r.sid))
+    return rows
+
+
+def contact_intel(world, sid, origin_xz, now):
+    """The fog-of-war track inspector for the click-contact intel panel (M1) —
+    pure, GL-free, deterministic. None when ``sid`` is None or not on the board;
+    else a dict of sensor-DERIVED fields (never truth):
+
+      cls           'MISSILE' / 'AIR' / 'SURFACE', from size + is_air
+      id            'IDENTIFIED' / 'CLASSIFIED' / 'UNKNOWN', by track age
+      confidence    [0, 1] fading linearly with age (fresh >= 0.8)
+      dead_reckoned True once age >= AGE_CLASSIFIED_S (the fix is coasting)
+      brg, rng      compass bearing + ground-plane range from origin -> estimate
+      course        compass heading of the track velocity
+      speed         ground-plane speed (m/s)
+      alt           estimated altitude (m, the estimate's y)
+      kind, age     the raw track stamps (kind may be None for a platform)
+      source        coarse sensor provenance ('RADAR' for a fresh fix that is
+                    still being refreshed, 'COAST' once dead-reckoned) — derived
+                    from the track, not truth
+    """
+    if sid is None:
+        return None
+    board = world.contacts
+    track = board.tracks.get(sid)
+    if track is None:
+        return None
+    est = board.estimated_pos(sid, now)
+    age = float(track.get("age", 0.0))
+    size = track.get("size")
+    is_air = bool(track.get("is_air"))
+    if size == "missile":
+        cls = "MISSILE"
+    elif is_air:
+        cls = "AIR"
+    else:
+        cls = "SURFACE"
+    if age < AGE_IDENTIFIED_S:
+        ident = "IDENTIFIED"
+    elif age < AGE_CLASSIFIED_S:
+        ident = "CLASSIFIED"
+    else:
+        ident = "UNKNOWN"
+    confidence = max(0.0, 1.0 - age / CONFIDENCE_FADE_S)
+    dead_reckoned = age >= AGE_CLASSIFIED_S
+    ox, oz = float(origin_xz[0]), float(origin_xz[1])
+    dx, dz = est[0] - ox, est[2] - oz
+    rng = float(np.hypot(dx, dz))
+    brg = _compass_bearing(float(dx), float(dz))
+    vel = track["vel"]
+    speed = float(np.hypot(vel[0], vel[2]))
+    course = _compass_bearing(float(vel[0]), float(vel[2]))
+    return {
+        "cls": cls,
+        "id": ident,
+        "confidence": confidence,
+        "dead_reckoned": dead_reckoned,
+        "brg": brg,
+        "rng": rng,
+        "course": course,
+        "speed": speed,
+        "alt": float(est[1]),
+        "kind": track.get("kind"),
+        "age": age,
+        # A dead-reckoned track is no longer being painted by radar; before
+        # that it is a live fix. Coarse, sensor-derived — never reads truth.
+        "source": "COAST" if dead_reckoned else "RADAR",
+    }
 
 
 def radar_status_row(world):
@@ -310,6 +503,7 @@ class HUD:
             self._banner(w, h, DEFEAT_TEXT, DANGER_COL)
         elif getattr(sandbox.world, "victorious", False):
             self._banner(w, h, VICTORY_TEXT, ARMED_COL)
+        self._threat_strip(sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
         self._hint_flash(sandbox, w, h)
         self._corner_labels(sandbox, w, h)
         if sandbox.controls_overlay:
@@ -485,6 +679,91 @@ class HUD:
         draw_panel(self.text, x - DEFEAT_PAD_X, y - DEFEAT_PAD_Y,
                    tw + 2 * DEFEAT_PAD_X, lh + 2 * DEFEAT_PAD_Y, alpha=0.92)
         self.text.draw_text(x, y, text, color, HEADER_SIZE)
+
+    # ------------------------------------------ threat strip + intel panel
+
+    def _threat_strip(self, sandbox, friendly_xz, w: int, h: int) -> None:
+        """Right-edge inbound column from ``threat_rows`` (M1): one badge +
+        bearing/range line per hostile, soonest impact at the top, colored by
+        severity. Reads ONLY the gated picture (the pure helper enforces this);
+        an empty board draws nothing. The single most-critical row (top, DANGER)
+        breathes via a sim-clock sine so the eye snaps to it.
+
+        Queues into the shared TextRenderer (NO flush): the HUD's draw() and the
+        map's _chrome() both call it, then flush ONCE — calling flush here would
+        double-flush the map batch."""
+        rows = threat_rows(sandbox.world, friendly_xz,
+                           sandbox.world.sim_time)
+        if not rows:
+            return                          # empty board: no strip
+        x = w - STRIP_MARGIN - STRIP_W
+        y = STRIP_MARGIN
+        head = "INBOUND"
+        self.text.draw_text(x, y, head, ACCENT, SMALL_SIZE)
+        y += self.text.line_height(SMALL_SIZE) + 4
+        # Pulse the top critical row: a deterministic sim-clock sine (no RNG,
+        # no per-frame state) ramping STRIP_PULSE_LO..HI at STRIP_PULSE_HZ.
+        pulse = (STRIP_PULSE_LO + (STRIP_PULSE_HI - STRIP_PULSE_LO)
+                 * 0.5 * (1.0 + np.sin(sandbox.world.sim_time
+                                       * 2.0 * np.pi * STRIP_PULSE_HZ)))
+        for i, r in enumerate(rows):
+            col = SEVERITY_COLORS.get(r.severity, MUTED)
+            a = pulse if (i == 0 and r.severity == "DANGER") else 1.0
+            kind = (r.kind or "UNK").upper()
+            tti = f"{r.tti:.0f}s" if r.tti is not None else "--"
+            line = f"{kind}  {r.brg:03d}  {r.rng / 1e3:.0f}km  {tti}"
+            self.text.draw_text(x, y, line, (*col[:3], a))
+            y += STRIP_ROW_H
+
+    def _intel_panel(self, world, selected_contact, origin_xz, x, y) -> None:
+        """Docked contact-intel panel from ``contact_intel`` (M1): the
+        sensor-derived track inspector (CLASS / ID / course / a confidence
+        gauge / a bearing rose). Nothing when no contact is selected or the
+        track has dropped. Queues into the shared TextRenderer (NO flush)."""
+        intel = contact_intel(world, selected_contact, origin_xz,
+                              world.sim_time)
+        if intel is None:
+            return
+        # Fixed-height panel: header rule + the value rows + the confidence
+        # gauge, with a bearing rose docked on the right.
+        rows = [
+            ("CLASS", intel["cls"]),
+            ("ID", intel["id"]),
+            ("BRG", f"{intel['brg']:03d}"),
+            ("RNG", f"{intel['rng'] / 1e3:.1f} km"),
+            ("CRS", f"{intel['course']:03d}  {intel['speed']:.0f} m/s"),
+            ("ALT", f"{intel['alt']:,.0f} m"),
+            ("SRC", intel["source"]
+             + ("  DR" if intel["dead_reckoned"] else "")),
+        ]
+        head_h = self.text.line_height(HEADER_SIZE)
+        height = (INTEL_PAD * 2 + head_h + 4 + HEADER_GAP
+                  + len(rows) * INTEL_LINE_H + INTEL_GAUGE_H + 18)
+        draw_panel(self.text, x, y, INTEL_W, height, alpha=PANEL_ALPHA)
+        tx = x + INTEL_PAD
+        ty = y + INTEL_PAD
+        self.text.draw_text(tx, ty, "CONTACT", HEADER_COL, HEADER_SIZE)
+        # Bearing rose, top-right of the panel.
+        cx = x + INTEL_W - INTEL_PAD - INTEL_COMPASS_R
+        cy = ty + head_h * 0.5 + INTEL_COMPASS_R * 0.2
+        _mini_compass(self.text, cx, cy, INTEL_COMPASS_R, [intel["brg"]])
+        ty += head_h + 4
+        draw_header_rule(self.text, tx, ty, INTEL_W - 2 * INTEL_PAD)
+        ty += HEADER_GAP
+        # The estimate-class fields render in the faded contact idiom (a sensor
+        # GUESS reads dimmer than friendly truth — fog-of-war color contract);
+        # the ID/CLASS labels stay MUTED.
+        for label, value in rows:
+            self.text.draw_text(tx, ty, label, LABEL_COL)
+            self.text.draw_text(tx + INTEL_VALUE_X, ty, value, ACCENT_DIM)
+            ty += INTEL_LINE_H
+        # Confidence gauge: amber while a live fix, dimmer as it fades.
+        ty += 4
+        self.text.draw_text(tx, ty - 2, "CONF", LABEL_COL)
+        gauge_col = OK_COL if intel["confidence"] >= 0.8 else WARN
+        _gauge_bar(self.text, tx + INTEL_VALUE_X, ty,
+                   INTEL_W - 2 * INTEL_PAD - INTEL_VALUE_X, INTEL_GAUGE_H,
+                   intel["confidence"], gauge_col)
 
     # ----------------------------------------------- hints + corner labels
 

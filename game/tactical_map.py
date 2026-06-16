@@ -114,6 +114,8 @@ WAYPOINT_PX = 4.0              # waypoint diamond half-size
 TARGET_CROSS_PX = 7.0
 TRAIL_DOT_PX = 3.0
 HINT_MARGIN = 10               # px from the bottom edge (matches the HUD)
+INTEL_PANEL_X = 16             # px, docked contact-intel panel (top-left under
+INTEL_PANEL_Y = 96             #     the map title; M1 click-contact inspector)
 
 MAP_HINT = ("LMB target/missile  RMB waypoint  X clear  SPACE launch  "
             "TAB platform  WHEEL zoom  MMB/arrows pan  M close")
@@ -1113,6 +1115,17 @@ class TacticalMap:
                    f"BRG {brg:03d}  {np.hypot(dx, dz) / 1e3:6.1f} km")
         rw = self.text.text_width(readout)
         self.text.draw_text(w - rw - 14, hy - lh - 6, readout, HINT_COL)
+
+        # M1 fog-of-war surfaces, queued into THIS batch (the map flushes once
+        # at the end of draw() — never flush here, that would double-flush):
+        #  * the right-edge threat strip, TTI-origined on the player base;
+        #  * the docked contact-intel panel for the LMB-selected track.
+        hud = self.sandbox.hud
+        hud._threat_strip(self.sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
+        if self.selected_contact is not None:
+            hud._intel_panel(world, self.selected_contact,
+                             self._platform_origin(),
+                             INTEL_PANEL_X, INTEL_PANEL_Y)
 
     def _target_text(self) -> str:
         tp = self.sandbox.target_point
