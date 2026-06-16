@@ -32,4 +32,48 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
 - Pre-existing uncommitted working tree (28 tracked files +1251/−132, plus new
   `models/missiles.py` + test files matching the handoff) checkpointed as the
   baseline commit so milestone commits stay isolated (the flight recorder).
+  Baseline commit `ac697d2`.
+
+### M1-F1 Widget primitive library
+- `build:M1-F1` — IMPLEMENTER / opus — badge/gauge_bar/mini_compass/tab_strip/
+  scroll_list + SEMANTIC_COLORS + hud_widgets.py, TDD test_widgets.py — DONE
+  (25 tests, full suite exit 0, combat_setup left untouched). Commit `73e7bfd`.
+- `verify-spec:M1-F1` — SPEC REVIEW / opus — re-read spec 08 + diff, re-ran
+  targeted tests — REJECTED: missing the spec-mandated tab_strip refactor of
+  combat_setup + its regression. (Code unchanged otherwise compliant; no
+  weakened tests; no hard-coded RGB; purity confirmed.)
+- `review-quality:M1-F1` — CODE-QUALITY REVIEW / opus — APPROVED with 3 minor
+  nits (docstring 1px→1.5px, SEMANTIC_STATES parallel list, style).
+- `fix:M1-F1` — FIXER / opus — added tab_strip fixed-column mode (byte-identical
+  to the old inline loop, empirically verified), refactored combat_setup, added
+  regression test, derived SEMANTIC_STATES, fixed docstring — DONE (841 collected
+  exit 0). Commit `fa72af0`. Orchestrator re-verified targeted tests + diff.
+
+### M1-F2 track['kind']/track['size'] stamps
+- `build:M1-F2` — ORCHESTRATOR-IMPLEMENTED (lean; mechanical 2-stamp change),
+  TDD test_track_stamps.py — smoke gate caught an IrMissile `.weapon` crash,
+  fixed (guard + weapon_id fallback). Commit `cda32d3`.
+- `verify-spec+nocheat:M1-F2` — REVIEW / opus — fog verdict CLEAN (no truth
+  leak); REJECTED on a missing third stamp site (`_inject_elint_tracks`).
+- `fix:M1-F2` — ORCHESTRATOR — stamped the ELINT site via shared helpers +
+  ELINT-injection test. Commit `f2e5afd`. Smoke 70/70 re-verified.
+
+### M1-F3/F5 Threat-Warning strip + Click-contact intel panel
+- `build:M1-TaskA` — IMPLEMENTER / opus — threat_rows + contact_intel pure
+  helpers + _threat_strip/_intel_panel draw methods + 11 TDD tests — DONE
+  (857 passed, smoke 70/70). Commit `e401d67`.
+- `verify-spec+nocheat:M1-TaskA` — REVIEW / opus — line-by-line incl. draw
+  methods — APPROVED, fog-honest end-to-end, no truth leak, HOSTILE_KINDS sound.
+- `review-quality:M1-TaskA` — CODE-QUALITY / opus — APPROVED, no Critical/
+  Important; 4 minor cosmetic nits logged.
+
+### M1-F4 Tube/battery status panel
+- `build:M1-F4` — IMPLEMENTER / opus — tube_cells + _block cells row + EMPTY
+  color + 6 TDD tests — DONE (864 passed; smoke caught+fixed a badge signature
+  bug, then 70/70). Commit `c8d0d7e`. Orchestrator self-verified the diff
+  (own-force-only, _block backward-compatible).
+
+### M1 milestone gate (in progress)
+- Orchestrator running full suite + smoke + Oniks-duel/determinism bit-identical
+  checks; then dispatching a game-test agent + bug-hunt + no-cheat auditor fleet.
 

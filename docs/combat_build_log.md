@@ -676,3 +676,114 @@ workflows (no-cheat audit + code review + game-test) per the user's process.
   positive-clear gating); SM-6 fleet saturation measured BOUNDED (no runaway);
   CIWS flat-Pk roll left intact (see prior note) — flagged for a separate audit.
 - Final gate: full suite 815 green, smoke 70/70 exit 0.
+
+---
+
+# Overnight expansion (branch `feat/combat-expansion`) — 2026-06-16
+
+Autonomous Fable-Method build of the handoff bundle (`docs/research/handoff/`,
+6 milestones). Baseline at checkpoint `ac697d2`: smoke 70/70 exit 0, full suite
+exit 0 (~815 tests → 840 collected once M1-F1 tests land). Per-feature loop:
+implementer (opus) → spec-compliance review (opus, distrusts implementer) →
+code-quality review (opus) → fixer if needed. Agent ledger: `docs/overnight_run_log.md`.
+
+## Milestone 1 — Legibility Foundation
+
+### M1-F1 Widget primitive library (commits `73e7bfd`, `fa72af0`)
+- **Files:** `game/states.py` (+`badge`/`gauge_bar`/`mini_compass`/`tab_strip`/
+  `scroll_list` + `SEMANTIC_STATES`/`SEMANTIC_COLORS` beside the existing
+  `draw_panel`/`draw_header_rule`); NEW `game/hud_widgets.py` (alpha-0.55 HUD
+  variants delegating to states.py via `alpha=` — one source of truth);
+  `game/combat_setup.py` (inline tab loop → `tab_strip(...tab_w=...)` dedup);
+  NEW `tests/test_widgets.py`.
+- **Contracts added:** badge emits exactly 1 rect + 1 border + 1 text and
+  returns width; gauge_bar frac=0→no fill, frac=1→full width, clamps [0,1];
+  `SEMANTIC_COLORS` total over `SEMANTIC_STATES` (parametrized); mini_compass
+  radial tick lands on the 47° outer radius (≤2px); hud_widgets fill alpha 0.55;
+  tab_strip fixed-column mode byte-identical to combat_setup's old inline loop
+  (regression). 26 new tests.
+- **Fog-of-war color contract encoded:** ready/armed/friendly→OK_COL,
+  reload/transient→WARN, inbound/destroyed/terminal→DANGER, label→MUTED,
+  accent→ACCENT, **ESTIMATE→ACCENT_DIM** (sensor guesses read dimmer than
+  friendly truth). No hard-coded RGB at any call site (verified by review grep).
+- **Reviews:** code-quality APPROVED (3 minor nits). Spec-compliance REJECTED on
+  the missing tab_strip refactor (spec F1 contract). Fixer extracted the tabs
+  into a fixed-column `tab_strip` mode, proved byte-identical empirically
+  (`old.calls == new.calls` for active=0,1), added the regression test, derived
+  `SEMANTIC_STATES = tuple(SEMANTIC_COLORS)`, fixed the docstring. Re-verified by
+  orchestrator: targeted tests green, combat_setup diff is the clean one-call dedup.
+- **Gate:** `pytest -q` exit 0, 841 collected (840 + tab regression). Pure UI;
+  no sim/world change; no fog/determinism/physics surface touched.
+
+### M1-F2 track['kind']/track['size'] stamps (commits `cda32d3`, `f2e5afd`)
+- **Files:** `sim/contacts.py` (`_size_of`/`_kind_of` helpers; track creation
+  stamps `size`=radar class + `kind`=weapon_id; `_seen` refactored to `_size_of`);
+  `world/combat.py` (launch-warning channel + ELINT-fix channel both stamp);
+  `sim/a2a.py` (IrMissile self-names `weapon_id="aim9x"` — no WeaponDef);
+  NEW `tests/test_track_stamps.py`.
+- **Contracts:** ship→size='ship'/kind=None; air→'fighter'; strike→'missile'/
+  weapon_id; stamps additive (estimate + every existing key unchanged); ELINT
+  ship-track carries the stamps too. 5 tests.
+- **Bug caught by the smoke gate** (per-feature gate discipline working):
+  `IrMissile` (AIM-9X) has no `.weapon` → first stamp crashed smoke. Fixed by
+  guarding `.weapon` + a self-named `weapon_id` fallback. Smoke back to 70/70.
+- **No-cheat verdict (review):** CLEAN — `size`/`kind` are the radar/IR
+  classification axis (same provenance the detection gate already uses), NOT a
+  truth-position read; no new track-creation path; no fog bypass; determinism
+  intact (no RNG).
+- **Review finding fixed:** spec-review caught a THIRD track-creation site
+  (`_inject_elint_tracks`) missing the stamp — fixed via the shared helpers,
+  locked with an ELINT-injection test.
+- **Gate:** smoke 70/70 exit 0; stamp+gating+e2e regressions green.
+
+### M1-F3/F5 Threat-Warning strip + Click-contact intel panel (commit `e401d67`)
+- **Files:** `game/hud.py` (pure `threat_rows(world, friendly_xz, now)` →
+  `ThreatRow(sid,kind,brg,rng,tti,severity)`; pure `contact_intel(world, sid,
+  origin_xz, now)` → dict; `HUD._threat_strip` + `HUD._intel_panel` draw methods
+  composing the M1-F1 widgets); `game/tactical_map._chrome` wires both;
+  NEW `tests/test_threat_strip.py`, `tests/test_intel_panel.py` (11 tests).
+- **Contracts:** TTI sort ascending; severity DANGER<20s / WARN<60s / MUTED;
+  outbound→TTI None sorts last; only `is_air` + `HOSTILE_KINDS` tracks appear
+  (player kinds excluded — friendly rounds can't show); empty→[]; intel CLASS
+  from is_air+size, id ladder by age (IDENTIFIED<5s / CLASSIFIED<20s / UNKNOWN),
+  confidence fades, dead_reckoned at age≥20s, course=compass(vel); determinism.
+- **LOAD-BEARING fog test:** a hostile in `world.missiles` but absent from
+  `contacts.tracks` does NOT appear. PASSES.
+- **No-cheat verdict (review, line-by-line incl. draw methods):** FOG-HONEST
+  end-to-end — helpers AND `_threat_strip`/`_intel_panel` source only the gated
+  picture + friendly own-asset constants (BASE_POS); zero enemy-truth reads
+  (grep confirmed truth refs only in docstrings). TTI origin = player base
+  (friendly truth, allowed). Single-flush preserved (no flush in the methods).
+- **Reviews:** spec+no-cheat APPROVED; code-quality APPROVED (no Critical/
+  Important; minor nits logged: strip rows use draw_text not badge() pills, one
+  unnamed gauge gap, a label-color comment — cosmetic, deferred).
+- **Gate:** `pytest -q` 857 passed; smoke 70/70 exit 0.
+
+### M1-F4 Tube/battery status panel (commit `c8d0d7e`)
+- **Files:** `game/hud.py` (pure `tube_cells(world, platform)` → list of
+  `(label, state, frac)`; `_block` gained an optional `cells=` arg + a
+  `_tube_cells_row` that draws a badge per tube + an amber reload gauge;
+  `_bastion_block`/`_s300_block` wire it); `game/states.py` (+`EMPTY`→DISABLED
+  in SEMANTIC_COLORS); NEW `tests/test_tube_panel.py` (6 tests, vs a real
+  CombatWorld).
+- **Contracts:** fresh battery all READY (frac 1.0); mid-reload tube RELOADING
+  with frac strictly in (0,1) and others unaffected; empty magazine → all EMPTY;
+  S-300 cell count == tube count; SANDBOX (no _oniks_tubes) → [] (panel hidden);
+  determinism. Oniks state: reload_left>0→RELOADING, loaded→READY, else EMPTY;
+  S-300 READY when either 48N6/40N6 pool>0 (shared 5P85 tube).
+- **Own-force only:** reads ONLY world tube/ammo attrs (getattr-guarded); zero
+  contact/enemy/truth reads; green/amber/disabled idiom (never CONTACT_COL).
+  `_block(cells=None)` is byte-identical (SANDBOX + existing blocks unaffected).
+- **Bug caught by smoke:** first badge call had a bad signature → TypeError;
+  fixed to `badge(renderer,label,x,y,state)`; smoke green; screenshot verified
+  (TUBES row + READY badges inside the panel chrome).
+- **Known minor limit:** >5 tube cells could clip the 268px panel; current
+  configs have ≤4 (single Bastion=2 / S-300=4 TEL). Flagged for multi-launcher
+  configs (M5). Render placement: extended `_block` (backward-compatible).
+- **Gate:** `pytest -q` 864 passed; smoke 70/70 exit 0.
+
+### M1-F6 Toast/hint upgrade — DEFERRED (documented)
+- `toast_stack` primitive + a stacked transient-message queue is deferred:
+  the existing `sandbox.hint_text`/`HUD._hint_flash` one-liner works and the
+  stacked-toast upgrade is cosmetic polish. Flagged for a later pass / the
+  morning review. Not a blocker for the M1 legibility goal.
