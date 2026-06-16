@@ -117,6 +117,158 @@ def draw_header_rule(text, x, y, w) -> None:
     text.draw_lines([(x, y), (x + RULE_CAP, y)], (*ACCENT, 1.0), 2.0)
 
 
+# --- Widget primitive library (spec 08): the shared UI vocabulary ---------------
+#
+# Pure, GL-free draw helpers that every later COMBAT surface composes from.
+# They only touch the TextRenderer draw + measurement API (draw_text/draw_rect/
+# draw_lines/text_width/line_height), so a FakeText recorder unit-tests them
+# headless. Colors come ONLY from the palette tokens above — never a literal
+# RGB at a call site. The in-game (alpha 0.55) variants live in
+# game/hud_widgets.py and delegate straight back here via the ``alpha=`` param.
+
+# Semantic state -> palette token. Encodes the load-bearing fog-of-war color
+# contract (ui_reference.md, MEMORY "physics not dice"): friendly/ready/armed
+# read OK_COL green; reloading/transient read WARN amber; inbound/destroyed/
+# terminal read DANGER red; labels read MUTED; the single brand accent is
+# ACCENT. Sensor-estimate data must look different from friendly truth.
+SEMANTIC_STATES = (
+    "READY", "ARMED", "FRIENDLY",        # confirmed-good / own forces -> green
+    "RELOADING", "TRANSIENT",            # in-flux / momentary -> amber
+    "INBOUND", "DESTROYED", "TERMINAL",  # threat / killed / final -> red
+    "ESTIMATE",                          # sensor guess, not truth -> dim amber
+    "LABEL",                             # field labels / secondary copy -> muted
+    "ACCENT",                            # the one brand accent
+    "DISABLED",                          # greyed / unavailable
+)
+
+SEMANTIC_COLORS = {
+    "READY": OK_COL,
+    "ARMED": OK_COL,
+    "FRIENDLY": OK_COL,
+    "RELOADING": WARN,
+    "TRANSIENT": WARN,
+    "INBOUND": DANGER,
+    "DESTROYED": DANGER,
+    "TERMINAL": DANGER,
+    "ESTIMATE": ACCENT_DIM,   # estimates look dimmer than friendly truth
+    "LABEL": MUTED,
+    "ACCENT": ACCENT,
+    "DISABLED": DISABLED,
+}
+
+BADGE_PAD_X = 6.0           # horizontal padding either side of a badge label
+BADGE_PAD_Y = 3.0           # vertical padding above/below a badge label
+BADGE_FILL_A = 0.18         # badge body fill alpha (the tinted state wash)
+COMPASS_SEG = 24            # bearing-ring segments (360 / 24 = 15 deg steps)
+COMPASS_TICK = 4.0          # radial bearing-tick length (px, inward from rim)
+COMPASS_N_LEN = 5.0         # length of the North marker tick above the ring
+THUMB_W = 4                 # scroll-list thumb width (px); track is THUMB_TRACK
+THUMB_TRACK = 2             # scroll-list track width (px)
+
+
+def _clamp01(v: float) -> float:
+    """Clamp ``v`` into [0, 1]."""
+    return 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v)
+
+
+def badge(text, label, x, y, state, size=SMALL_SIZE, *, alpha=BADGE_FILL_A) -> float:
+    """A small status pill at (x, y): one tinted fill + one 1px border
+    polyline + one centered CAPS label. Color is ``SEMANTIC_COLORS[state]``;
+    unknown states fall back to MUTED. Returns the badge WIDTH (for layout).
+
+    ``alpha`` is the body-fill alpha: the menu default is the faint
+    ``BADGE_FILL_A`` tint; the HUD variant passes the 0.55 panel alpha so the
+    pill reads as in-game chrome (see game/hud_widgets.py). The border + label
+    are always opaque so the badge stays legible over the battle.
+    """
+    col = SEMANTIC_COLORS.get(state, MUTED)[:3]
+    lab = str(label).upper()
+    lh = text.line_height(size)
+    tw = text.text_width(lab, size)
+    w = round(tw + 2 * BADGE_PAD_X)
+    h = round(lh + 2 * BADGE_PAD_Y)
+    x, y = round(x), round(y)
+    # Body wash in the state color at the requested fill alpha, then a 1px
+    # closed border.
+    text.draw_rect(x, y, w, h, (*col, alpha))
+    text.draw_lines([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
+                    (*col, 1.0), 1.0)
+    # Centered label.
+    tx = round(x + (w - tw) / 2.0)
+    ty = round(y + (h - lh) / 2.0)
+    text.draw_text(tx, ty, lab, (*col, 1.0), size)
+    return float(w)
+
+
+def gauge_bar(text, x, y, w, h, frac, col, *, ticks=0, alpha=1.0) -> None:
+    """A horizontal gauge at (x, y): a 1px LINE track box, then a filled
+    portion of width ``w * clamp(frac, 0, 1)`` in ``col``. No fill quad is
+    emitted when frac <= 0. ``ticks`` (>0) draws evenly-spaced vertical tick
+    marks across the track. ``alpha`` scales the fill alpha for the HUD variant.
+    """
+    x, y, w, h = round(x), round(y), round(w), round(h)
+    # Track outline (LINE_COL, 1px closed box).
+    text.draw_lines([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
+                    (*LINE_COL, 1.0), 1.0)
+    f = _clamp01(frac)
+    if f > 0.0:
+        fw = round(w * f)
+        if fw > 0:
+            c = col[:3]
+            a = (col[3] if len(col) > 3 else 1.0) * alpha
+            text.draw_rect(x, y, fw, h, (*c, a))
+    if ticks and ticks > 0:
+        for i in range(1, int(ticks)):
+            tx = round(x + w * i / float(ticks))
+            text.draw_lines([(tx, y), (tx, y + h)], (*LINE_COL, 1.0), 1.0)
+
+
+def mini_compass(text, cx, cy, r, bearings) -> None:
+    """A bearing rose centered at (cx, cy), radius ``r``: a closed ring drawn
+    as a 24-segment polyline (15 deg steps) starting at North, an "N" tick at
+    the top, and one short radial tick per bearing. Bearing 0 = North = up,
+    clockwise; screen y grows downward, so a tick's OUTER tip sits at
+    ``(cx + r*sin(theta), cy - r*cos(theta))`` with ``theta = radians(bearing)``.
+    """
+    # The ring: vertices at every 15 deg, closed back to North.
+    ring = []
+    for i in range(COMPASS_SEG + 1):
+        a = math.radians(i * (360.0 / COMPASS_SEG))
+        ring.append((cx + r * math.sin(a), cy - r * math.cos(a)))
+    text.draw_lines(ring, (*LINE_COL, 1.0), 1.0)
+    # North marker: a short accent tick poking up above the rim at bearing 0.
+    text.draw_lines([(cx, cy - r), (cx, cy - r - COMPASS_N_LEN)],
+                    (*ACCENT, 1.0), 1.5)
+    # One radial bearing tick per bearing: from just inside the rim out to the
+    # rim. The outer tip lands exactly on the radius (the locked contract).
+    for brg in bearings:
+        th = math.radians(float(brg))
+        s, c = math.sin(th), math.cos(th)
+        outer = (cx + r * s, cy - r * c)
+        inner = (cx + (r - COMPASS_TICK) * s, cy - (r - COMPASS_TICK) * c)
+        text.draw_lines([inner, outer], (*WARN, 1.0), 1.5)
+
+
+def tab_strip(text, x, y, labels, active, size=SMALL_SIZE, *,
+              gap=PAD) -> None:
+    """An underline-tab row at (x, y): the labels packed left-to-right with
+    ``gap`` px between them, the active one in ACCENT (the rest MUTED) and
+    carrying a 1px ACCENT underline. Pure; emits no fill quads.
+    """
+    lh = text.line_height(size)
+    tx = float(x)
+    for i, lab in enumerate(labels):
+        is_active = (i == active)
+        col = ACCENT if is_active else MUTED
+        text.draw_text(round(tx), y, str(lab), (*col, 1.0), size)
+        lw = text.text_width(str(lab), size)
+        if is_active:
+            uy = y + lh + 2
+            text.draw_lines([(round(tx), uy), (round(tx + lw), uy)],
+                            (*ACCENT, 1.0), 1.5)
+        tx += lw + gap
+
+
 # --- Settings display list + scroll math (pure, unit-tested) --------------------
 
 def settings_entries(conflict_aid: str | None = None) -> list[tuple]:
@@ -178,6 +330,46 @@ def max_scroll(entries, view_h: float) -> int:
             return min(i + 1, len(entries) - 1)
         s = i
     return 0
+
+
+def scroll_list(text, items, *, x, y, w, view_h, row_h, scroll, focus,
+                draw_row) -> int:
+    """Uniform-row scroll viewport — the whole-row twin of visible_count/
+    scroll_to_focus/max_scroll above (those handle heterogeneous settings
+    rows; this one handles fixed-pitch lists, the common COMBAT case).
+
+    Draws the window of ``items`` that fully fits ``view_h`` at pitch
+    ``row_h``, starting at ``scroll`` (clamped so ``focus`` stays visible and
+    the tail never over-scrolls). For each visible item it calls
+    ``draw_row(item, index, row_x, row_y)`` — the caller owns row rendering.
+    When the list overflows the viewport it also paints a ``THUMB_TRACK``-px
+    LINE track and a ``THUMB_W``-px ACCENT_DIM thumb on the right edge.
+    Returns the (clamped) scroll index actually used. Pure / headless.
+    """
+    n = len(items)
+    cap = max(1, int(view_h // row_h))          # whole rows that fit
+    top_max = max(0, n - cap)                   # tail-anchored max scroll
+    s = max(0, min(int(scroll), top_max))
+    # Keep focus on screen with the same 1-row lookahead idiom as settings.
+    if focus < s:
+        s = max(0, focus)
+    elif focus >= s + cap:
+        s = min(top_max, focus - cap + 1)
+    end = min(n, s + cap)
+    ry = y
+    for i in range(s, end):
+        draw_row(items[i], i, x, ry)
+        ry += row_h
+    if n > cap:
+        # Track down the right edge, then a proportional thumb over it.
+        bar_x = x + w - THUMB_W
+        text.draw_rect(bar_x, y, THUMB_TRACK, view_h, (*LINE_COL, 1.0))
+        thumb_h = max(row_h, view_h * cap / float(n))
+        travel = view_h - thumb_h
+        thumb_y = y + (travel * s / float(top_max) if top_max else 0.0)
+        text.draw_rect(bar_x, round(thumb_y), THUMB_W, round(thumb_h),
+                       (*ACCENT_DIM, 1.0))
+    return s
 
 
 # --- State machine ---------------------------------------------------------------
