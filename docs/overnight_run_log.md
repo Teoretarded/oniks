@@ -13,10 +13,16 @@
 
 *(Filled in at halt. See the chronological ledger below until then.)*
 
-**Status so far:** Run started 2026-06-16. Grounding complete (read README,
-ROADMAP, specs 01–09, fable-method references). Baseline verified green (smoke
-70/70 exit 0; full suite running). Branch `feat/combat-expansion` created off
-`master`. Beginning Milestone 1 (Legibility Foundation).
+**Status so far (updated 2026-06-17, overnight continuing):**
+- Grounding complete (README, ROADMAP, specs 01–09, fable-method refs). Baseline
+  green, branch `feat/combat-expansion` off `master`, baseline checkpoint `ac697d2`.
+- **MILESTONE 1 (Legibility Foundation) — SHIPPED & GATED** (tip `3c10066`):
+  widget primitives + SEMANTIC_COLORS + hud_widgets; track kind/size stamps;
+  threat-warning strip; click-contact intel panel; per-tube battery panel.
+  Full suite exit 0 (~864), smoke 70/70, Oniks-duel + determinism bit-identical
+  (delta 0.0), fog honest (confirmed in a live battle), no-cheat CLEAN.
+  Deferred: M1-F6 toast/hint upgrade (cosmetic). Human playtest recommended in AM.
+- Now building Milestone 2 (SEAD / Anti-Radiation Warfare).
 
 ---
 
@@ -73,7 +79,17 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
   bug, then 70/70). Commit `c8d0d7e`. Orchestrator self-verified the diff
   (own-force-only, _block backward-compatible).
 
-### M1 milestone gate (in progress)
-- Orchestrator running full suite + smoke + Oniks-duel/determinism bit-identical
-  checks; then dispatching a game-test agent + bug-hunt + no-cheat auditor fleet.
+### M1 milestone gate — PASSED clean in one pass
+- `gate:M1-fullsuite` — ORCHESTRATOR — pytest -q exit 0 (~864); smoke 70/70;
+  Oniks-duel + missile-flight + SM-6 contracts green (bit-identical).
+- `gate:M1-gametest` — GAME-TEST / opus — drove live headless battles, measured
+  all surfaces + determinism (max delta 0.0 @15k steps), fog confirmed live,
+  795 calls 0 exceptions — PASS. Left `tools/probe_m1_legibility.py`. (First
+  dispatch died on an infra socket error; re-dispatched, succeeded.)
+- `gate:M1-bughunt` — BUG-HUNT / opus — SAFE TO GATE; one LOW (scroll_list
+  row_h<=0) fixed (`3c10066`).
+- `gate:M1-nocheat` — NO-CHEAT / opus — CLEAN, no truth leak (helpers + draw).
+- **M1 COMPLETE.** Branch tip after gate: `3c10066`.
+
+### M2 — SEAD / Anti-Radiation Warfare (starting)
 

@@ -787,3 +787,29 @@ code-quality review (opus) → fixer if needed. Agent ledger: `docs/overnight_ru
   the existing `sandbox.hint_text`/`HUD._hint_flash` one-liner works and the
   stacked-toast upgrade is cosmetic polish. Flagged for a later pass / the
   morning review. Not a blocker for the M1 legibility goal.
+
+### M1 GATE — PASSED clean in one pass (commit `3c10066` + probe)
+Orchestrator-verified + adversarial fleet (all opus):
+- **Full suite** `pytest -q` exit 0 (~864 tests). **Smoke** 70/70 exit 0.
+- **Regression contracts BIT-IDENTICAL:** Oniks-vs-SM-2 duel
+  (`test_sm2_statistics`), Oniks/SAM flight (`test_missile`), SM-6 area defense
+  all green — M1 (pure UI + additive stamps) touched no physics/RNG.
+- **GAME-TEST (live headless battles, measured):** threat strip exercises all
+  severity bands live (MUTED 102→62s / WARN 58→20s / DANGER 19→1s), TTI shrinks
+  monotonically, rounds drop off after impact; **FOG confirmed in a live battle**
+  — 2 Tomahawks in `world.missiles` under the horizon → 0 contacts → 0 strip
+  rows; tube reload frac 0→0.875 monotonic over 120 s; intel fresh→IDENTIFIED
+  conf 1.0, age 25 s→UNKNOWN+dead_reckoned; **DETERMINISM bit-identical, MAX
+  positional delta EXACTLY 0.0 at 15 000 steps**; 795 helper calls, 0 exceptions.
+  Probe left at `tools/probe_m1_legibility.py`.
+- **BUG-HUNT:** SAFE TO GATE — one LOW (latent `scroll_list` row_h<=0
+  ZeroDivisionError, no caller yet) fixed defensively (`3c10066`).
+- **NO-CHEAT auditor:** CLEAN — no truth leak in helpers OR draw methods; stamps
+  are the classification axis (gate provenance), not a position read; estimate
+  idiom (dim amber) vs friendly truth (green) visually distinct; no new RNG/clock.
+- **Deferred (documented, non-blocking):** M1-F6 toast/hint upgrade; the strip's
+  cosmetic badge-per-row pills; the >5-tube panel-clip edge (M5 multi-launcher).
+- **Human playtest:** the ROADMAP's mandatory ~15-min hands-on COMBAT playtest
+  after M1 is SUBSTITUTED by the agent game-test fleet for this unattended run;
+  recommended for the morning reviewer (the legibility layer is now in place to
+  make it informative).
