@@ -527,6 +527,16 @@ class CombatWorld(WorldState):
         self._elint_next_t = 0.0
         self._fix_next_t = 0.0
         self._rwr_next_t = 0.0
+        # ---- M2-T1: passive-SIGINT emitter picture ----
+        # Heard enemy emitters (ship SPY-1 + airborne AWACS/fighter radars +
+        # ground radars) the drone has LOCALIZED via ELINT triangulation,
+        # surfaced as targetable EMITTER contacts.  A SEPARATE store from
+        # contacts.tracks (the active-radar contact picture): the SIGINT
+        # picture is distinct intel and keeping it apart leaves every
+        # contacts.tracks consumer (threat strip / intel panel / map /
+        # determinism) byte-identical.  emitter_id -> dict(pos (3,),
+        # kind (str label), quality (m), last_heard (s), age (s)).
+        self.emitter_contacts: dict = {}
 
         # ---- Phase 5a: enemy air order of battle ----
         ax, az = AIRFIELD_XZ
@@ -816,6 +826,7 @@ class CombatWorld(WorldState):
         if now >= self._fix_next_t:
             self._fix_next_t = now + ELINT_FIX_PERIOD_S
             self._inject_elint_tracks(now)
+            self._inject_emitter_contacts(now)   # M2-T1 passive-SIGINT picture
 
     def _inject_elint_tracks(self, now: float) -> None:
         """Actionable ELINT fixes -> player-picture tracks.
@@ -851,6 +862,75 @@ class CombatWorld(WorldState):
                 pos=est.copy(), vel=np.zeros(3), age=age,
                 t_next=now + ELINT_FIX_PERIOD_S, is_air=False,
                 kind=_kind_of(ship), size=_size_of(ship))
+
+    def _player_targetable_emitters(self) -> dict:
+        """Resolver: emitter_id -> (kind_label, live Radar obj, owner) for
+        EVERY alive enemy emitter the player could ARM-target (M2-T2 homes
+        the ARM on the returned Radar).
+
+        Built from the SAME live sources _emitters() scans so the targetable
+        set stays in sync with what the drone can hear: every alive ship's
+        SPY-1 (the carrier's is silent so it is never HEARD, but it remains a
+        valid target so it is listed here), each airborne enemy-air radar
+        (AWACS vs FIGHTER labelled by entity type), and every live ground
+        radar.  This reads live entities purely as the world's own bookkeeping
+        (like _emitters()); the player only LEARNS of an emitter through the
+        localized emitter_contacts subset (no truth leak — see
+        _inject_emitter_contacts)."""
+        tgt: dict = {}
+        for s in self.ships:
+            if not s.alive:
+                continue
+            tgt[s.radar.radar_id] = ("SPY-1", s.radar, s)
+        for e in self.enemy_air:
+            if not e.alive:
+                continue
+            kind = "AWACS" if isinstance(e, Awacs) else "FIGHTER"
+            tgt[e.radar.radar_id] = (kind, e.radar, e)
+        for r in getattr(self, "_enemy_ground_radars", []):
+            if not r.alive:
+                continue
+            tgt[r.radar_id] = ("GND RADAR", r, r)
+        return tgt
+
+    def _inject_emitter_contacts(self, now: float) -> None:
+        """Heard + localized enemy emitters -> the passive-SIGINT picture
+        (self.emitter_contacts), a store SEPARATE from contacts.tracks.
+
+        Mirrors _inject_elint_tracks' freshness/actionable gates, but the fix
+        carries the TRIANGULATED est_pos (the drone's ELINT belief) plus a
+        kind label — never the radar's true position as ground truth.  Gates
+        per emitter the drone reports hearing AND that resolves to a live
+        targetable emitter (unknown ids skipped):
+          * heard within ELINT_FRESH_S (silence => the contact ages out),
+          * fix actionable (quality < ELINT_FIX_ACTIONABLE_M),
+          * est_pos available.
+        The error rides the contact AGE on the same ELINT_AGE_MAX_S mapping
+        the ship fixes use.  Deterministic: no RNG."""
+        resolver = self._player_targetable_emitters()
+        for eid in self.elint.heard_emitters():
+            entry = resolver.get(eid)
+            if entry is None:
+                continue                      # unknown / dead emitter
+            kind = entry[0]
+            heard = self.elint.last_heard(eid)
+            if heard is None or now - heard > ELINT_FRESH_S:
+                continue
+            quality = self.elint.fix_quality(eid)
+            if quality >= ELINT_FIX_ACTIONABLE_M:
+                continue
+            est = self.elint.est_pos(eid)
+            if est is None:
+                continue
+            age = ELINT_AGE_MAX_S * quality / ELINT_FIX_ACTIONABLE_M
+            self.emitter_contacts[eid] = dict(
+                pos=est.copy(), kind=kind, quality=quality,
+                last_heard=now, age=age)
+        # Age out any emitter whose stored fix is no longer fresh: a silenced
+        # emitter stops refreshing and drops from the SIGINT picture.
+        for eid in [e for e, c in self.emitter_contacts.items()
+                    if now - c["last_heard"] > ELINT_FRESH_S]:
+            del self.emitter_contacts[eid]
 
     # ---------------------------------------------------------------- phase 5a
 
