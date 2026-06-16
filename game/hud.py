@@ -24,9 +24,12 @@ from collections import namedtuple
 import numpy as np
 
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
+from game.hud_widgets import badge as _badge
+from game.hud_widgets import gauge_bar as _hud_gauge_bar
 from game.keybinds import ACTIONS
 from game.states import (ACCENT, ACCENT_DIM, BG0, DANGER, MUTED, OK_COL,
-                         TEXT_COL, WARN, draw_header_rule, draw_panel)
+                         SEMANTIC_COLORS, TEXT_COL, WARN, draw_header_rule,
+                         draw_panel)
 from game.states import gauge_bar as _gauge_bar
 from game.states import mini_compass as _mini_compass
 from sim.arsenal import BASTION, N40N6, N40N6_AMMO, ONIKS, S300, S300_TEL
@@ -143,6 +146,83 @@ INTEL_LINE_H = 20           # px, label/value row pitch
 INTEL_VALUE_X = 92          # px, label -> value column offset
 INTEL_COMPASS_R = 22.0      # px, bearing-rose radius
 INTEL_GAUGE_H = 8           # px, confidence gauge height
+
+# --- Per-tube battery status row (M1-F4) ----------------------------------------
+#
+# OWN-FORCE TELEMETRY (load-bearing): ``tube_cells`` reads ONLY the world's own
+# launcher/magazine attributes (_oniks_tubes / _s300_tubes + the reload totals +
+# the ammo pools). It NEVER touches contacts / enemy / truth, and renders in the
+# green/amber/disabled OWN idiom (READY/RELOADING/EMPTY via SEMANTIC_COLORS),
+# never the CONTACT estimate idiom. Deterministic, GL-free, no RNG.
+TUBE_CELL_W = 44            # px, width of one tube badge+gauge cell
+TUBE_GAP = 6                # px, horizontal gap between adjacent tube cells
+TUBE_ROW_GAP = 6            # px, gap between the panel body and the tube row
+TUBE_GAUGE_H = 6            # px, height of a RELOADING cell's progress gauge
+TUBE_LABEL_GAP = 2          # px, gap between a tube's index label and its badge
+
+
+def _clamp01(v: float) -> float:
+    """Clamp ``v`` into [0, 1] (local copy so the helper stays GL-free)."""
+    return 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v)
+
+
+def tube_cells(world, platform):
+    """Per-tube READY / RELOADING / EMPTY readout for the active launcher
+    (M1-F4) — pure, GL-free, deterministic, OWN-FORCE ONLY.
+
+    ``platform`` in {'bastion', 'oniks'} selects the Oniks ``_oniks_tubes``
+    battery; 's300' selects the ``_s300_tubes`` battery. Any other platform, or
+    a SANDBOX world missing the tube attribute, returns ``[]`` (mirroring the
+    None-guard idiom of ``oniks_ammo_row`` / ``s300_round_panel``).
+
+    Each cell is ``(label, state, frac)``: ``label`` is the 1-based tube index
+    as a string ("1", "2", ...); ``state`` is a SEMANTIC token (READY /
+    RELOADING / EMPTY); ``frac`` is the reload-progress fraction in [0, 1]
+    (1.0 ready, 0.0 empty, strictly between while reloading).
+
+      Oniks tube: reload_left > 0 -> RELOADING (frac = 1 - reload_left/total);
+        elif loaded -> READY (1.0); else -> EMPTY (0.0).
+      S-300 tube (no 'loaded' key): reload_left > 0 -> RELOADING; elif EITHER
+        round pool (48N6 + 40N6) has stock -> READY (1.0); else -> EMPTY (0.0).
+    """
+    if platform in ("bastion", "oniks"):
+        tubes = getattr(world, "_oniks_tubes", None)
+        if tubes is None:
+            return []
+        total = float(getattr(world, "_oniks_tube_reload_s", 0.0))
+        cells = []
+        for i, t in enumerate(tubes):
+            left = float(t.get("reload_left", 0.0))
+            if left > 0.0:
+                frac = _clamp01(1.0 - left / total) if total > 0.0 else 0.0
+                cells.append((str(i + 1), "RELOADING", frac))
+            elif t.get("loaded"):
+                cells.append((str(i + 1), "READY", 1.0))
+            else:
+                cells.append((str(i + 1), "EMPTY", 0.0))
+        return cells
+    if platform == "s300":
+        tubes = getattr(world, "_s300_tubes", None)
+        if tubes is None:
+            return []
+        total = float(getattr(world, "_s300_tube_reload_s", 0.0))
+        # READY when EITHER round pool can chamber a round: both 48N6 and 40N6
+        # cycle through the same 5P85 tube (s300_round_panel doc), so a tube
+        # with stock in either magazine is loadable.
+        have_round = (getattr(world, "sam_ammo", 0)
+                      + getattr(world, "sam_ammo_40n6", 0)) > 0
+        cells = []
+        for i, t in enumerate(tubes):
+            left = float(t.get("reload_left", 0.0))
+            if left > 0.0:
+                frac = _clamp01(1.0 - left / total) if total > 0.0 else 0.0
+                cells.append((str(i + 1), "RELOADING", frac))
+            elif have_round:
+                cells.append((str(i + 1), "READY", 1.0))
+            else:
+                cells.append((str(i + 1), "EMPTY", 0.0))
+        return cells
+    return []
 
 
 def _ground_range(origin_xz, est) -> float:
@@ -518,12 +598,31 @@ class HUD:
 
     # ---------------------------------------------------------------- blocks
 
-    def _block(self, header: str, rows) -> None:
+    def _block(self, header: str, rows, cells=None) -> None:
         """Panel at the top-left: header + rule + (label, value, color)
-        rows, in the menu language's chrome (border + amber corner ticks)."""
+        rows, in the menu language's chrome (border + amber corner ticks).
+
+        ``cells`` (M1-F4, optional) is a ``tube_cells`` list — per-tube
+        (label, state, frac) own-force telemetry drawn as a badge row INSIDE
+        the panel beneath the value rows, so it inherits the same chrome. An
+        empty/None list adds nothing (SANDBOX: the block is unchanged)."""
         head_h = self.text.line_height(HEADER_SIZE)
+        small_h = self.text.line_height(SMALL_SIZE)
+        cell_h = small_h + 2 * 3.0      # badge body height (states.BADGE_PAD_Y)
+        # The tube row reserves its own height inside the panel, mirroring the
+        # stack drawn by _tube_cells_row: TUBE_ROW_GAP, the "TUBES" caption,
+        # the per-tube index label, the state badge, the RELOADING gauge band,
+        # plus a bottom margin so the badges sit fully inside the chrome.
+        tube_band = 0
+        if cells:
+            tube_band = int(TUBE_ROW_GAP
+                            + small_h + TUBE_LABEL_GAP     # "TUBES" caption
+                            + small_h + TUBE_LABEL_GAP     # per-tube index
+                            + cell_h                       # the state badge
+                            + TUBE_GAUGE_H + 4             # RELOADING gauge band
+                            + PANEL_PAD)                   # bottom margin
         height = (PANEL_PAD * 2 + head_h + 4 + HEADER_GAP
-                  + len(rows) * LINE_H)
+                  + len(rows) * LINE_H + tube_band)
         draw_panel(self.text, MARGIN, MARGIN, PANEL_W, height,
                    alpha=PANEL_ALPHA)
         tx = MARGIN + PANEL_PAD
@@ -536,6 +635,31 @@ class HUD:
             self.text.draw_text(tx, ty + 2, label, LABEL_COL)
             self.text.draw_text(tx + VALUE_X, ty + 2, value, col)
             ty += LINE_H
+        if cells:
+            self._tube_cells_row(tx, ty + TUBE_ROW_GAP, cells)
+
+    def _tube_cells_row(self, x, y, cells) -> None:
+        """Per-tube battery row (M1-F4): for each ``(label, state, frac)`` cell
+        a small CAPS state badge (READY/RELOADING/EMPTY via SEMANTIC_COLORS, the
+        own-force green/amber/disabled idiom) under its 1-based tube index, with
+        a thin progress gauge beneath a RELOADING cell. OWN-FORCE only — no
+        contact/enemy reads, no CONTACT_COL."""
+        small_h = self.text.line_height(SMALL_SIZE)
+        self.text.draw_text(x, y, "TUBES", LABEL_COL, SMALL_SIZE)
+        y += small_h + TUBE_LABEL_GAP
+        for i, (label, state, frac) in enumerate(cells):
+            cx = x + i * (TUBE_CELL_W + TUBE_GAP)
+            # Index label above the badge, then the state badge.
+            self.text.draw_text(cx, y, label, MUTED, SMALL_SIZE)
+            ly = y + small_h + TUBE_LABEL_GAP
+            # badge(renderer, label, x, y, state): label is the CAPS text, state
+            # routes the SEMANTIC color (both the state token here).
+            _badge(self.text, state, cx, ly, state, size=SMALL_SIZE)
+            # A RELOADING cell gets a progress gauge in its own (amber) color.
+            if state == "RELOADING":
+                gy = ly + self.text.line_height(SMALL_SIZE) + 2 * 3.0 + 2
+                _hud_gauge_bar(self.text, cx, gy, TUBE_CELL_W, TUBE_GAUGE_H,
+                               frac, SEMANTIC_COLORS["RELOADING"])
 
     def _flight_block(self, sandbox, m) -> None:
         """In-flight telemetry for the followed missile (Oniks or SAM)."""
@@ -623,7 +747,9 @@ class HUD:
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
-        self._block(BASTION.display_name.upper(), rows)
+        # M1-F4: per-tube battery row (own-force; [] in SANDBOX -> unchanged).
+        self._block(BASTION.display_name.upper(), rows,
+                    cells=tube_cells(world, "bastion"))
 
     def _s300_block(self, sandbox) -> None:
         world = sandbox.world
@@ -647,7 +773,9 @@ class HUD:
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
-        self._block(S300_TEL.display_name.upper(), rows)
+        # M1-F4: per-tube battery row (own-force; [] in SANDBOX -> unchanged).
+        self._block(S300_TEL.display_name.upper(), rows,
+                    cells=tube_cells(world, "s300"))
 
     @staticmethod
     def _target_summary(sandbox, origin) -> str:

@@ -137,6 +137,7 @@ SEMANTIC_COLORS = {
     "FRIENDLY": OK_COL,
     "RELOADING": WARN,       # in-flux / momentary -> amber
     "TRANSIENT": WARN,
+    "EMPTY": DISABLED,       # spent tube / no round to chamber -> greyed
     "INBOUND": DANGER,       # threat / killed / final -> red
     "DESTROYED": DANGER,
     "TERMINAL": DANGER,
