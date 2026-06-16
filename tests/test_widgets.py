@@ -119,6 +119,56 @@ def test_tab_strip_active_tab_gets_accent_underline():
     assert len(underlines) == 1
 
 
+def test_tab_strip_fixed_column_mode_matches_combat_setup_inline_loop():
+    """REGRESSION (spec 08 F1): combat_setup.py's tab bar was an inline loop
+    that positioned tab i at ``x + i*tab_w`` on an even grid. It now delegates
+    to tab_strip(..., tab_w=...). This locks the fixed-column output to the old
+    inline formula so a layout regression fails here.
+
+    Old inline loop being reproduced (game/combat_setup.py, pre-refactor):
+        for i, pname in enumerate(names):
+            col = ACCENT if i == page else MUTED
+            tx = x + i * tab_w
+            draw_text(tx, y, pname, col, SMALL_SIZE)
+            if i == page:
+                pw = text_width(pname, SMALL_SIZE)
+                draw_lines([(tx, y+lh+2), (tx+pw, y+lh+2)], (*ACCENT,1.0), 1.5)
+    """
+    from game.states import ACCENT, MUTED, SMALL_SIZE, tab_strip
+    ft = FakeText()
+    names = ["WORLD", "ARMORY"]
+    x, y = 130, 76
+    active = 1
+    tab_w = 680 // len(names)        # combat_setup: SETUP_PANEL_W // n_pages
+
+    tab_strip(ft, x, y, names, active, size=SMALL_SIZE, tab_w=tab_w)
+
+    # One label per tab, each at its fixed grid column x + i*tab_w, at y, SIZE.
+    assert len(ft.texts) == len(names)
+    for i, (tx, ty, s, color, size) in enumerate(ft.texts):
+        assert s == names[i]
+        assert tx == x + i * tab_w           # fixed-grid x (NOT measured-width)
+        assert ty == y
+        assert size == SMALL_SIZE
+        expected_col = ACCENT if i == active else MUTED
+        assert tuple(color)[:3] == tuple(expected_col)[:3]
+        # color token passed through unchanged (raw 3-tuple, like the inline loop)
+        assert tuple(color) == tuple(expected_col)
+
+    # Exactly one active-tab underline, in ACCENT at 1.5px, spanning the active
+    # label from its grid column to that column + measured label width.
+    lh = ft.line_height(SMALL_SIZE)
+    uy = y + lh + 2
+    ax = x + active * tab_w
+    aw = ft.text_width(names[active], SMALL_SIZE)
+    underlines = [ln for ln in ft.lines if ln[1][:3] == tuple(ACCENT)[:3]]
+    assert len(underlines) == 1
+    pts, rgba, width = underlines[0]
+    assert pts == [(ax, uy), (ax + aw, uy)]
+    assert rgba == (*ACCENT, 1.0)
+    assert width == 1.5
+
+
 def test_scroll_list_draws_only_visible_rows_with_thumb():
     from game.states import scroll_list
     ft = FakeText()

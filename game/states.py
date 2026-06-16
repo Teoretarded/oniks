@@ -131,30 +131,24 @@ def draw_header_rule(text, x, y, w) -> None:
 # read OK_COL green; reloading/transient read WARN amber; inbound/destroyed/
 # terminal read DANGER red; labels read MUTED; the single brand accent is
 # ACCENT. Sensor-estimate data must look different from friendly truth.
-SEMANTIC_STATES = (
-    "READY", "ARMED", "FRIENDLY",        # confirmed-good / own forces -> green
-    "RELOADING", "TRANSIENT",            # in-flux / momentary -> amber
-    "INBOUND", "DESTROYED", "TERMINAL",  # threat / killed / final -> red
-    "ESTIMATE",                          # sensor guess, not truth -> dim amber
-    "LABEL",                             # field labels / secondary copy -> muted
-    "ACCENT",                            # the one brand accent
-    "DISABLED",                          # greyed / unavailable
-)
-
 SEMANTIC_COLORS = {
-    "READY": OK_COL,
+    "READY": OK_COL,         # confirmed-good / own forces -> green
     "ARMED": OK_COL,
     "FRIENDLY": OK_COL,
-    "RELOADING": WARN,
+    "RELOADING": WARN,       # in-flux / momentary -> amber
     "TRANSIENT": WARN,
-    "INBOUND": DANGER,
+    "INBOUND": DANGER,       # threat / killed / final -> red
     "DESTROYED": DANGER,
     "TERMINAL": DANGER,
-    "ESTIMATE": ACCENT_DIM,   # estimates look dimmer than friendly truth
-    "LABEL": MUTED,
-    "ACCENT": ACCENT,
-    "DISABLED": DISABLED,
+    "ESTIMATE": ACCENT_DIM,  # sensor guess: dimmer than friendly truth
+    "LABEL": MUTED,          # field labels / secondary copy -> muted
+    "ACCENT": ACCENT,        # the one brand accent
+    "DISABLED": DISABLED,    # greyed / unavailable
 }
+
+# Derived (single source of truth): the recognised state tokens are exactly the
+# SEMANTIC_COLORS keys, so tests parametrize over this without a parallel list.
+SEMANTIC_STATES = tuple(SEMANTIC_COLORS)
 
 BADGE_PAD_X = 6.0           # horizontal padding either side of a badge label
 BADGE_PAD_Y = 3.0           # vertical padding above/below a badge label
@@ -249,23 +243,49 @@ def mini_compass(text, cx, cy, r, bearings) -> None:
         text.draw_lines([inner, outer], (*WARN, 1.0), 1.5)
 
 
+TAB_UNDERLINE_DY = 2        # gap (px) between tab baseline and its underline
+TAB_UNDERLINE_W = 1.5       # active-tab underline stroke (matches combat_setup)
+
+
 def tab_strip(text, x, y, labels, active, size=SMALL_SIZE, *,
-              gap=PAD) -> None:
-    """An underline-tab row at (x, y): the labels packed left-to-right with
-    ``gap`` px between them, the active one in ACCENT (the rest MUTED) and
-    carrying a 1px ACCENT underline. Pure; emits no fill quads.
+              gap=PAD, tab_w=None) -> None:
+    """An underline-tab row at (x, y): the active label in ACCENT (the rest
+    MUTED), each active one carrying a ``TAB_UNDERLINE_W`` px ACCENT underline.
+    Pure; emits no fill quads.
+
+    Two column layouts:
+      * ``tab_w is None`` (default) — labels are packed left-to-right by their
+        measured width with ``gap`` px between them (the generic strip).
+      * ``tab_w`` given — fixed-grid layout: tab ``i`` sits at ``x + i*tab_w``
+        regardless of label width (combat_setup's even-column tab bar). In this
+        mode the call is byte-identical to combat_setup.py's old inline loop:
+        same text x/y, same label-color token passed through unchanged, and the
+        underline runs from ``(x+i*tab_w, y+lh+TAB_UNDERLINE_DY)`` to
+        ``(x+i*tab_w + text_width(label), ...)`` in ACCENT at TAB_UNDERLINE_W.
     """
     lh = text.line_height(size)
     tx = float(x)
     for i, lab in enumerate(labels):
         is_active = (i == active)
         col = ACCENT if is_active else MUTED
-        text.draw_text(round(tx), y, str(lab), (*col, 1.0), size)
         lw = text.text_width(str(lab), size)
+        if tab_w is not None:
+            # Fixed-grid mode: each tab on an even column at integer x, the
+            # label color token passed through unchanged, and the underline
+            # endpoints left un-rounded — byte-identical to combat_setup's loop.
+            ix = x + i * tab_w
+            text.draw_text(ix, y, str(lab), col, size)
+            ux1 = ix + lw
+        else:
+            # Generic left-packed mode: round the column origin and the
+            # underline end (the historical default behavior).
+            ix = round(tx)
+            text.draw_text(ix, y, str(lab), (*col, 1.0), size)
+            ux1 = round(ix + lw)
         if is_active:
-            uy = y + lh + 2
-            text.draw_lines([(round(tx), uy), (round(tx + lw), uy)],
-                            (*ACCENT, 1.0), 1.5)
+            uy = y + lh + TAB_UNDERLINE_DY
+            text.draw_lines([(ix, uy), (ux1, uy)],
+                            (*ACCENT, 1.0), TAB_UNDERLINE_W)
         tx += lw + gap
 
 

@@ -34,7 +34,7 @@ from game.states import (
     ACCENT, ACCENT_DIM, BG0, BG2, DISABLED, FOCUS_BAR_W, FOOTER_MARGIN,
     LINE_COL, MUTED, PAD, PRESS_FLASH_A, PRESS_FLASH_S, ROW_H,
     TEXT_COL, GameState, draw_header_rule, draw_panel,
-    move_selection,
+    move_selection, tab_strip,
 )
 from world.combat_config import (
     CombatConfig,
@@ -407,17 +407,11 @@ class CombatSetupState(GameState):
         draw_header_rule(text, x, rule_y, SETUP_PANEL_W)
 
         # --- Page tabs -------------------------------------------------------
+        # Even-column tab bar via the shared widget (fixed-grid mode): renders
+        # byte-identically to the old inline loop (locked by test_widgets).
         tab_w = SETUP_PANEL_W // len(_PAGE_NAMES)
-        for i, pname in enumerate(_PAGE_NAMES):
-            col = ACCENT if i == self._page else MUTED
-            tx = x + i * tab_w
-            text.draw_text(tx, rule_y + 6, pname, col, SMALL_SIZE)
-            if i == self._page:
-                pw = text.text_width(pname, SMALL_SIZE)
-                text.draw_lines(
-                    [(tx, rule_y + 6 + small_lh + 2),
-                     (tx + pw, rule_y + 6 + small_lh + 2)],
-                    (*ACCENT, 1.0), 1.5)
+        tab_strip(text, x, rule_y + 6, _PAGE_NAMES, self._page,
+                  size=SMALL_SIZE, tab_w=tab_w)
         tab_h = small_lh + 12
 
         # --- Panel -----------------------------------------------------------
