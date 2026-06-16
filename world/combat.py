@@ -141,7 +141,7 @@ import numpy as np
 from sim.arsenal import N40N6, ONIKS, S300, S300_TEL, TOMAHAWK, ZIRCON
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.commander import EnemyCommander
-from sim.contacts import ContactBoard, TRACK_DROP_S
+from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
                            AirBase, Awacs, Carrier, Fighter)
@@ -849,7 +849,8 @@ class CombatWorld(WorldState):
                 continue
             self.contacts.tracks[ship.ship_id] = dict(
                 pos=est.copy(), vel=np.zeros(3), age=age,
-                t_next=now + ELINT_FIX_PERIOD_S, is_air=False)
+                t_next=now + ELINT_FIX_PERIOD_S, is_air=False,
+                kind=_kind_of(ship), size=_size_of(ship))
 
     # ---------------------------------------------------------------- phase 5a
 

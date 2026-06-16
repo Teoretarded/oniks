@@ -72,3 +72,21 @@ def test_stamps_are_additive_estimate_and_keys_unchanged():
         assert k in t
     # Dead-reckoned estimate behaves exactly as before (age 0 -> last fix).
     assert np.allclose(b.estimated_pos("ship_1", 0.0), e.pos)
+
+
+def test_elint_injected_ship_track_carries_stamps():
+    """The THIRD track-creation site (_inject_elint_tracks) must stamp too, so
+    the 'every track carries kind/size' invariant holds for ELINT ship fixes."""
+    from world.combat import CombatWorld
+    cw = CombatWorld()                       # DEFAULT config
+    ship = cw.ships[0]
+    eid = ship.radar.radar_id
+    # Force one actionable, fresh ELINT fix for this ship's emitter.
+    cw.elint.heard_emitters = lambda: [eid]
+    cw.elint.last_heard = lambda e: cw.sim_time
+    cw.elint.fix_quality = lambda e: 1.0     # metres, well under actionable
+    cw.elint.est_pos = lambda e: ship.pos.copy()
+    cw._inject_elint_tracks(cw.sim_time)
+    t = cw.contacts.tracks[ship.ship_id]
+    assert t["size"] == "ship"               # a hull is surface/ship class
+    assert t["kind"] is None                 # a platform carries no weapon kind
