@@ -78,6 +78,10 @@ ACTIONS: tuple[ActionDef, ...] = (
     ActionDef("sam_round", "S-300 ROUND SELECT", "ENGAGEMENT", pygame.K_v),
     # Oniks/Zircon select (Phase 8): B toggles the Bastion round. B is unclaimed.
     ActionDef("oniks_weapon", "ONIKS/ZIRCON SELECT", "ENGAGEMENT", pygame.K_b),
+    # M3-F4 drone EW pod (self-protect jammer): G toggles drone.set_jam while
+    # the DRONE platform is active. G is unclaimed by every other default; in
+    # SANDBOX / off the drone platform the action is a graceful no-op.
+    ActionDef("jam", "DRONE EW POD", "ENGAGEMENT", pygame.K_g),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),

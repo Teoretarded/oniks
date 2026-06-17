@@ -496,6 +496,15 @@ def drone_panel_rows(world) -> list[tuple]:
         ("SENSORS",
          f"ELINT {len(world.elint.heard_emitters())}  SAR UP", VALUE_COL),
     ]
+    # M3-F4 EW pod row — only when the pod is FITTED (world._player_jammer);
+    # amber + a "POD HOT — DRONE LOUD" note while jamming (going loud deafens the
+    # drone's own ELINT), green "OFF" when cold.  Absent entirely on an unfitted
+    # drone so the default battle's panel is unchanged.
+    if getattr(world, "_player_jammer", False):
+        if getattr(drone, "jam_active", False):
+            rows.append(("JAM", "ON  POD HOT - DRONE LOUD", RELOAD_COL))
+        else:
+            rows.append(("JAM", "OFF", ARMED_COL))
     alerts = world.rwr.alerts()
     if alerts:
         level, brg = alerts[0]              # LOCK sorts before SPIKE

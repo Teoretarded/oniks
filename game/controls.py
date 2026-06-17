@@ -185,6 +185,8 @@ class SandboxControls:
             sandbox.cycle_sam_round()
         elif action == "oniks_weapon":
             sandbox.cycle_oniks_weapon()
+        elif action == "jam":
+            sandbox.toggle_jam()
         elif action == "pause":
             app.paused = not app.paused
         elif action == "frame_step":

@@ -221,6 +221,14 @@ ZIRCON_RANGE_LOLO_M = 150_000.0
 HINT_RADAR_EMITTING = "RADAR: EMITTING"
 HINT_RADAR_SILENT = "RADAR: SILENT"
 HINT_RADAR_DESTROYED = "RADAR: DESTROYED"
+# M3-F4 drone EW pod (J): toggles the self-protect / escort jammer on the
+# active recon drone. Hot -> collapses the enemy radar net (a salvo leaks) but
+# deafens the drone's own ELINT (going loud).
+HINT_JAM_ON = "DRONE EW POD: HOT - NET DEGRADED, OWN ELINT LOUD"
+HINT_JAM_OFF = "DRONE EW POD: COLD"
+HINT_JAM_UNAVAILABLE = "DRONE EW POD: NOT FITTED"
+HINT_JAM_NO_DRONE = "DRONE EW POD: NO DRONE AIRBORNE"
+HINT_JAM_WRONG_PLATFORM = "DRONE EW POD: SELECT THE DRONE (TAB)"
 HINT_DRONE_RECON = tactical_map.DRONE_RECON_HINT   # SPACE with the drone
 #                              platform active fires nothing (Phase 4);
 #                              one string, shared with the map's LMB hint
@@ -454,6 +462,28 @@ class SandboxState(GameState):
         radar.emitting = not radar.emitting
         self.show_hint(HINT_RADAR_EMITTING if radar.emitting
                        else HINT_RADAR_SILENT)
+        self.app.audio.ui_click()
+
+    def toggle_jam(self) -> None:
+        """J (jam binding): toggle the recon drone's EW pod (M3-F4) — ONLY when
+        the drone platform is active and a drone is airborne.  Hot: the pod
+        radiates the barrage corridor that collapses the ENEMY radar net so a
+        sea-skim salvo leaks, at the cost of deafening the drone's OWN passive
+        ELINT.  Gated on the world having ARMED the pod (config.player_jammer):
+        an unfitted pod is a graceful no-op hint.  SANDBOX worlds (no drone /
+        no _player_jammer) are graceful no-ops."""
+        if self.active_platform != "drone":
+            self.show_hint(HINT_JAM_WRONG_PLATFORM)
+            return
+        if not getattr(self.world, "_player_jammer", False):
+            self.show_hint(HINT_JAM_UNAVAILABLE)
+            return
+        drone = getattr(self.world, "drone", None)
+        if drone is None or not drone.alive:
+            self.show_hint(HINT_JAM_NO_DRONE)
+            return
+        drone.set_jam(not drone.jam_active)
+        self.show_hint(HINT_JAM_ON if drone.jam_active else HINT_JAM_OFF)
         self.app.audio.ui_click()
 
     def cycle_sam_round(self) -> str:

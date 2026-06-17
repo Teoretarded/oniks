@@ -25,7 +25,8 @@ import pytest
 from sim.ships import ST_GONE
 from world.combat_config import (
     DEFAULT, CombatConfig, clamp_config, clamp_field,
-    CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_JAMMERS, CLAMP_ENEMY_RADARS,
+    CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_JAMMERS, CLAMP_PLAYER_JAMMER,
+    CLAMP_ENEMY_RADARS,
     CLAMP_PLAYER_RADARS,
     CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_RELOAD_S,
 )
@@ -45,6 +46,10 @@ def test_defaults_match_locked_schema():
     # M3-F2: escort jammers DEFAULT to 0 (OFF) so the out-of-the-box battle
     # stays byte-identical (no jammer built -> _player_visible jammers=()).
     assert c.n_jammers == 0
+    # M3-F4: the player drone EW pod DEFAULTS to 0 (OFF) so the out-of-the-box
+    # battle stays byte-identical (no pod armed -> _active_player_jammers()
+    # empty -> the enemy detection / own-ELINT paths get jammers=()).
+    assert c.player_jammer == 0
     assert c.n_enemy_radars == 2
     assert c.n_player_radars == 1
     assert c.n_pantsir == 2
@@ -80,13 +85,15 @@ def test_clamp_field_bounds():
 
 def test_clamp_config_count_floors():
     c = clamp_config(
-        n_destroyers=-5, n_awacs=-1, n_jammers=-1, n_enemy_radars=-1,
+        n_destroyers=-5, n_awacs=-1, n_jammers=-1, player_jammer=-1,
+        n_enemy_radars=-1,
         n_player_radars=0,   # below min 1
         n_pantsir=-1, n_drones=-1,
     )
     assert c.n_destroyers == CLAMP_DESTROYERS[0]
     assert c.n_awacs == CLAMP_AWACS[0]
     assert c.n_jammers == CLAMP_JAMMERS[0]    # floor 0 -> OFF survives clamp
+    assert c.player_jammer == CLAMP_PLAYER_JAMMER[0]   # floor 0 -> OFF survives
     assert c.n_enemy_radars == CLAMP_ENEMY_RADARS[0]
     assert c.n_player_radars == CLAMP_PLAYER_RADARS[0]  # min=1
     assert c.n_pantsir == CLAMP_PANTSIR[0]
@@ -95,12 +102,14 @@ def test_clamp_config_count_floors():
 
 def test_clamp_config_count_ceilings():
     c = clamp_config(
-        n_destroyers=999, n_awacs=999, n_jammers=999, n_enemy_radars=999,
+        n_destroyers=999, n_awacs=999, n_jammers=999, player_jammer=999,
+        n_enemy_radars=999,
         n_player_radars=999, n_pantsir=999, n_drones=999,
     )
     assert c.n_destroyers == CLAMP_DESTROYERS[1]
     assert c.n_awacs == CLAMP_AWACS[1]
     assert c.n_jammers == CLAMP_JAMMERS[1]
+    assert c.player_jammer == CLAMP_PLAYER_JAMMER[1]   # 0/1 flag ceiling
     assert c.n_enemy_radars == CLAMP_ENEMY_RADARS[1]
     assert c.n_player_radars == CLAMP_PLAYER_RADARS[1]
     assert c.n_pantsir == CLAMP_PANTSIR[1]
@@ -144,6 +153,25 @@ def test_clamp_config_kh31p_arm_pool():
     assert clamp_config(kh31p_ammo=4).kh31p_ammo == 4
     # A default-config build (no edits) keeps the ARM OFF.
     assert clamp_config().kh31p_ammo == 0
+
+
+def test_clamp_config_player_jammer_flag():
+    """M3-F4 player EW pod flag clamp round-trip. LIKE n_jammers (and the ARM
+    pool) its floor is 0, so the OFF default survives the default-through-setup
+    path (clamp_config runs every field): clamping player_jammer=0 with a
+    (1, ..) range would silently ARM the pod and break the byte-identical
+    out-of-the-box battle. It is a 0/1 flag: ceiling 1."""
+    assert CLAMP_PLAYER_JAMMER == (0, 1), "the pod flag is a 0/1 OFF-survivable flag"
+    # A 0 flag stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(player_jammer=0).player_jammer == 0
+    # A negative slider clamps up to the 0 floor (OFF).
+    assert clamp_config(player_jammer=-5).player_jammer == CLAMP_PLAYER_JAMMER[0]
+    # Anything above 1 clamps down to the 0/1 ceiling.
+    assert clamp_config(player_jammer=9).player_jammer == CLAMP_PLAYER_JAMMER[1]
+    # 1 round-trips unchanged (the pod armed).
+    assert clamp_config(player_jammer=1).player_jammer == 1
+    # A default-config build (no edits) keeps the pod OFF.
+    assert clamp_config().player_jammer == 0
 
 
 def test_clamp_config_preserves_default_gun_belt():

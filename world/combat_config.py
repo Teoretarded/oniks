@@ -29,6 +29,13 @@ class CombatConfig:
     # -> the EW field model is never consulted). A non-zero count spawns standoff
     # jammers that collapse the player radar via sim/ew.py.
     n_jammers: int = 0
+    # M3-F4 player drone EW pod (self-protect / escort jammer). DEFAULT 0 (OFF)
+    # so the out-of-the-box battle stays BYTE-IDENTICAL (no pod armed ->
+    # _active_player_jammers() empty -> the enemy missile-detection calls get
+    # jammers=() and the drone's own ELINT floor is unchanged). 1 arms the pod:
+    # the player toggles it ON to collapse the ENEMY radar net so a salvo leaks,
+    # at the cost of deafening the drone's own passive ELINT (going loud).
+    player_jammer: int = 0
     n_enemy_radars: int = 2      # enemy coastal ground radars (Oniks targets, win condition)
     n_player_radars: int = 1
     n_pantsir: int = 2
@@ -59,6 +66,11 @@ CLAMP_AWACS:         tuple = (0, 3)
 # — like CLAMP_AWACS the setup-default path runs every field through clamp_config;
 # clamping n_jammers=0 with a (1, ..) range would silently turn the corridor ON).
 CLAMP_JAMMERS:       tuple = (0, 3)
+# M3-F4 player EW pod: a 0/1 ARM flag, floor 0 (OFF default survives a
+# clamp_config round-trip — the setup-default path runs every field through
+# clamp_config; clamping player_jammer=0 with a (1, ..) range would silently
+# arm the pod and break the byte-identical out-of-the-box battle).
+CLAMP_PLAYER_JAMMER: tuple = (0, 1)
 CLAMP_ENEMY_RADARS:  tuple = (0, 6)
 CLAMP_PLAYER_RADARS: tuple = (1, 4)
 CLAMP_PANTSIR:       tuple = (0, 6)
@@ -98,6 +110,7 @@ def clamp_config(
     n_destroyers: int = CombatConfig.n_destroyers,
     n_awacs: int = CombatConfig.n_awacs,
     n_jammers: int = CombatConfig.n_jammers,
+    player_jammer: int = CombatConfig.player_jammer,
     n_enemy_radars: int = CombatConfig.n_enemy_radars,
     n_player_radars: int = CombatConfig.n_player_radars,
     n_pantsir: int = CombatConfig.n_pantsir,
@@ -122,6 +135,7 @@ def clamp_config(
     lo_d, hi_d = CLAMP_DESTROYERS
     lo_aw, hi_aw = CLAMP_AWACS
     lo_jm, hi_jm = CLAMP_JAMMERS
+    lo_pj, hi_pj = CLAMP_PLAYER_JAMMER
     lo_er, hi_er = CLAMP_ENEMY_RADARS
     lo_pr, hi_pr = CLAMP_PLAYER_RADARS
     lo_pa, hi_pa = CLAMP_PANTSIR
@@ -138,6 +152,7 @@ def clamp_config(
         n_destroyers=clamp_field(int(n_destroyers), lo_d, hi_d),
         n_awacs=clamp_field(int(n_awacs), lo_aw, hi_aw),
         n_jammers=clamp_field(int(n_jammers), lo_jm, hi_jm),
+        player_jammer=clamp_field(int(player_jammer), lo_pj, hi_pj),
         n_enemy_radars=clamp_field(int(n_enemy_radars), lo_er, hi_er),
         n_player_radars=clamp_field(int(n_player_radars), lo_pr, hi_pr),
         n_pantsir=clamp_field(int(n_pantsir), lo_pa, hi_pa),

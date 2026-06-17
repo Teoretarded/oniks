@@ -532,9 +532,15 @@ class FighterRadar:
 
     # --- cone-gated detection -------------------------------------------------
 
-    def detects(self, target_pos, size_class: str) -> bool:
+    def detects(self, target_pos, size_class: str, jammers=()) -> bool:
         """True only when target is within the ±60 deg forward cone AND the
-        underlying Radar.detects() returns True."""
+        underlying Radar.detects() returns True.
+
+        ``jammers`` (M3-F4, default ()): forwarded UNCHANGED to the underlying
+        Radar.detects() so an active EW barrage jammer (player EW pod, sim/ew.py)
+        collapses the fighter's effective range exactly as it does any other
+        radar.  Empty (the default) -> byte-identical to the pre-EW gate (the raw
+        range lookup, the EW field model never consulted)."""
         if not (self._radar.alive and self._radar.emitting):
             return False
         # Angular gate in the XZ plane (heading 0 = +Z, clockwise from above).
@@ -546,7 +552,7 @@ class FighterRadar:
         err = (bearing - self._heading_ref + math.pi) % (2.0 * math.pi) - math.pi
         if abs(err) > FIGHTER_RADAR_FOV_HALF:
             return False
-        return self._radar.detects(target_pos, size_class)
+        return self._radar.detects(target_pos, size_class, jammers=jammers)
 
 
 # ---------------------------------------------------------------------------

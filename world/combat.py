@@ -542,6 +542,14 @@ class CombatWorld(WorldState):
         # — so it can never collide with the defense controller's stream).
         self._recon_rng = np.random.default_rng([rng_seed, 4])
         recon_rng = self._recon_rng
+        # M3-F4: the player EW pod is AVAILABLE only when config.player_jammer is
+        # set (mirror of n_jammers/kh31p_ammo OFF-by-default gates).  DEFAULT 0 ->
+        # the pod is never armed: the drone's jam_active can never go True (the
+        # JAM control + the world both gate on this), so _active_player_jammers()
+        # is always empty and the enemy detection / own-ELINT paths stay
+        # byte-identical.  When set, a freshly spawned drone starts STARTS COLD
+        # (jam_active False) — the player toggles it loud with the JAM key.
+        self._player_jammer = bool(config.player_jammer)
         self.drone = self._spawn_drone(recon_rng)
         self.drone_wrecks: list[ReconDrone] = []   # falling airframes
         self.elint = ElintReceiver(rng=recon_rng)
@@ -784,6 +792,45 @@ class CombatWorld(WorldState):
         return [j.emitter for j in getattr(self, "_jammers", [])
                 if j.alive and j.emitter.emitting]
 
+    def _active_player_jammers(self) -> list:
+        """The live player EW-pod beacon currently radiating the barrage
+        corridor — the duck-typed jammer (``.pos`` + ``.jam_power_w``) the
+        sim/ew.py field model consumes when gating the ENEMY radars (so a salvo
+        leaks under a degraded SPY-1/AWACS picture) and when raising the drone's
+        OWN ELINT noise floor (the self-deafen cost of going loud).
+
+        The mirror of _active_enemy_jammers(): with config.player_jammer=0 NO
+        pod is built (the drone's ``jam_active`` never goes True either), so this
+        is EMPTY and the enemy missile-detection calls receive ``jammers=()``
+        (the byte-identical legacy path — the EW field model is never consulted).
+        A pod that is built but toggled OFF (jam_active False), or a config with
+        player_jammer=0 (the pod never armed), likewise yields an empty list."""
+        if not getattr(self, "_player_jammer", False):
+            return []
+        drone = getattr(self, "drone", None)
+        if (drone is not None and drone.alive
+                and getattr(drone, "jam_active", False)
+                and getattr(drone, "pod_emitter", None) is not None):
+            return [drone.pod_emitter]
+        return []
+
+    def _player_self_deafen_jammers(self) -> list:
+        """The hot pod's SELF-DEAFEN beacon — fed to the drone's OWN
+        elint.update so going loud raises the drone's passive noise floor by the
+        calibrated, BOUNDED DRONE_POD_SELF_DEAFEN_FLOOR (a fixed co-channel
+        desense, NOT the enemy-facing pod power, so it never walls off the
+        player's own localization).  Same gate as _active_player_jammers (armed
+        + alive + hot); empty otherwise -> the ELINT floor is unchanged
+        (byte-identical default)."""
+        if not getattr(self, "_player_jammer", False):
+            return []
+        drone = getattr(self, "drone", None)
+        if (drone is not None and drone.alive
+                and getattr(drone, "jam_active", False)
+                and getattr(drone, "self_deafen_emitter", None) is not None):
+            return [drone.self_deafen_emitter]
+        return []
+
     def _player_visible(self, pos, size_class: str) -> bool:
         """The player picture's visibility gate: the radar net, OR (Phase
         4) the live drone's SAR strip for SURFACE targets — every surface
@@ -877,8 +924,17 @@ class CombatWorld(WorldState):
             # -> sim/recon sigma scaling) so real-emitter fixes get HONESTLY
             # softer.  n_jammers=0 -> _active_enemy_jammers() empty -> floor 0 ->
             # byte-identical to the legacy draw.
+            # M3-F4 self-deafen cost: when the drone's OWN EW pod is hot, its
+            # SELF-DEAFEN beacon (a calibrated, BOUNDED floor — NOT the loud
+            # enemy-facing pod power) ALSO joins the drone's own noise floor, so
+            # a hot pod heavily-but-finitely softens the player's own ELINT fixes
+            # (going loud blinds your own ESM, without ever walling localization
+            # off).  player_jammer=0 / pod OFF -> _player_self_deafen_jammers()
+            # empty -> no extra floor -> byte-identical.
+            elint_jammers = (self._active_enemy_jammers()
+                             + self._player_self_deafen_jammers())
             self.elint.update(drone.pos, self._emitters(), sim_time=now,
-                              jammers=self._active_enemy_jammers())
+                              jammers=elint_jammers)
         if now >= self._rwr_next_t:
             self._rwr_next_t = now + RWR_PERIOD_S
             # Threat emitters = ship mounts + airborne enemy air radars
@@ -1256,10 +1312,18 @@ class CombatWorld(WorldState):
                 continue
             key = id(m)
             live_keys.add(key)
+            # M3-F4: an active PLAYER EW pod collapses the enemy radar net via
+            # the same burn-through field model (sim/ew.py).  The pod bites HERE
+            # — a player missile that an enemy SPY-1/AWACS would track with the
+            # pod OFF leaks under the degraded picture (its track stops forming /
+            # refreshing).  Empty (player_jammer=0 or pod OFF) -> jammers=() ->
+            # byte-identical to the legacy detection.  NO-CHEAT: the enemy still
+            # only reacts to its OWN degraded detects(), never a truth read.
+            pjam = self._active_player_jammers()
             rec = self._cmd_missile_intel.get(key)
             if rec is None:
                 det = next((r for r in detectors
-                            if r.detects(m.pos, "missile")), None)
+                            if r.detects(m.pos, "missile", jammers=pjam)), None)
                 if det is None:
                     continue                    # nobody sees it yet
                 rec = dict(track_id=f"hostile_{key:x}", first_t=now,
@@ -1267,7 +1331,8 @@ class CombatWorld(WorldState):
                            det_pos=np.asarray(det.pos,
                                               dtype=np.float64).copy())
                 self._cmd_missile_intel[key] = rec
-            elif not any(r.detects(m.pos, "missile") for r in detectors):
+            elif not any(r.detects(m.pos, "missile", jammers=pjam)
+                         for r in detectors):
                 continue                        # track coasts, no refresh
             # kind = the enemy's sensor CLASSIFICATION of the inbound (e.g.
             # "kh31p" for a detected player ARM) — drives the ARM-EMCON counter

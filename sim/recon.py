@@ -189,6 +189,49 @@ ELINT_RANGE_TEST_SCALES: Tuple[float, float] = (0.5, 2.0)
 # Octave steps: a fix whose range is real localizes it well within a
 # factor of two (the CRLB then reports the honest tighter error).
 
+# --- M3-F4 self-protect / escort jammer pod ---
+DRONE_POD_JAM_POWER_W: float = 200.0
+# Effective in-band barrage power (W) of the podded jammer when hot.  The
+# player's mirror of the Growler beacon: deliberately matched to the enemy
+# JAMMER_POWER_W / ew.EW_DEFAULT_JAM_POWER_W (the calibrated game-balance figure
+# the sim/ew.py burn-through field is tuned to) so a hot pod collapses an enemy
+# SPY-1 ring by the SAME physics that an enemy Growler collapses the player's.
+# A physics reviewer should re-measure against a real ALQ-99/249 pod once a
+# dedicated player-EW calibration probe exists.
+
+DRONE_POD_ENEMY_OFFSET_M: float = 1_000.0
+# Tiny fixed offset (m) of the enemy-facing pod beacon from the airframe.  The
+# pod is physically AT the drone (R ~ 0); offsetting the beacon 1 km keeps the
+# sim/ew.py field math finite (no zero-range singularity) while being utterly
+# negligible against the ENEMY radars it collapses (those sit 100+ km away, so a
+# 1 km shift moves their burn-through ring by < 0.01%).  This is the pod the
+# enemy detection path consumes.
+
+DRONE_POD_SELF_DEAFEN_FLOOR: float = 0.75
+# Self-deafen noise floor (DIMENSIONLESS, sim/ew.noise_floor_at units) the hot
+# pod raises at the drone's OWN passive ELINT receiver.  The pod is ON the
+# airframe, so its co-channel desense is a FIXED property of the podded
+# transmitter, NOT a 1/R**2 geometry term (R~0 is meaningless / singular).  We
+# therefore model the self-deafen as a CALIBRATED, BOUNDED floor rather than a
+# distance.
+#
+# CALIBRATED (probe-style sweep, 20 seeds, in this file's build session):
+# 0.75 is ~1.8x the nominal standoff-Growler floor (~0.42, M3-F3) — a genuinely
+# HEAVIER cost than an external jammer, because the pod is co-located — yet via
+# the recon sigma law sigma_eff = base*(1 + EW_ELINT_SIGMA_K*floor) it inflates
+# the bearing sigma only 1.75x.  Measured effect of a determined 60-km-abeam,
+# 64-pair cross-track pass on a real ground emitter: the fix quality is ~1.65x
+# WORSE on average (every one of 20 seeds softer) but STILL actionable on EVERY
+# seed (20/20).  This is the spec's "genuine cost, not a wall" line: the recon
+# range-observability / consistency gates tip a fix to inf around sigma ~2x
+# (floor ~1.0), so floors >= 1.0 WALL OFF localization entirely (the explicit
+# spec risk: "too high and the player can never localize anything while
+# jammed") — 0.75 sits deliberately below that knee.  Finite + bounded by
+# construction: never a div-by-zero, never inf.  The self-deafen jammer is
+# synthesised from this floor (a co-located beacon whose effective power
+# back-solves to it), so the SAME deterministic sim/ew.noise_floor_at law
+# carries it — no special-case branch, no new RNG.
+
 # --- SAR sensor ---
 SAR_HALF_WIDTH_M: float = 25_000.0
 # Spec §4.3: "~50 km strip beneath the drone" → ±25 km half-width.
@@ -259,9 +302,80 @@ class ReconDrone:
             rng if rng is not None else np.random.default_rng()
         )
 
+        # ---- M3-F4 self-protect / escort jammer pod ----
+        # A podded barrage jammer the player toggles ON to collapse the ENEMY
+        # radar net (sim/ew.py field model, applied against enemy radars in
+        # world/combat.py) so a sea-skim salvo leaks — at the cost of going loud
+        # (the hot pod deafens the drone's OWN passive ELINT).  ``jam_active``
+        # is False by default: an OFF pod is never an active jammer, so the
+        # enemy detection calls receive jammers=() and stay byte-identical.
+        #
+        # TWO duck-typed beacons (both Radar-shaped: ``.pos`` (3,) +
+        # ``.jam_power_w``; empty ranges => never sensors), so the ONE
+        # deterministic sim/ew.noise_floor_at / burn-through law serves both
+        # uses without a special-case branch:
+        #   * ``pod_emitter`` — the ENEMY-facing beacon at DRONE_POD_JAM_POWER_W,
+        #     offset DRONE_POD_ENEMY_OFFSET_M from the airframe (finite field
+        #     math; negligible against the 100+ km enemy radars it collapses).
+        #     world/combat.py feeds THIS to the enemy missile-detection calls.
+        #   * ``self_deafen_emitter`` — a co-located beacon whose power is
+        #     BACK-SOLVED so its noise_floor_at the drone equals the calibrated,
+        #     BOUNDED DRONE_POD_SELF_DEAFEN_FLOOR (a fixed co-channel desense, NOT
+        #     a 1/R**2 wall).  world/combat.py feeds THIS to the drone's OWN
+        #     elint.update so a hot pod softens the player's own fixes by a heavy
+        #     but non-infinite amount.
+        from sim.radar import Radar as _Radar
+        self.pod_emitter = _Radar(
+            radar_id=f"{aircraft_id}_pod",
+            pos=self.pos.copy(),
+            antenna_m=0.0,
+            ranges={},
+        )
+        self.pod_emitter.jam_power_w = float(DRONE_POD_JAM_POWER_W)
+        self.pod_emitter.emitting = True   # the BEACON radiates while jam_active
+
+        # Back-solve the self-deafen beacon power so noise_floor_at(drone) lands
+        # exactly on DRONE_POD_SELF_DEAFEN_FLOOR at the fixed enemy offset
+        # distance:  floor = power * EW_NOISE_REF / R**2  =>
+        #            power = floor * R**2 / EW_NOISE_REF.
+        # (Lazy import to avoid a sim.ew<->recon import cycle.)
+        import sim.ew as _ew
+        self_power = (DRONE_POD_SELF_DEAFEN_FLOOR
+                      * (DRONE_POD_ENEMY_OFFSET_M ** 2) / _ew.EW_NOISE_REF)
+        self.self_deafen_emitter = _Radar(
+            radar_id=f"{aircraft_id}_pod_self",
+            pos=self.pos.copy(),
+            antenna_m=0.0,
+            ranges={},
+        )
+        self.self_deafen_emitter.jam_power_w = float(self_power)
+        self.self_deafen_emitter.emitting = True
+        self.jam_active: bool = False
+        self._sync_pod()
+
     # ------------------------------------------------------------------
     # Public API — duck-type interop (ContactBoard, tactical map, RWR)
     # ------------------------------------------------------------------
+
+    def set_jam(self, on: bool) -> None:
+        """Toggle the EW pod (M3-F4).  ON: the pod radiates the barrage corridor
+        that collapses the ENEMY radar net so a salvo leaks, and deafens the
+        drone's own passive ELINT (the going-loud cost).  OFF (default): the pod
+        is silent, contributes no jammer, byte-identical to the no-pod path."""
+        self.jam_active = bool(on)
+
+    def _sync_pod(self) -> None:
+        """Keep both pod beacons glued to the airframe, OFFSET by the fixed
+        enemy-offset distance so the sim/ew.py field math stays finite (the pod
+        is physically at R~0; noise_floor_at / burn_through would otherwise
+        singularly blow up).  Called every update() so the pod follows the drone.
+        The offset is a fixed +X nudge (1 km << any real emitter range, so it is
+        invisible to the enemy-radar collapse geometry; for the co-located
+        self-deafen beacon it is the back-solve distance the power was tuned to)."""
+        for em in (self.pod_emitter, self.self_deafen_emitter):
+            em.pos[0] = self.pos[0] + DRONE_POD_ENEMY_OFFSET_M
+            em.pos[1] = self.pos[1]
+            em.pos[2] = self.pos[2]
 
     @property
     def alive(self) -> bool:
@@ -358,6 +472,7 @@ class ReconDrone:
             return
         if self.state == DRONE_SHOT_DOWN:
             self._update_falling(dt)
+            self._sync_pod()    # pod tracks the wreck (it never jams once dead)
             return
         # DRONE_AIRBORNE
         if self._loitering:
@@ -366,6 +481,7 @@ class ReconDrone:
             self._update_route(dt)
         # Hold altitude (no climb/descent model needed — spawns at cruise alt)
         self.pos[1] = DRONE_ALT_M
+        self._sync_pod()        # keep the EW pod beacon glued to the airframe
 
     def _update_route(self, dt: float) -> None:
         """Steer toward the current waypoint; advance when close enough."""
