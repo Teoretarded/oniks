@@ -64,10 +64,17 @@ class Radar:
     def antenna_alt(self) -> float:
         return float(self.pos[1]) + self.antenna_m
 
-    def detects(self, target_pos, size_class: str) -> bool:
+    def detects(self, target_pos, size_class: str, jammers=()) -> bool:
         if not (self.alive and self.emitting):
             return False
-        max_range = self.ranges.get(size_class, 0.0)
+        # Empty path (default): byte-identical to the pre-EW gate — the raw
+        # range lookup, untouched. Only consult the EW burn-through field
+        # when one or more jammers are present (M3-F1, sim/ew.py).
+        if not jammers:
+            max_range = self.ranges.get(size_class, 0.0)
+        else:
+            from sim import ew
+            max_range = ew.effective_range(self, size_class, target_pos, jammers)
         dx = float(target_pos[0]) - float(self.pos[0])
         dz = float(target_pos[2]) - float(self.pos[2])
         rng = math.hypot(dx, dz)
@@ -85,5 +92,6 @@ class RadarNetwork:
     def __init__(self, radars=()):
         self.radars = list(radars)
 
-    def visible(self, target_pos, size_class: str) -> bool:
-        return any(r.detects(target_pos, size_class) for r in self.radars)
+    def visible(self, target_pos, size_class: str, jammers=()) -> bool:
+        return any(r.detects(target_pos, size_class, jammers=jammers)
+                   for r in self.radars)
