@@ -64,6 +64,14 @@ def apply_missile_hits(missiles, ships, effects_out):
     for m in missiles:
         if not m.alive:
             continue
+        # Side check (2026-06-18 audit): ships are all enemy-side, so only the
+        # player's anti-ship rounds (is_hostile False — Oniks/Zircon, and the
+        # M4 ASBM) may damage a hull.  Enemy interceptors (SM-2/SM-6) and strike
+        # rounds carry is_hostile=True and must never OBB-hit an enemy ship
+        # (a sister-ship friendly-fire kill).  Mirrors the Pantsir/structure
+        # sweeps' getattr(m, "is_hostile", False) convention.
+        if getattr(m, "is_hostile", False):
+            continue
         mx, my, mz = m.pos.tolist()
         ppx, ppy, ppz = m.prev_pos.tolist()
         seg = math.sqrt((mx - ppx) ** 2 + (my - ppy) ** 2 + (mz - ppz) ** 2)

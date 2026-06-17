@@ -241,3 +241,14 @@ def test_calibration_band():
     LO_M = 165_000.0
     HI_M = 185_000.0
     assert LO_M < eff < HI_M, f"effective_range={eff:.0f} outside [{LO_M},{HI_M}]"
+
+
+def test_jammed_blind_class_stays_blind():
+    """A class the radar cannot see (range 0) must NOT gain the 8 km close-in
+    floor under jamming — jamming only ever REDUCES coverage, never grants it
+    (2026-06-18 audit, LOW).  Unjammed and jammed both stay 0.0."""
+    r = _radar()
+    jammer = _Jammer(_at_ground_range(150_000.0), 200.0)
+    tgt = _at_ground_range(5_000.0)
+    assert ew.effective_range(r, "nonesuch", tgt, ()) == 0.0
+    assert ew.effective_range(r, "nonesuch", tgt, (jammer,)) == 0.0

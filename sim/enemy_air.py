@@ -185,6 +185,13 @@ IR_FIRE_RANGE_M: float = 6_000.0    # m
 # remaining ~2.5 km vertically as an AIM-9X snap-up shot (well inside the
 # seeker/energy envelope measured by the 5b probes).
 FIGHTER_INTERCEPT_CEILING_M: float = 15_500.0
+# Anti-strobe dwell for an entity intercept: keep tracking the drone's cached
+# LAST-KNOWN fix this long after the nose radar loses the cone, then drop the
+# entity track so the commander re-vectors.  Continuous truth-steering AND the
+# AIM-9X shot both require a CURRENT own-radar hold (no single-ping-then-track-
+# forever) — the 2026-06-18 zero-bias no-cheat fix.  Sized like the AWACS EMCON
+# dwell so a cone that swings off for a beat doesn't clear the pursuit.
+FIGHTER_INTERCEPT_HOLD_S: float = 8.0
 
 # Default fighter hardpoints per sortie (4 stations):
 # Strike loadout: 2x JASSM (stations 1, 2), 2x AIM-9X (stations 3, 4).
@@ -642,6 +649,13 @@ class Fighter:
         # Intercept order target: duck-typed target entity (e.g. ReconDrone)
         # the commander pointed us at.  None = no intercept order active.
         self._intercept_target = None
+        # No-cheat intercept tracking (2026-06-18 audit fix): the truth steer/
+        # fire point is only valid while the nose radar HOLDS the drone THIS
+        # step.  On a loss we fly the cached last-known fix for
+        # FIGHTER_INTERCEPT_HOLD_S (anti-strobe), then drop the entity track.
+        self._intercept_lost_s: float = 0.0
+        self._intercept_last_xz: Optional[np.ndarray] = None
+        self._intercept_last_alt: float = 0.0
         # Strike order state: target XZ coordinate (from the commander order)
         # plus the terminal aim altitude ASL for JASSM releases (structures
         # on elevated terrain need their mid-height — sim/strike.py
@@ -1207,8 +1221,15 @@ class Fighter:
 
         # --- AIM-9X (IR) release --- intercept target
         if self._intercept_target is not None and self._intercept_target.alive:
+            _tgt = self._intercept_target
             for i, wpn in enumerate(self._hardpoints):
                 if wpn == "aim9x":
+                    # NO-CHEAT (2026-06-18 audit): fire ONLY with a live nose-
+                    # radar hold this step — never on a truth pos with no
+                    # current own-sensor contact.
+                    if not self.radar.detects(
+                            _tgt.pos, getattr(_tgt, "radar_size", "stealth")):
+                        break
                     tpos = np.asarray(self._intercept_target.pos, dtype=np.float64)
                     tvel = np.asarray(self._intercept_target.velocity(),
                                       dtype=np.float64)
@@ -1328,22 +1349,42 @@ class Fighter:
         if (self._intercept_target is not None
                 and self._intercept_target.alive
                 and self.state in (FS_TRANSIT, FS_ON_STATION)):
-            tpos = self._intercept_target.pos
-            self._set_transit_to(np.array([float(tpos[0]), float(tpos[2])]))
-            if self.state == FS_ON_STATION:
-                self.state = FS_TRANSIT
-            # Snap-up climb toward the target, capped at the combat
-            # ceiling (FIGHTER_INTERCEPT_CEILING_M doc): without it a
-            # 9 km fighter can never close the IR fire gate on the 18 km
-            # drone.  Altitude is held wherever the hunt ends; the RTB
-            # glide brings it home.
-            climb_to = min(float(tpos[1]), FIGHTER_INTERCEPT_CEILING_M)
-            if self.pos[1] < climb_to:
-                self.pos[1] = min(climb_to,
-                                  self.pos[1] + FIGHTER_CLIMB_RATE_MPS * dt)
-            elif self.pos[1] > climb_to:
-                self.pos[1] = max(climb_to,
-                                  self.pos[1] - FIGHTER_CLIMB_RATE_MPS * dt)
+            tgt = self._intercept_target
+            # NO-CHEAT (2026-06-18 audit): the truth steer/climb point is only
+            # valid while the nose radar HOLDS the drone THIS step.  When held,
+            # steer on truth and cache it as the last-known.  On a loss, fly the
+            # cached last-known for the FIGHTER_INTERCEPT_HOLD_S anti-strobe
+            # dwell, then drop the entity track so the commander re-vectors —
+            # never a permanent truth-track off a single ping.
+            held = self.radar.detects(
+                tgt.pos, getattr(tgt, "radar_size", "stealth"))
+            if held:
+                tpos = np.asarray(tgt.pos, dtype=np.float64)
+                self._intercept_lost_s = 0.0
+                self._intercept_last_xz = np.array([tpos[0], tpos[2]])
+                self._intercept_last_alt = float(tpos[1])
+            else:
+                self._intercept_lost_s += dt
+                if (self._intercept_lost_s > FIGHTER_INTERCEPT_HOLD_S
+                        or self._intercept_last_xz is None):
+                    self._intercept_target = None
+            if self._intercept_target is not None:
+                self._set_transit_to(self._intercept_last_xz)
+                if self.state == FS_ON_STATION:
+                    self.state = FS_TRANSIT
+                # Snap-up climb toward the (last-known) target altitude, capped
+                # at the combat ceiling (FIGHTER_INTERCEPT_CEILING_M doc):
+                # without it a 9 km fighter can never close the IR fire gate on
+                # the 18 km drone.  Altitude is held wherever the hunt ends; the
+                # RTB glide brings it home.
+                climb_to = min(self._intercept_last_alt,
+                               FIGHTER_INTERCEPT_CEILING_M)
+                if self.pos[1] < climb_to:
+                    self.pos[1] = min(climb_to,
+                                      self.pos[1] + FIGHTER_CLIMB_RATE_MPS * dt)
+                elif self.pos[1] > climb_to:
+                    self.pos[1] = max(climb_to,
+                                      self.pos[1] - FIGHTER_CLIMB_RATE_MPS * dt)
 
         # Sync nose-radar position to the fighter's current pos.
         self.radar.pos[0] = self.pos[0]

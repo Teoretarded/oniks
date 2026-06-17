@@ -167,6 +167,11 @@ def effective_range(radar, size_class: str, target_pos, jammers,
     radar_max = radar.ranges.get(size_class, 0.0)
     if not jammers:
         return radar_max
+    # A radar blind to this size class (range 0) must STAY blind under jamming:
+    # the close-in floor only ever LIFTS a class the radar can already see — it
+    # must never GRANT coverage jamming should reduce (2026-06-18 audit, LOW).
+    if radar_max <= 0.0:
+        return 0.0
     bt = burn_through_range(radar, target_pos, jammers, height_fn=height_fn)
     collapsed = min(radar_max, bt)
     return max(EW_CLOSE_FLOOR_M, collapsed)

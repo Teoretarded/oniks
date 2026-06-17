@@ -98,6 +98,27 @@ def test_apply_missile_hits_clean_miss_changes_nothing():
     assert m.alive and ship.state == ST_ALIVE and ship.hp == 2 and not effects
 
 
+def test_apply_missile_hits_enemy_round_never_hits_a_ship():
+    """No-friendly-fire (2026-06-18 audit): an enemy interceptor/strike round
+    (is_hostile True) must NOT OBB-hit an enemy ship (ships are all enemy-side);
+    only player anti-ship rounds (is_hostile False) damage a hull."""
+    ship = Ship("c", "cargo", [(0.0, 0.0), (0.0, 50_000.0)], 0.5)
+    c, _, _ = ship.obb()
+    effects = []
+    # An enemy SAM whose swept segment crosses the sister hull's OBB.
+    hostile = _FakeMissile(c + np.array([-200.0, 0.0, 0.0]),
+                           c + np.array([40.0, 0.0, 0.0]))
+    hostile.is_hostile = True
+    apply_missile_hits([hostile], [ship], effects)
+    assert hostile.alive and ship.state == ST_ALIVE and ship.hp == 2
+    assert not effects
+    # The SAME geometry from a player round (is_hostile absent/False) still hits.
+    player = _FakeMissile(c + np.array([-200.0, 0.0, 0.0]),
+                          c + np.array([40.0, 0.0, 0.0]))
+    apply_missile_hits([player], [ship], effects)
+    assert not player.alive and ship.hp == 1 and ship.state == ST_BURNING
+
+
 def test_apply_missile_hits_skips_dead_missiles():
     ship = Ship("c", "cargo", [(0.0, 0.0), (0.0, 50_000.0)], 0.5)
     c, _, _ = ship.obb()
