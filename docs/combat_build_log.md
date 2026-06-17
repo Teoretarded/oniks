@@ -1014,3 +1014,31 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
   draw is BYTE-IDENTICAL (proven bit-level); all recon/ELINT/contacts tests
   unchanged, smoke 70/70, default battle byte-identical. `sim/ew.py` stays
   RNG-free. Orchestrator re-verified (EW tests + regression contracts + probe).
+
+### M3-F4 Player drone EW pod — two-sided jamming closes (commit `51cc0dc`)
+- **Files:** `sim/recon.py` (`ReconDrone.pod_emitter` enemy-facing beacon +
+  `self_deafen_emitter` + `jam_active`/`set_jam`/`_sync_pod`); `world/combat.py`
+  (`_active_player_jammers()` plumbed into the enemy missile-detection `detects()`
+  calls so a salvo leaks; `_player_self_deafen_jammers()` into the drone's own
+  ELINT); `sim/enemy_air.py` (`FighterRadar.detects(jammers=())` passthrough);
+  `world/combat_config.py` (`player_jammer:int=0` + `CLAMP_PLAYER_JAMMER`);
+  `game/keybinds.py`+`controls.py`+`sandbox.py` (JAM toggle, key G, drone-only);
+  `game/hud.py` (drone JAM row); NEW `tests/test_player_ew_pod.py` (8).
+- **The salvo LEAKS under the pod (e2e):** pod hot ~30 km from a destroyer SPY-1
+  collapses its missile ring 300→~80 km; a 190 km player missile tracked pod-OFF
+  forms NO enemy missile-track pod-ON. Close-in EW floor still catches a
+  knife-range round. **Cost:** the hot pod deafens the drone's OWN ELINT
+  (calibrated self-deafen floor 0.75 via a 20-seed sweep — ~1.65× softer but
+  STILL actionable on all 20 seeds; sits below the gate "wall" knee).
+- **No-cheat:** the enemy reacts ONLY to its own degraded `detects()` (the field
+  model collapse) — never a truth read (diff grep: only a comment mentions
+  "truth"). Determinism: no new RNG. **Byte-identical:** `player_jammer=0` →
+  no pod → `_active_player_jammers()` empty → enemy detects `jammers=()` →
+  identical; default battle bit-identical. Orchestrator-verified (smoke 70/70,
+  pod+duel+jammer tests green, truth-read grep clean).
+- **Deferred (v1 scope):** "the enemy localizes + actively shoots the loud
+  drone" — the going-loud cost this round is the self-deafen + the pod beacon
+  being ELINT-hearable/SEAD-able by symmetry.
+- **EW cluster status:** field model + Growler + ELINT-sigma + player pod all
+  shipped. Remaining M3: JAMMED-band UI + emissions meter, then the terrain/
+  HeightField sub-cluster (spec 09).
