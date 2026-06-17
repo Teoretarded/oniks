@@ -603,7 +603,8 @@ class CombatWorld(WorldState):
         self._fighter_list = [e for e in self.enemy_air
                               if isinstance(e, Fighter)]
         self.commander = EnemyCommander(
-            self._fighter_list, self.awacs, destroyers, seed=rng_seed)
+            self._fighter_list, self.awacs, destroyers, seed=rng_seed,
+            ground_radars=self._enemy_ground_radars)
         self._cmd_rng = np.random.default_rng([rng_seed, 5])
         self._cmd_feed_next_t = 0.0
         self._cmd_weapon_next_t = 0.0
@@ -1200,9 +1201,14 @@ class CombatWorld(WorldState):
                 self._cmd_missile_intel[key] = rec
             elif not any(r.detects(m.pos, "missile") for r in detectors):
                 continue                        # track coasts, no refresh
+            # kind = the enemy's sensor CLASSIFICATION of the inbound (e.g.
+            # "kh31p" for a detected player ARM) — drives the ARM-EMCON counter
+            # (M2-T3). Fog-honest: stamped only on a physical detection above,
+            # never a truth read of the round's intent.
             self.commander.process_missile_track(
                 rec["track_id"], m.pos, m.vel, now, rec["first_t"],
-                rec["first_pos"], rec["first_vel"], rec["det_pos"])
+                rec["first_pos"], rec["first_vel"], rec["det_pos"],
+                kind=getattr(getattr(m, "weapon", None), "weapon_id", None))
         self._cmd_missile_intel = {
             k: v for k, v in self._cmd_missile_intel.items()
             if k in live_keys}
@@ -1288,6 +1294,16 @@ class CombatWorld(WorldState):
                 # (the spec §4.3 reaction, see _drone_sector_alert).
                 return
             ship.radar.emitting = (kind == "ship_emit")
+        elif kind in ("ground_radar_silent", "ground_radar_emit"):
+            # ARM-EMCON for enemy ground radars (M2-T3): a silenced radar
+            # denies the inbound ARM its emission (degrading it to the CEP
+            # ring). Toggle the matching _enemy_ground_radars entry; a dead
+            # radar ignores the order.
+            radar = next((r for r in getattr(self, "_enemy_ground_radars", [])
+                          if r.radar_id == order["radar_id"]), None)
+            if radar is None or not radar.alive:
+                return
+            radar.emitting = (kind == "ground_radar_emit")
         elif kind in ("harm_package", "jassm_package"):
             self._launch_strike_package(order, sead=(kind == "harm_package"))
         elif kind == "tomahawk_salvo":

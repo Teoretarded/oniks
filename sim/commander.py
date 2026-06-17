@@ -32,6 +32,14 @@ relevant entity.  Defined schemas:
       {"type": "ship_emit", "ship_id": str}
       Tell the ship's radar to start emitting (for self-defense).
 
+  GROUND_RADAR_SILENT / GROUND_RADAR_EMIT:
+      {"type": "ground_radar_silent"|"ground_radar_emit", "radar_id": str}
+      ARM-EMCON (M2-T3): toggle an enemy coastal ground radar's emission. The
+      commander silences a ground radar that SENSES an inbound ARM track
+      (kind=="kh31p") within ARM_EMCON_RANGE_M (silence is the only counter a
+      SAM-less ground radar has), and re-emits once the threat is clear and the
+      dwell has elapsed.
+
   HARM_PACKAGE:
       {"type": "harm_package",
        "target_pos": np.ndarray,           # believed player radar XZ
@@ -99,6 +107,11 @@ DOCTRINE (priority order, evaluated each tick)
    - Ship radar silence: SILENT when a drone track exists in the picture
      and the ship's sector is quiet; EMIT when inbound missile tracks exist
      (self-defense beats stealth).
+   - ARM-EMCON (M2-T3): a SENSED ARM track (kind=="kh31p") within
+     ARM_EMCON_RANGE_M of a ship OR ground radar -> that radar goes SILENT for
+     ARM_EMCON_DWELL_S (overriding ship self-defense — emitting feeds the ARM
+     seeker; silence degrades the live ARM to its CEP ring). Sensor-triggered
+     off the picture track, never the ARM's truth.
 
 2. BLIND:
    While the player radar station is believed alive and located, and HARM
@@ -170,6 +183,20 @@ AWACS_EMCON_DWELL_S: float = 60.0     # s the AWACS holds SILENT after a threat
 #   rides out the whole terminal threat window (a missile within the 100 km flee
 #   range closes in well under this) so the radar comes back up only once the
 #   sky is genuinely clear. Re-emits immediately if NO threat for the dwell.
+
+# ARM-EMCON (M2-T3): an enemy radar that SENSES an inbound anti-radiation
+# missile track (kind == "kh31p") within this threat radius goes SILENT for a
+# dwell — the counter to the player Kh-31P. Emitting would feed the ARM's
+# passive seeker, so silence (which degrades the live ARM to its seeded CEP
+# ring — "a silenced radar usually survives") OVERRIDES the ship self-defense
+# emit. 60 km sits inside the Kh-31P's measured ~130 km reach with margin: the
+# radar darks well before the round closes to a terminal lock, but not so far
+# out that every distant snooper pins it silent.
+ARM_EMCON_RANGE_M: float = 60_000.0   # m; sensed-ARM threat radius -> EMCON
+ARM_EMCON_DWELL_S: float = AWACS_EMCON_DWELL_S  # 60 s; hold silent after the
+#   ARM track was last seen (mirrors the AWACS EMCON anti-strobe: a radar that
+#   un-blinds the instant its own dark track ages out re-radiates at the worst
+#   moment — the dwell rides out the terminal threat window).
 
 # Strike geometry (spec section 6 mission generator).
 HARM_INGRESS_ALT_M: float = 150.0     # m AGL ingress altitude for HARM package
@@ -419,8 +446,15 @@ class EnemyPicture:
         first_seen_t: Optional[float] = None,
         alt_at_first: Optional[float] = None,
         range_at_first: Optional[float] = None,
+        kind: Optional[str] = None,
     ) -> None:
-        """Record or refresh an enemy-radar missile track."""
+        """Record or refresh an enemy-radar missile track.
+
+        ``kind`` is the enemy's SENSOR CLASSIFICATION of the inbound (e.g.
+        "kh31p" for a detected player anti-radiation missile) — fed by the world
+        when an enemy radar detects the round, analogous to the player's contact
+        stamps. It is fog-honest (the enemy's belief), NOT a truth read. Additive
+        and optional: existing callers pass nothing -> kind None."""
         mt = self.missile_tracks.get(track_id)
         if mt is None:
             mt = {
@@ -430,12 +464,14 @@ class EnemyPicture:
                 "first_seen_t": first_seen_t if first_seen_t is not None else sim_time,
                 "alt_at_first": alt_at_first,
                 "range_at_first": range_at_first,
+                "kind": kind,
             }
             self.missile_tracks[track_id] = mt
         else:
             mt["pos"] = pos.copy()
             mt["vel"] = vel.copy()
             mt["t"] = sim_time
+            mt["kind"] = kind   # refresh the sensor classification on update
 
     def live_missile_tracks(self, now: float, max_age: float = 30.0) -> list[dict]:
         return [
@@ -564,10 +600,15 @@ class EnemyCommander:
         picture: Optional[EnemyPicture] = None,
         weapon_stock: Optional[WeaponStock] = None,
         seed: int = 0,
+        ground_radars: Optional[list] = None,
     ) -> None:
         self.fighters = list(fighters)
         self.awacs = awacs
         self.destroyers = list(destroyers)
+        # Enemy ground radars (sim.radar.Radar): wired in like destroyers so the
+        # ARM-EMCON doctrine (_defend_ground_radars) can read their positions.
+        # Default empty -> the n==0 / test paths Just Work.
+        self.ground_radars = list(ground_radars) if ground_radars else []
         self.picture: EnemyPicture = (picture
                                       if picture is not None else EnemyPicture())
         self.stock: WeaponStock = (weapon_stock
@@ -586,6 +627,18 @@ class EnemyCommander:
         # AWACS flee state (tracks whether a flee order is currently in effect)
         self._awacs_fleeing: bool = False
         self._awacs_silent_until: float = 0.0   # EMCON dwell clock (see _defend_awacs)
+
+        # ARM-EMCON state (M2-T3), mirroring the AWACS _awacs_fleeing flag +
+        # _awacs_silent_until dwell clock, but PER ship / ground radar:
+        #   *_arm_emcon: ids the commander is currently holding SILENT for an ARM
+        #     (so it only un-silences what IT silenced — never overrides an
+        #     externally-set radar state, exactly like the AWACS resume gate).
+        #   *_arm_silent_until: id -> sim_time the silent dwell expires.
+        # Anti-strobe: the dwell is refreshed each tick the ARM is seen.
+        self._ship_arm_emcon: set[str] = set()
+        self._ship_arm_silent_until: dict[str, float] = {}
+        self._ground_arm_emcon: set[str] = set()
+        self._ground_arm_silent_until: dict[str, float] = {}
 
     # ------------------------------------------------------------------ tick
 
@@ -613,10 +666,27 @@ class EnemyCommander:
     # ---------------------------------------------------------------- defend
 
     def _doctrine_defend(self, sim_time: float) -> None:
-        """DEFEND: drone vectoring, AWACS flee, ship radar silence."""
+        """DEFEND: drone vectoring, AWACS flee, ship + ground radar silence."""
         self._defend_vs_drone(sim_time)
         self._defend_awacs(sim_time)
         self._defend_ship_radars(sim_time)
+        self._defend_ground_radars(sim_time)
+
+    def _sensed_arm_within(self, sim_time: float, pos, range_m: float) -> bool:
+        """True when the SENSED picture holds a live ARM-kind missile track
+        (kind == "kh31p") within ``range_m`` (ground-plane) of ``pos``.
+
+        NO-CHEAT: reads ONLY the EnemyPicture's sensed tracks (mt["pos"],
+        mt["kind"]) and the supplied radar position — never the ARM's truth."""
+        px, pz = float(pos[0]), float(pos[2])
+        for mt in self.picture.live_missile_tracks(sim_time):
+            if mt.get("kind") != "kh31p":
+                continue
+            mpos = mt["pos"]
+            if math.hypot(float(mpos[0]) - px,
+                          float(mpos[2]) - pz) <= range_m:
+                return True
+        return False
 
     def _defend_vs_drone(self, sim_time: float) -> None:
         """Vector the nearest armed CAP fighter at any live drone track."""
@@ -694,8 +764,15 @@ class EnemyCommander:
     def _defend_ship_radars(self, sim_time: float) -> None:
         """Manage per-ship radar silence.
 
-        Logic:
-          * Inbound missile tracks -> EMIT (self-defense beats stealth).
+        Priority (top wins):
+          * ARM-EMCON (M2-T3): a SENSED ARM track (kind=="kh31p") within
+            ARM_EMCON_RANGE_M of the ship's radar -> SILENT for the dwell.
+            This OVERRIDES self-defense: emitting would feed the ARM's passive
+            seeker, so going dark (which degrades the live ARM to its CEP ring)
+            is the survivable counter. Anti-strobe: silent once, held through
+            the dwell (per-ship _ship_arm_silent_until clock), then the normal
+            logic resumes.
+          * Inbound missile tracks (non-ARM) -> EMIT (self-defense beats stealth).
           * Drone track exists (recon threat) and no inbound missiles -> SILENT.
           * Neither -> no change.
         """
@@ -710,8 +787,38 @@ class EnemyCommander:
             radar = getattr(ship, "radar", None)
             if radar is None:
                 continue
+
+            # --- ARM-EMCON override (highest priority) ---
+            # Use the ship's own position (the SPY-1 is co-located — the world
+            # slaves radar.pos to ship.pos each step; sim/enemy_ships.py) so the
+            # check mirrors _defend_awacs (which uses awacs.pos).
+            sid = ship.ship_id
+            arm_threat = self._sensed_arm_within(
+                sim_time, ship.pos, ARM_EMCON_RANGE_M)
+            if arm_threat:
+                # Refresh the dwell each tick the ARM is seen (anti-strobe).
+                self._ship_arm_silent_until[sid] = sim_time + ARM_EMCON_DWELL_S
+            holding = sid in self._ship_arm_emcon
+            if arm_threat or (holding
+                              and sim_time < self._ship_arm_silent_until.get(
+                                  sid, 0.0)):
+                # Hold SILENT through the dwell; enter the EMCON ONCE (anti-spam:
+                # only order silent if the radar is currently up).
+                if not holding:
+                    self._ship_arm_emcon.add(sid)
+                    if radar.emitting:
+                        self.pending_orders.append({
+                            "type": "ship_silent",
+                            "ship_id": sid,
+                        })
+                continue   # ARM hold overrides the self-defense / stealth logic
+            # ARM threat clear AND dwell elapsed: release the EMCON hold. We do
+            # NOT force-emit here — the normal self-defense / stealth logic below
+            # decides the post-EMCON state (so an external silence is respected).
+            self._ship_arm_emcon.discard(sid)
+
             if has_inbound:
-                # Self-defense outranks stealth
+                # Self-defense outranks stealth (non-ARM inbound)
                 if not radar.emitting:
                     self.pending_orders.append({
                         "type": "ship_emit",
@@ -723,6 +830,53 @@ class EnemyCommander:
                     self.pending_orders.append({
                         "type": "ship_silent",
                         "ship_id": ship.ship_id,
+                    })
+
+    def _defend_ground_radars(self, sim_time: float) -> None:
+        """ARM-EMCON for the enemy coastal ground radars (M2-T3).
+
+        Ground radars have no SAM self-defense — silence is their ONLY counter
+        to an inbound ARM. A SENSED ARM track (kind=="kh31p") within
+        ARM_EMCON_RANGE_M -> SILENT for the dwell; once the threat is gone and
+        the dwell has elapsed, resume emitting. Anti-strobe via a per-radar
+        _ground_arm_silent_until clock (mirrors the ship/AWACS EMCON).
+
+        NO-CHEAT: the trigger reads ONLY the sensed picture track + the radar's
+        own position (see _sensed_arm_within), never the ARM's truth. With no
+        ARM ever fired (kh31p_ammo=0) no kind=="kh31p" track exists, so this
+        never silences -> byte-identical default battle.
+        """
+        for radar in self.ground_radars:
+            if not getattr(radar, "alive", False):
+                continue
+            rid = radar.radar_id
+            arm_threat = self._sensed_arm_within(
+                sim_time, radar.pos, ARM_EMCON_RANGE_M)
+            if arm_threat:
+                self._ground_arm_silent_until[rid] = (
+                    sim_time + ARM_EMCON_DWELL_S)
+            holding = rid in self._ground_arm_emcon
+            if arm_threat or (holding
+                              and sim_time < self._ground_arm_silent_until.get(
+                                  rid, 0.0)):
+                # Hold SILENT; enter the EMCON ONCE (only order silent if the
+                # radar is actually up — anti-spam).
+                if not holding:
+                    self._ground_arm_emcon.add(rid)
+                    if radar.emitting:
+                        self.pending_orders.append({
+                            "type": "ground_radar_silent",
+                            "radar_id": rid,
+                        })
+            elif holding:
+                # Threat clear AND dwell elapsed: release the EMCON and bring the
+                # radar back up — but ONLY because WE silenced it (the radar is
+                # in our EMCON set). We never re-emit a radar silenced elsewhere.
+                self._ground_arm_emcon.discard(rid)
+                if not radar.emitting:
+                    self.pending_orders.append({
+                        "type": "ground_radar_emit",
+                        "radar_id": rid,
                     })
 
     # ----------------------------------------------------------------- blind
@@ -932,6 +1086,7 @@ class EnemyCommander:
         first_seen_pos: np.ndarray,  # position when first detected (3,) XYZ
         first_seen_vel: np.ndarray,  # velocity when first detected
         detector_pos: np.ndarray,    # (3,) XYZ position of the detecting sensor
+        kind: Optional[str] = None,  # enemy sensor classification (e.g. "kh31p")
     ) -> None:
         """Process an enemy-radar missile track for the back-plot pipeline.
 
@@ -965,6 +1120,7 @@ class EnemyCommander:
             first_seen_t=first_seen_t,
             alt_at_first=alt_at_first,
             range_at_first=det_range,
+            kind=kind,
         )
 
         # --- Back-plot eligibility check ---
