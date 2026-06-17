@@ -142,6 +142,7 @@ from sim.arsenal import KH31P, N40N6, ONIKS, S300, S300_TEL, TOMAHAWK, ZIRCON
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
+import sim.ew as ew
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
                            AirBase, Awacs, Carrier, Fighter, JammerAircraft)
@@ -569,6 +570,20 @@ class CombatWorld(WorldState):
         # determinism) byte-identical.  emitter_id -> dict(pos (3,),
         # kind (str label), quality (m), last_heard (s), age (s)).
         self.emitter_contacts: dict = {}
+
+        # ---- M3-F5: published EW legibility summary ----
+        # A read-only summary the UI (HUD radar_jam_row + tactical _jam_overlay)
+        # reads each frame: whether an enemy jammer is active, the player net's
+        # burn-through range (from sim/ew.effective_range — the single source of
+        # truth), and the SENSOR-BELIEVED jammer fix/bearing (the drone ELINT
+        # est_pos / latest bearing — never a real jammer's truth).  Initialised
+        # INACTIVE so the byte-identical default battle reads "no jammer" before
+        # the first step; recomputed at the end of every step() from
+        # already-stepped state (it changes NO sim result — pure read-only).
+        self.ew_state: dict = {
+            "active": False, "burn_through_m": None,
+            "jammer_fix_xz": None, "jammer_bearing": None,
+        }
 
         # ---- Phase 5a: enemy air order of battle ----
         ax, az = AIRFIELD_XZ
@@ -1061,6 +1076,69 @@ class CombatWorld(WorldState):
         for eid in [e for e, c in self.emitter_contacts.items()
                     if now - c["last_heard"] > ELINT_FRESH_S]:
             del self.emitter_contacts[eid]
+
+    def _believed_jammer_fix(self):
+        """The drone's SENSOR-BELIEVED jammer location, fog-honest — NEVER a
+        real jammer entity's truth.  Returns ``(fix_xz, bearing)`` where:
+
+          * ``fix_xz`` is the localized ELINT est_pos (x, z) of a heard JAMMER
+            emitter taken from ``self.emitter_contacts`` (kind == "JAMMER",
+            already gated fresh + actionable by _inject_emitter_contacts), or
+            None when no jammer is localized yet;
+          * ``bearing`` is the latest raw ELINT bearing (rad) to a heard but
+            UN-localized jammer, used to draw the open bearing wedge before a
+            fix exists, or None when the jammer hasn't been heard at all.
+
+        With no ELINT picture / no jammer heard this is ``(None, None)`` and the
+        band is absent (the fog intent: the player feels the degraded range via
+        the HUD row but cannot place the source).  Pure read of the belief
+        stores; touches no truth and no sim state."""
+        fix_xz = None
+        # Localized fix first (the strong belief): the SIGINT picture only ever
+        # holds the est_pos triangulation, never radar truth.
+        for c in self.emitter_contacts.values():
+            if str(c.get("kind")) == "JAMMER":
+                p = c["pos"]
+                fix_xz = (float(p[0]), float(p[2]))
+                break
+        # Bearing fallback: a jammer heard on ELINT but not yet localized.
+        bearing = None
+        elint = getattr(self, "elint", None)
+        if elint is not None:
+            resolver = self._player_targetable_emitters()
+            for eid in elint.heard_emitters():
+                entry = resolver.get(eid)
+                if entry is None or entry[0] != "JAMMER":
+                    continue
+                latest = elint.latest_bearing(eid)
+                if latest is not None:
+                    bearing = float(latest[1])
+                    break
+        return fix_xz, bearing
+
+    def _publish_ew_state(self) -> None:
+        """Recompute self.ew_state from already-stepped state (read-only — it
+        changes NO sim result, so determinism is untouched).  With no active
+        enemy jammer the state is INACTIVE and the legacy byte-identical path is
+        preserved (the EW field model is never consulted).  The burn-through km
+        comes from sim/ew.effective_range for the player ship-ring radar under
+        the live enemy jammers — the SINGLE SOURCE OF TRUTH (never recomputed)."""
+        jammers = self._active_enemy_jammers()
+        if not jammers:
+            self.ew_state = {
+                "active": False, "burn_through_m": None,
+                "jammer_fix_xz": None, "jammer_bearing": None,
+            }
+            return
+        radar = self.radar_station
+        burn_through_m = ew.effective_range(radar, "ship", radar.pos, jammers)
+        fix_xz, bearing = self._believed_jammer_fix()
+        self.ew_state = {
+            "active": True,
+            "burn_through_m": float(burn_through_m),
+            "jammer_fix_xz": fix_xz,
+            "jammer_bearing": bearing,
+        }
 
     # ---------------------------------------------------------------- phase 5a
 
@@ -2133,3 +2211,9 @@ class CombatWorld(WorldState):
         self.contacts.update(self.enemy_air, dt, self.sim_time)
         self._step_recon_sensors()
         self._update_airfield_intel()
+        # M3-F5: publish the read-only EW legibility summary LAST, after the
+        # jammers + the recon/SIGINT picture are current this step.  Pure read:
+        # it derives the burn-through from sim/ew (single source of truth) and
+        # the believed jammer fix/bearing from the ELINT picture — it touches no
+        # sim state, so the default battle stays byte-identical.
+        self._publish_ew_state()

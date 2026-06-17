@@ -53,6 +53,12 @@ HINT_MARGIN = 10            # px, hint line offset from the bottom edge
 CORNER_MARGIN = 16          # px, bottom-right micro-label inset (spec §4.1)
 CAM_LABEL_GAP = 24          # px, camera-mode text stacked above F1 CONTROLS
 PANEL_ALPHA = 0.55          # HUD panel fill alpha (menus use 0.92)
+EMISSIONS_GAUGE_GAP_Y = 8   # px gap below the (data-driven) panel bottom where
+#                             the EMCON gauge sits — anchored off the panel's
+#                             real height, never a fixed offset from the top
+EMISSIONS_GAUGE_H = 6       # px gauge bar height (compact own-emissions strip)
+EMISSIONS_GAUGE_GAP = 8     # px between the EMCON caption and the bar
+EMISSIONS_PCT_W = 34        # px reserved for the right-aligned percent readout
 
 PANEL_RGBA = (0.043, 0.078, 0.071, 0.55)     # translucent dark panel fill
 LABEL_COL = (0.60, 0.72, 0.64, 1.0)          # muted green-gray labels
@@ -372,6 +378,77 @@ def radar_status_row(world):
     return ("RADAR", RADAR_SILENT, RELOAD_COL)
 
 
+# M3-F5 EW legibility readouts. The burn-through km comes from the world's
+# published ew_state (sim/ew.effective_range — the single source of truth); the
+# row never recomputes physics. Below the close-in detection floor the net has
+# effectively collapsed, so we read the red "NET DEGRADED" status rather than a
+# misleadingly tiny range. The emissions-exposure meter weights the player's OWN
+# loud emitters: an active search radar plus a HOT EW pod (own-truth, allowed)
+# normalised to a 0..1 "how loud am I" gauge so the player can manage the
+# back-plot risk of going active.
+RADAR_BURN_THRU_FLOOR_M = 12_000.0   # below this the ring has collapsed (just
+                                     # above sim/ew EW_CLOSE_FLOOR_M 8 km, so a
+                                     # ring pinned to the floor reads DEGRADED)
+EW_NET_DEGRADED = "NET DEGRADED"
+# Exposure weights (dimensionless, sum to the 1.0 cap). A live search radar is
+# the dominant back-plot emitter; the EW pod adds the rest. Tuned for legibility
+# (radar-alone reads ~2/3 of the gauge), not an RF datum.
+EXPOSURE_RADAR_W = 0.65
+EXPOSURE_POD_W = 0.35
+EXPOSURE_LABEL = "EMCON"             # the gauge caption (own emissions level)
+
+
+def radar_jam_row(world):
+    """The COMBAT radar burn-through row for the launcher blocks under enemy
+    jamming, or None when no jammer is active (SANDBOX / the byte-identical
+    default battle — world.ew_state inactive or absent) — pure, unit-testable.
+
+    Reads ONLY world.ew_state (the sim's published EW summary; the burn-through
+    km is sim/ew.effective_range, the single source of truth — never recomputed
+    here). Returns:
+      * ("RADAR", "BURN-THRU <km>km", amber) while the net still burns through
+        at usable range (degraded but functional);
+      * ("RADAR", "NET DEGRADED", red) once the ring has collapsed to the
+        close-in floor (the jammer owns the picture)."""
+    state = getattr(world, "ew_state", None)
+    if not state or not state.get("active"):
+        return None
+    bt = state.get("burn_through_m")
+    if bt is None or bt <= RADAR_BURN_THRU_FLOOR_M:
+        return ("RADAR", EW_NET_DEGRADED, DANGER_COL)
+    return ("RADAR", f"BURN-THRU {int(round(bt / 1e3))}km", RELOAD_COL)
+
+
+def emissions_exposure(world):
+    """The player's OWN emissions-loudness gauge (how loud the player currently
+    is on the back-plot), or None when nothing the player owns is radiating
+    (SANDBOX / silent radar + cold/unconfigured pod) — pure, unit-testable.
+
+    OWN-TRUTH ONLY (allowed): reads the player's own radar_station.emitting and,
+    when the EW pod is CONFIGURED (world._player_jammer) and the drone's pod is
+    HOT (drone.jam_active on a live drone), the pod's contribution.  Returns
+    ``(label, frac01, color)`` for gauge_bar; frac is the weighted 0..1 loudness
+    (radar dominant, pod additive, capped at 1.0).  An unarmed pod (player_jammer
+    off) is never counted even if a stale jam_active flag is set."""
+    radar = getattr(world, "radar_station", None)
+    if radar is None:
+        return None
+    frac = 0.0
+    if getattr(radar, "alive", False) and getattr(radar, "emitting", False):
+        frac += EXPOSURE_RADAR_W
+    if getattr(world, "_player_jammer", False):
+        drone = getattr(world, "drone", None)
+        if (drone is not None and getattr(drone, "alive", False)
+                and getattr(drone, "jam_active", False)):
+            frac += EXPOSURE_POD_W
+    if frac <= 0.0:
+        return None                          # silent: no gauge to show
+    frac = min(1.0, frac)
+    # Amber while moderately lit, red once loud (the back-plot is wide open).
+    col = DANGER_COL if frac >= 0.85 else RELOAD_COL
+    return (EXPOSURE_LABEL, frac, col)
+
+
 def pantsir_status_row(world, engaging: bool = False):
     """The COMBAT Pantsir point-defense summary row for the ground-launcher
     blocks, or None when the session world fields no Pantsirs (SANDBOX, or a
@@ -662,6 +739,35 @@ class HUD:
 
     # ---------------------------------------------------------------- blocks
 
+    def _emissions_gauge(self, world, panel_bottom) -> None:
+        """M3-F5 own-emissions meter: a small captioned gauge_bar showing how
+        loud the player is on the back-plot (own radar + hot EW pod, own-truth).
+        Drawn as a free overlay just below the telemetry panel; nothing renders
+        when emissions_exposure returns None (silent / SANDBOX).
+
+        ``panel_bottom`` is the platform block's actual bottom edge in px
+        (MARGIN + the height _block returned for THIS frame's rows/tubes). The
+        gauge anchors a fixed gap below it so it always clears the panel — even
+        when the jam row makes the bastion block tall — instead of a magic
+        offset from the panel top decoupled from the data-driven height."""
+        out = emissions_exposure(world)
+        if out is None:
+            return
+        label, frac, col = out
+        # Anchor a fixed gap below the panel's real bottom — a compact, always-
+        # legible strip; layout is screen-space only (no GL).
+        gx = MARGIN + PANEL_PAD
+        gy = panel_bottom + EMISSIONS_GAUGE_GAP_Y
+        self.text.draw_text(gx, gy, label, LABEL_COL, SMALL_SIZE)
+        cap_w = self.text.text_width(label, SMALL_SIZE)
+        bar_x = gx + cap_w + EMISSIONS_GAUGE_GAP
+        bar_w = PANEL_W - 2 * PANEL_PAD - cap_w - EMISSIONS_GAUGE_GAP \
+            - EMISSIONS_PCT_W
+        _hud_gauge_bar(self.text, bar_x, gy, max(bar_w, 1.0),
+                       EMISSIONS_GAUGE_H, frac, col)
+        self.text.draw_text(bar_x + max(bar_w, 1.0) + 4, gy,
+                            f"{int(round(frac * 100))}%", col, SMALL_SIZE)
+
     def _block(self, header: str, rows, cells=None) -> None:
         """Panel at the top-left: header + rule + (label, value, color)
         rows, in the menu language's chrome (border + amber corner ticks).
@@ -701,6 +807,11 @@ class HUD:
             ty += LINE_H
         if cells:
             self._tube_cells_row(tx, ty + TUBE_ROW_GAP, cells)
+        # The caller anchors the free-floating emissions gauge off the panel's
+        # actual bottom (the height is fully data-driven by row/tube count), so
+        # the gauge can never overlap a tall block (e.g. the jam-row-extended
+        # bastion panel). MARGIN + height == the panel's bottom edge in px.
+        return height
 
     def _tube_cells_row(self, x, y, cells) -> None:
         """Per-tube battery row (M1-F4): for each ``(label, state, frac)`` cell
@@ -782,7 +893,12 @@ class HUD:
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
-        self._block("RECON DRONE", rows)
+        height = self._block("RECON DRONE", rows)
+        # M3-F5: the own-emissions gauge ALSO shows while flying the drone — the
+        # platform where the EW pod is hot and the back-plot exposure is highest
+        # (the pod is a primary EXPOSURE_POD_W contributor). Anchored below the
+        # data-driven block bottom; None when silent -> nothing drawn.
+        self._emissions_gauge(world, MARGIN + height)
 
     def _bastion_block(self, sandbox) -> None:
         world = sandbox.world
@@ -820,6 +936,11 @@ class HUD:
         radar = radar_status_row(world)
         if radar is not None:
             rows.append(radar)
+        # M3-F5: degraded-radar burn-through row under enemy jamming (None in
+        # the default battle -> the block is unchanged).
+        jam = radar_jam_row(world)
+        if jam is not None:
+            rows.append(jam)
         pantsir = pantsir_status_row(
             world, engaging=getattr(sandbox, "pantsir_engaging", False))
         if pantsir is not None:
@@ -829,8 +950,12 @@ class HUD:
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
         # M1-F4: per-tube battery row (own-force; [] in SANDBOX -> unchanged).
-        self._block(BASTION.display_name.upper(), rows,
-                    cells=tube_cells(world, "bastion"))
+        height = self._block(BASTION.display_name.upper(), rows,
+                             cells=tube_cells(world, "bastion"))
+        # M3-F5: the own-emissions gauge (how loud the player is on the
+        # back-plot) anchored below the data-driven block bottom; None when
+        # silent -> nothing drawn.
+        self._emissions_gauge(world, MARGIN + height)
 
     def _s300_block(self, sandbox) -> None:
         world = sandbox.world
@@ -846,6 +971,11 @@ class HUD:
         radar = radar_status_row(world)
         if radar is not None:
             rows.append(radar)
+        # M3-F5: degraded-radar burn-through row under enemy jamming (None in
+        # the default battle -> the block is unchanged).
+        jam = radar_jam_row(world)
+        if jam is not None:
+            rows.append(jam)
         pantsir = pantsir_status_row(
             world, engaging=getattr(sandbox, "pantsir_engaging", False))
         if pantsir is not None:
@@ -855,8 +985,12 @@ class HUD:
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
         ]
         # M1-F4: per-tube battery row (own-force; [] in SANDBOX -> unchanged).
-        self._block(S300_TEL.display_name.upper(), rows,
-                    cells=tube_cells(world, "s300"))
+        height = self._block(S300_TEL.display_name.upper(), rows,
+                             cells=tube_cells(world, "s300"))
+        # M3-F5: the own-emissions gauge (how loud the player is on the
+        # back-plot) anchored below the data-driven block bottom; None when
+        # silent -> nothing drawn.
+        self._emissions_gauge(world, MARGIN + height)
 
     @staticmethod
     def _target_summary(sandbox, origin) -> str:

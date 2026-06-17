@@ -108,6 +108,30 @@ EMITTER_DIAMOND_PX = 6.0
 EMITTER_RING_PX = 11.0                        # minimum on-screen ring radius
 EMITTER_RING_SEGMENTS = ELINT_CIRCLE_SEGMENTS
 
+# M3-F5 — the JAMMED corridor band + shrunken effective ring.  Drawn from the
+# SENSOR-BELIEVED jammer fix/bearing the sim publishes into world.ew_state
+# (FOG / NO CHEAT — never a real jammer's truth).  Reuses the existing belief
+# token (ELINT_CIRCLE_COL / EMITTER_COL, the estimate-violet hue already used for
+# the SIGINT picture) so the corridor reads as a BELIEF overlay, not friendly
+# truth — the same idiom, drawn as a dashed/translucent variant via an alpha
+# tweak only (no new hard-coded hue).  The wedge is a corridor from the believed
+# jammer toward the DEFENDED BASE (the threat axis — see _jam_overlay axis calc,
+# NOT "toward the coast"); the player net's collapsed effective ring is a DASHED
+# circle (vs the solid clear range ring).
+JAM_WEDGE_EDGE_COL = (*ELINT_CIRCLE_COL[:3], 0.45)  # belief idiom, translucent
+#                                                     corridor edge polyline
+JAM_RING_COL = (*ELINT_CIRCLE_COL[:3], 0.55)        # belief idiom, dashed
+#                                                     shrunken effective ring
+JAM_BEAMWIDTH_RAD = math.radians(22.0)        # fixed corridor half-angle * 2 (a
+#                                               readable beamwidth, not an RF
+#                                               datum) — narrows as the player
+#                                               kills/closes the jammer is a
+#                                               later polish; fixed for now
+JAM_WEDGE_LEN_M = 600_000.0     # corridor length: across the whole battlespace
+#                                 (a bearing/standoff jammer has no near edge)
+JAM_RING_SEGMENTS = 64          # dashed-ring resolution (even -> clean dashes)
+JAM_RING_DASH = 2               # draw every-other segment -> a dashed circle
+
 SITE_HALF_PX = 5.0             # site square icon half-size
 BASE_STAR_PX = 8.0             # base star spoke length
 # Phase 6 — Pantsir SHORAD markers: small friendly diamonds near the base
@@ -697,6 +721,7 @@ class TacticalMap:
         self._draw_terrain_quad(w, h)
         self._rings()
         self._sam_ring()
+        self._jam_overlay()
         self._lanes()
         self._sites()
         self._platform_stars()
@@ -1145,6 +1170,94 @@ class TacticalMap:
                         [(sx + (d + 2.0) * ca, sy + (d + 2.0) * sa),
                          (sx + r * ca, sy + r * sa)], glyph_col, 1.0)
             self.text.draw_text(sx + d + 4, sy - 9, kind, glyph_col)
+
+    def _jam_overlay(self) -> None:
+        """The JAMMED corridor band + the player net's shrunken effective ring.
+
+        FOG / NO CHEAT (load-bearing): every geometry here is anchored on the
+        SENSOR-BELIEVED jammer fix/bearing the sim published into
+        ``world.ew_state`` (the drone ELINT est_pos / bearing) — NEVER a real
+        jammer entity's ``.pos``.  Reading a real jammer pos for the overlay
+        would be a fog leak.
+
+        Three cases keyed off ``ew_state``:
+          * inactive / absent -> draw NOTHING (the byte-identical default).
+          * localized fix (jammer_fix_xz set) -> a translucent CLOSED corridor
+            wedge anchored at the believed fix, spanning a fixed beamwidth from
+            the fix toward the DEFENDED BASE (the threat axis — atan2 to
+            BASE_POS), plus the player net's collapsed effective ring as a
+            DASHED circle around the net center.
+          * bearing-only (jammer_fix_xz None but jammer_bearing set) -> an OPEN
+            bearing wedge from the believed bearing with NO closed origin circle
+            (the source can't be PLACED, only pointed at — the fog intent).
+          * no sensor on the jammer at all (both None) -> the band is ABSENT
+            (the player feels the degraded range via the HUD row alone).
+
+        Render-only: reads world.ew_state + own radar_station.pos (own-truth,
+        the net center) and touches NO sim state — no determinism change."""
+        world = self.sandbox.world
+        state = getattr(world, "ew_state", None)
+        if not state or not state.get("active"):
+            return
+        fix_xz = state.get("jammer_fix_xz")
+        bearing = state.get("jammer_bearing")
+
+        if fix_xz is not None:
+            # Localized: a CLOSED corridor wedge from the believed fix toward the
+            # defended base (the threat axis), plus the dashed shrunken eff. ring.
+            ox, oz = float(fix_xz[0]), float(fix_xz[1])
+            # Corridor axis: from the believed jammer toward the player base
+            # (the threat axis), so the wedge sweeps over the defended sector.
+            axis = math.atan2(BASE_POS[0] - ox, BASE_POS[2] - oz)
+            half = 0.5 * JAM_BEAMWIDTH_RAD
+            left = (ox + JAM_WEDGE_LEN_M * math.sin(axis - half),
+                    oz + JAM_WEDGE_LEN_M * math.cos(axis - half))
+            right = (ox + JAM_WEDGE_LEN_M * math.sin(axis + half),
+                     oz + JAM_WEDGE_LEN_M * math.cos(axis + half))
+            # Closed triangle apex->left->right->apex (a placed corridor).
+            self._poly_world([(ox, oz), left, right, (ox, oz)],
+                             JAM_WEDGE_EDGE_COL, 1.5)
+            self._shrunken_ring(world, state.get("burn_through_m"))
+        elif bearing is not None:
+            # Bearing-only: an OPEN wedge from the player net along the believed
+            # bearing — two diverging edges, NO closed origin circle (the source
+            # is un-localized, only pointed at).  Anchor the open wedge at the
+            # net center (own-truth) since there is no placed jammer fix.
+            cx, cz = self._net_center(world)
+            half = 0.5 * JAM_BEAMWIDTH_RAD
+            for edge in (bearing - half, bearing + half):
+                end = (cx + JAM_WEDGE_LEN_M * math.sin(edge),
+                       cz + JAM_WEDGE_LEN_M * math.cos(edge))
+                self._poly_world([(cx, cz), end], JAM_WEDGE_EDGE_COL, 1.5)
+        # both None -> nothing placed: the band is absent (the HUD row carries
+        # the degraded-range feel on its own).
+
+    def _net_center(self, world):
+        """The player radar-net center in world (x, z) — own-truth (allowed):
+        the net's own station position, used to anchor the shrunken ring and
+        the open bearing wedge."""
+        radar = getattr(world, "radar_station", None)
+        if radar is not None:
+            return float(radar.pos[0]), float(radar.pos[2])
+        return float(BASE_POS[0]), float(BASE_POS[2])
+
+    def _shrunken_ring(self, world, burn_through_m) -> None:
+        """The player net's collapsed effective range as a DASHED circle around
+        the net center — visibly distinct from the solid clear range rings.
+        burn_through_m comes from world.ew_state (sim/ew.effective_range, the
+        single source of truth); None -> no ring drawn."""
+        if burn_through_m is None:
+            return
+        cx, cz = self._net_center(world)
+        r = float(burn_through_m)
+        seg = JAM_RING_SEGMENTS
+        for i in range(0, seg, JAM_RING_DASH):
+            a0 = 2.0 * math.pi * i / seg
+            a1 = 2.0 * math.pi * (i + 1) / seg
+            self._poly_world(
+                [(cx + r * math.sin(a0), cz + r * math.cos(a0)),
+                 (cx + r * math.sin(a1), cz + r * math.cos(a1))],
+                JAM_RING_COL, 1.5)
 
     # --------------------------------------------------------------- chrome
 
