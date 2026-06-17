@@ -905,3 +905,32 @@ headline feature was INERT in real play (exactly the value of the gate):
   ARM select + fire control, emitter map glyph/selection, ARM seeker HUD readout)
   so the SEAD capability is playable. Dedicated `build_kh31p` mesh + reference
   photos = task #7 (the in-flight render currently falls back to a placeholder).
+
+### M2-T4 Player UI for the ARM (commit `d9c4f4b`)
+- **Files:** `game/combat_setup.py` (KH-31P AMMO armory stepper + config carry);
+  `game/sandbox.py` (3-way B-cycle oniks→zircon→kh31p GATED on `_kh31p_ammo` so
+  default UX stays 2-way; `request_launch` ARM branch + `_request_arm_launch`);
+  `game/tactical_map.py` (`pick_emitter`, `selected_emitter`, `_emitter_overlay`
+  diamond-in-ring SIGINT glyph at the est belief, click-to-select gated on
+  bastion+kh31p); `game/hud.py` (`bastion_weapon_strip` ONIKS|ZIRCON|KH-31P +
+  `arm_seeker_row` LOCK/SILENT-CEP/MEMORY); NEW `tests/test_arm_ui.py` (25) +
+  test_combat_setup extension (2).
+- **Playable now:** stock KH-31P in the armory → B to select → click a localized
+  emitter glyph on the map → SPACE fires `launch_arm` → follow the round + read
+  its seeker state. Verified through the LIVE GL HUD/map (probe: strip + glyph +
+  fire ammo 6→5 + seeker readout, no GL error).
+- **Fog-honest:** emitter glyph + `pick_emitter` read the SIGINT `est_pos`
+  (belief, from `emitter_contacts`), never radar truth; seeker readout reads the
+  followed player round. **Byte-identical default UX:** `kh31p_ammo=0` → 2-way
+  cycle, ARM branch never entered (verified); emitter overlay is render-only.
+- **Gate:** full suite 919 passed, smoke 70/70 exit 0.
+
+### M2 COMPLETE — SEAD/ARM shipped (sim gated + no-cheat clean + playable UI)
+Branch tip `d9c4f4b`. The player can now localize enemy emitters via passive
+ELINT and strike them with the Kh-31P; the enemy counters with sensor-driven
+radar EMCON. Determinism + Oniks-duel bit-identical; default battle byte-identical
+(ARM off). **Open items for the morning:** (1) dedicated `build_kh31p` mesh +
+reference photos (task #7 — placeholder mesh in flight today); (2) a pre-existing
+order-dependent flake in `tests/test_phase5b_e2e.py::test_backplot_jassm_strike_
+reaches_defeat` (passes in isolation + in the full after-run; untouched sim —
+flagged, not introduced by M2); (3) hands-on playtest recommended.

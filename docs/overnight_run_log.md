@@ -118,5 +118,21 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
 - **M2 sim COMPLETE + gated.** Remaining: M2-T4 player UI (armory/control/overlay)
   to make the SEAD capability playable; dedicated KH-31P mesh + photos (task #7).
 
-### M2-T4 — player UI for the ARM (building)
+### M2-T4 — player UI for the ARM
+- `build:M2-T4` (1st) — died on a transient 529 Overloaded (0 tokens); re-dispatched.
+- `build:M2-T4` — IMPLEMENTER / opus — armory ammo stepper + 3-way gated B-cycle +
+  request_launch ARM branch + tactical_map emitter glyph/pick/select + hud weapon
+  strip + ARM seeker readout + 27 TDD tests — DONE (919 passed, smoke 70/70,
+  live-GL probe verified). Commit `d9c4f4b`. Orchestrator re-verified smoke + UI +
+  Oniks-duel.
+- **M2 COMPLETE + playable.** Branch tip `d9c4f4b`.
+
+### Note: infrastructure
+- Several agents hit transient API "Overloaded" (529) errors mid-run (1st M2
+  no-cheat auditor, 1st M2-T4 implementer, 1st M1 game-test socket close). All
+  re-dispatched and succeeded — no work lost (completed/committed work is never redone).
+
+### Next
+- Task #7: dedicated KH-31P mesh (`build_kh31p`) + reference photos to
+  `Assets of oinks/New models 1` (the user's explicit ask). Then assess M3.
 
