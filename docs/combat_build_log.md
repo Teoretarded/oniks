@@ -984,5 +984,33 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
 - **Remaining M3 features** (queued): player drone EW pod (symmetric — player
   jams the enemy net so a salvo leaks), ELINT bearing-sigma elevation under jam,
   JAMMED-band UI + emissions meter, the HeightField refactor + terrain/graphics
-  uplift + seeded map presets. (Cosmetic follow-up: the jammer uses the AWACS
-  mesh + has no distinct map glyph yet.)
+  uplift + seeded map presets.
+
+### M3-F2 visual follow-up: Growler mesh + map glyph + photos (commit `c2686e3`)
+- NEW `models/jammer.py` `build_jammer()` (Super Hornet airframe + ALQ-99/ALQ-249
+  underwing+centreline jamming pods + ALQ-218 wingtip receivers — the Growler
+  signatures); `game/combat.py` renders `JammerAircraft` with it (isinstance
+  before Awacs); `game/tactical_map.py` draws a distinct "noise-burst star"
+  emitter glyph at the SIGINT est_pos (fog-honest); `models/common.py`
+  `jammer_pod` palette; +87 model tests. Spun off as a background task,
+  orchestrator-VERIFIED (test_air_models + test_models green, smoke 70/70,
+  additive — n_jammers=0 never builds it). Reference photos `jammer_side.png` +
+  `jammer_front.png` rendered to `Assets of oinks/New models 1 needs improving
+  and updating/` (orchestrator-viewed: reads as a Growler — EW pods + wingtip
+  receivers clear); `tools/shoot_jammer.py` left for re-render.
+
+### M3-F3 ELINT bearing-sigma elevation under enemy jam (commit `b3ca1cb`)
+- **Files:** `sim/ew.py` (`noise_floor_at(receiver_pos, jammers)` — 1/R² jam
+  floor at the drone, pure/RNG-free); `sim/recon.py` (`ElintReceiver.update`
+  gains `jammers=()`; `sigma_eff = base*(1 + EW_ELINT_SIGMA_K*floor)` feeds the
+  EXISTING seeded gaussian draw); `world/combat.py` (`_step_recon_sensors` passes
+  `_active_enemy_jammers()`); NEW `tools/probe_ew_elint_sigma.py` + `tests/test_ew_elint_sigma.py` (8).
+- **MEASURED (probe, 24 seeds):** `EW_ELINT_SIGMA_K=1.0`; the default Growler
+  softens the player's ELINT fix ~1.34× and needs ~1.06× more baseline, but
+  0/24 passes fail to localize (a determined cross-track STILL gets a fix — the
+  spec risk of "can never localize while jammed" avoided; K=1.5/2.0 walled it off
+  for a close jammer, so calibrated DOWN to 1.0).
+- **REGRESSION:** `jammers=()` → `floor=0` → `sigma_eff == base` → the `_rng.normal`
+  draw is BYTE-IDENTICAL (proven bit-level); all recon/ELINT/contacts tests
+  unchanged, smoke 70/70, default battle byte-identical. `sim/ew.py` stays
+  RNG-free. Orchestrator re-verified (EW tests + regression contracts + probe).

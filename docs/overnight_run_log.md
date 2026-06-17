@@ -13,10 +13,11 @@
 
 **Headline:** 2 of 6 milestones SHIPPED, GATED, and PLAYABLE overnight (M1, M2),
 the new weapon's 3D model + reference photos, AND M3's EW CORE shipped + gated as
-two reviewed features — the J/S burn-through field model AND the enemy Growler
-that uses it to collapse the player's radar (M3 in progress; the player can already
-SEAD-ARM the Growler via M2 — the two-sided EW↔SEAD loop closes). Full test suite
-**937 passed, exit 0**;
+FOUR reviewed features — the J/S burn-through field model, the enemy Growler that
+uses it to collapse the player's radar (+ its own 3D mesh/glyph/photos), and ELINT
+bearing-sigma elevation that softens the player's geolocation under jam (M3 in
+progress; the player can already SEAD-ARM the Growler via M2 — the EW↔SEAD loop
+closes). Full test suite **945 passed, exit 0**;
 combat smoke **70/70 exit 0**; the locked regression contracts (Oniks-vs-SM-2 duel,
 Oniks/SAM flight, same-seed determinism, byte-identical out-of-the-box battle) all
 held BIT-IDENTICAL throughout. Every feature went through the Fable-Method loop
@@ -225,9 +226,19 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
   off belief (verified by moving the real radar to the map edge), no truth read,
   byte-identical to parent via worktree digest. No fixes needed.
 
+- `bg-task:jammer-model` — (spawned follow-up) — `build_jammer()` Growler mesh +
+  map glyph + jammer_pod palette + 87 tests — landed uncommitted; orchestrator
+  VERIFIED (tests + smoke green, additive) + COMMITTED `c2686e3` + shot reference
+  photos (`jammer_side/front.png`, orchestrator-viewed, reads as a Growler).
+- `build:M3-F3` — IMPLEMENTER / opus — ELINT bearing-sigma elevation under jam
+  (`noise_floor_at` + `ElintReceiver.update(jammers=)` sigma scaling, byte-
+  identical default) + probe + 8 tests — DONE (smoke 70/70, bit-identical
+  default). Commit `b3ca1cb`. K=1.0 (24-seed probe; player still localizes).
+  Orchestrator re-verified.
+
 ### Next (M3 remaining + M4–M6)
-- M3 remaining: player drone EW pod (symmetric jamming), ELINT bearing-sigma
-  elevation under jam, JAMMED-band UI + emissions meter, HeightField refactor +
+- M3 remaining: player drone EW pod (symmetric jamming — player jams the enemy
+  net so a salvo leaks), JAMMED-band UI + emissions meter, HeightField refactor +
   terrain uplift + seeded map presets.
 - M4 (ASBM + swarm), M5 (fleet/sub/amphibious/scoot/CBR/decoys), M6 (campaign/
   scoring/salvo/auto-warp/presets) — each a coherent gateable milestone; resume
