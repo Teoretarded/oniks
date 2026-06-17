@@ -813,3 +813,95 @@ Orchestrator-verified + adversarial fleet (all opus):
   after M1 is SUBSTITUTED by the agent game-test fleet for this unattended run;
   recommended for the morning reviewer (the legibility layer is now in place to
   make it informative).
+
+## Milestone 2 — SEAD / Anti-Radiation Warfare
+
+### M2-T1 Emitter ELINT fix channel (commit `adf55b3`)
+- **Files:** `world/combat.py` (+`self.emitter_contacts` store; `_player_targetable_emitters()`
+  resolver emitter_id→(kind,live Radar,owner); `_inject_emitter_contacts(now)`
+  wired into `_step_recon_sensors`); NEW `tests/test_emitter_channel.py` (6 tests).
+- **Design call (orchestrator):** emitter contacts live in a SEPARATE
+  `emitter_contacts` store, NOT `contacts.tracks` — keeps the active-radar contact
+  picture byte-identical (zero risk to threat strip / intel panel / determinism)
+  and models the SIGINT picture as distinct, per the spec's own framing.
+- **Contracts:** surfaces heard AWACS/ground/SPY-1 emitters when actionable
+  (`fix_quality < ELINT_FIX_ACTIONABLE_M`) + fresh; ages out on silence; carries
+  the triangulated `est_pos` (ELINT belief) not `radar.pos`; resolver maps to the
+  live Radar; contacts.tracks untouched; same-seed determinism.
+- **No-cheat (orchestrator-verified diff):** est_pos (belief) not truth; resolver
+  is live-entity bookkeeping like `_emitters()`; no new track for an undetected
+  entity; deterministic. **Gate:** full suite 870, smoke 70/70.
+
+### M2-T2 KH-31P player anti-radiation missile (commits `34088c7`, `6c39bb2`)
+- **Files:** `sim/arsenal.py` (KH31P StrikeDef); `sim/strike.py`
+  (`PlayerArmMissile(HarmMissile, is_hostile=False)` — one-line subclass);
+  `world/combat.py` (`launch_arm(emitter_id)` fog-gated on `emitter_contacts`,
+  `_arm_rng=[seed,8]`, `_arm_radar_bindings`+`_apply_arm_radar_kills` victory
+  credit); `world/combat_config.py` (`kh31p_ammo:int=0` default OFF + clamp);
+  NEW `tests/test_kh31p_arm.py` (10), `tools/probe_kh31p_flyoff.py`.
+- **MEASURE-DON'T-GUESS:** the flyoff probe showed the Mach-3 round OVER-reaches
+  the textbook 110 km on the reused (Mach-2-tuned) HarmMissile loft machine —
+  and the existing in-game HARM does the same (its "110 km" is a data-sheet
+  label, not a flyoff gate). Locked the envelope to the HONEST measured band:
+  **kill@90 km, short@140 km, peak Mach ≥2.80**, `max_range=130 km` (documented).
+  Silence CEP: 90 km shot silenced @40 s → closest 366 m, radar SURVIVES (in the
+  150–400 m seeded ring). AWACS (407 km) stays unreachable — design tension holds.
+- **Reviews:** spec+physics+no-cheat APPROVED — physics measured not faked;
+  byte-identical proven by SHA-256 fingerprint vs parent; **a CEP miss can
+  provably never credit a kill** (guarded at the fuse AND the credit pass), no
+  double-credit, no enemy-AI leak; is_hostile=False (never hits the base);
+  `[seed,8]` no tag collision. Code-quality APPROVED (genuine reuse, bounded/cheap
+  credit). 2 minor nits fixed (stale flyoff docstring → probe numbers; HP-1 credit
+  comment). **Gate:** full suite 881, smoke 70/70.
+
+### M2-T3 Enemy radar EMCON vs a sensed inbound ARM (commit `ba083aa`)
+- **Files:** `sim/commander.py` (`kind` threaded onto missile tracks;
+  `ARM_EMCON_RANGE_M=60 km`/`ARM_EMCON_DWELL_S=60 s`; `_sensed_arm_within()`
+  no-cheat trigger; ARM-EMCON override in `_defend_ship_radars`; new
+  `_defend_ground_radars`); `world/combat.py` (`_feed_enemy_picture` passes the
+  inbound's weapon kind; executes `ground_radar_silent/emit`); NEW
+  `tests/test_arm_emcon.py` (8 tests).
+- **The SEAD duel:** a radar that SENSES an inbound `kind=="kh31p"` track within
+  60 km goes EMCON (silent) for the dwell — overriding self-defense (emitting
+  feeds the seeker). Silence degrades the live ARM to its CEP ring → the radar
+  usually survives. End-to-end `test_arm_emcon_degrades_arm_to_cep` PASSES (radar
+  survives). Ships still EMIT vs a non-ARM inbound (regression preserved).
+- **No-cheat (implementer-verified, gate to confirm):** `_sensed_arm_within`
+  reads ONLY `picture.live_missile_tracks` (sensed pos+kind) + the radar's own
+  pos — never the ARM's truth (grep-clean of `.target_radar`/`PlayerArmMissile`/
+  `self.missiles`). `kind` is the enemy's sensor classification (fed by the
+  world), fog-honest like the player's contact stamps. Determinism: no RNG.
+- **Byte-identical:** with `kh31p_ammo=0` (default) no ARM is fired → no
+  `kind=="kh31p"` track → ship/ground radar behavior unchanged. Fingerprinted
+  identical across seeds 1337/7/42. **Gate:** full suite 889, smoke 70/70.
+
+### M2 GATE (adversarial fleet) — caught 2 HIGH integration gaps, fixed (commit `472bc6e`)
+The unit tests all passed, but the live-battle + line-level fleet found the
+headline feature was INERT in real play (exactly the value of the gate):
+- **GAME-TEST (opus):** emitter channel, ground-radar ARM kill, the sensor-driven
+  SEAD duel, determinism (delta 0.0), no-crashes all PASS. **CONCERN:** a ship
+  SPY-1 was RESURRECTED every tick (`enemy_defense.py` `ship.radar.alive =
+  ship.alive`), so the ARM could only blink it, never kill it.
+- **BUG-HUNT (opus):** **HIGH-1** — ARM-EMCON was DEAD CODE in play:
+  `_feed_enemy_picture` filtered the `PlayerArmMissile` out (isinstance +
+  launch_platform gates) so no `kind=="kh31p"` track was ever fed → the enemy
+  never reacted to a real ARM (tests passed only via synthetic injected tracks).
+  **HIGH-2** — the ARM (130 km) can't reach the inland ground radars (~505 km);
+  credit path sound but geometrically unreachable. Determinism / byte-identical /
+  credit-safety / kind-feed-schema all CLEAN. (LOW-4 wrong-ARM attribution fixed;
+  MED-3 = the missing UI, now M2-T4.)
+- **FIX (opus):** fed the ARM into the enemy picture (detection-gated, so EMCON
+  works in play); stopped ship-radar resurrection (an ARM kill now sticks); added
+  3 REAL-ARM end-to-end tests (all RED→GREEN): real ARM → enemy EMCON; ARM kills
+  a ship SPY-1 when not EMCON'd (stays dead); EMCON saves the radar. Documented
+  the ground-radar range gap (ARM is anti-ship/anti-AWACS SEAD by design; the
+  credit path serves closer/future engagements). Full suite 892, smoke 70/70,
+  byte-identical fingerprint identical.
+- **NO-CHEAT auditor (opus, re-dispatched on the fixed code):** CLEAN — all 7
+  surfaces pass; the ARM-EMCON + the new feed path read ONLY sensed tracks
+  (detection-gated) + own-radar pos; grep-clean of `.target_radar`/`self.missiles`
+  /ARM-truth in the commander; `[seed,8]` unique; default battle dormant.
+- **Open (deferred to M2-T4):** player-facing UI (armory ammo stepper, B-cycle
+  ARM select + fire control, emitter map glyph/selection, ARM seeker HUD readout)
+  so the SEAD capability is playable. Dedicated `build_kh31p` mesh + reference
+  photos = task #7 (the in-flight render currently falls back to a placeholder).

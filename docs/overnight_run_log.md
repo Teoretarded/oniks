@@ -91,5 +91,32 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
 - `gate:M1-nocheat` — NO-CHEAT / opus — CLEAN, no truth leak (helpers + draw).
 - **M1 COMPLETE.** Branch tip after gate: `3c10066`.
 
-### M2 — SEAD / Anti-Radiation Warfare (starting)
+### M2 — SEAD / Anti-Radiation Warfare
+- `build:M2-T1` — IMPLEMENTER / opus — emitter ELINT channel (separate
+  `emitter_contacts` store + resolver) + 6 tests — DONE (870). Commit `adf55b3`.
+  Orchestrator self-verified diff (est_pos not truth; contacts.tracks untouched).
+- `build:M2-T2` — IMPLEMENTER / opus — KH-31P ARM (reuse HarmMissile,
+  is_hostile=False, launch_arm, victory credit, flyoff probe) + 10 tests — DONE
+  (881). Commit `34088c7`. MEASURED: airframe over-reaches 110→130 km (HARM does
+  too); locked envelope to measured kill@90/short@140.
+- `verify-spec+physics+nocheat:M2-T2` — REVIEW / opus — APPROVED (physics
+  measured not faked; CEP miss can't credit; byte-identical fingerprint).
+- `review-quality:M2-T2` — CODE-QUALITY / opus — APPROVED; 2 minor nits fixed
+  (`6c39bb2`).
+- `build:M2-T3` — IMPLEMENTER / opus — enemy radar EMCON vs sensed ARM (ship +
+  ground, fog-honest) + 8 tests — DONE (889). Commit `ba083aa`.
+- `gate:M2-gametest` — GAME-TEST / opus — CONCERN: ship SPY-1 resurrected each
+  tick (ARM can't kill it). Probe `tools/probe_m2_sead.py`.
+- `gate:M2-bughunt` — BUG-HUNT / opus — HIGH-1 ARM-EMCON dead in play (feed
+  filter); HIGH-2 ground radars out of ARM reach; LOW-4 attribution; rest CLEAN.
+- `gate:M2-nocheat` (1st) — died on API Overloaded; re-dispatched.
+- `gate-fix:M2` — FIXER / opus — fed ARM to enemy picture (detection-gated) +
+  stopped ship-radar resurrection + 3 real-ARM e2e tests (RED→GREEN) + documented
+  ground-radar gap — DONE (892, smoke 70/70, byte-identical). Commit `472bc6e`.
+- `gate:M2-nocheat` (re-dispatch) — NO-CHEAT / opus — CLEAN, all 7 surfaces; ARM-
+  EMCON + feed read only sensed tracks; determinism intact.
+- **M2 sim COMPLETE + gated.** Remaining: M2-T4 player UI (armory/control/overlay)
+  to make the SEAD capability playable; dedicated KH-31P mesh + photos (task #7).
+
+### M2-T4 — player UI for the ARM (building)
 
