@@ -144,7 +144,7 @@ from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
-                           AirBase, Awacs, Carrier, Fighter)
+                           AirBase, Awacs, Carrier, Fighter, JammerAircraft)
 from sim.enemy_defense import (DRONE_ENGAGE_RANGE_M, VLS_DECK_M,
                                EnemyDefenseController)
 from sim.enemy_ships import Destroyer
@@ -236,6 +236,16 @@ CARRIER_HEADING_DEG = 90.0      # east-west racetrack, beam-on to the player
 # deep and only a 5b 40N6 — or a fled orbit — changes that).
 AWACS_ANCHOR_A_XZ = (-40_000.0, 405_000.0)
 AWACS_ANCHOR_B_XZ = (40_000.0, 435_000.0)
+
+# M3-F2 escort jammer: standoff orbit deep behind the carrier screen (carrier
+# band ~280 km, AWACS deeper at 405-435 km).  The jammer loiters BETWEEN them
+# (~310 km) so its 200 W corridor collapses the player's 350 km ring from
+# ahead of the fleet without parking it inside the player's reach.  The
+# commander re-anchors this orbit toward the believed-emitter bearing
+# (JammerAircraft.station_to); these are the spawn legs before the first STATION
+# order.  40 km cross-track legs (JAMMER_ORBIT_HALF_LEN_M).
+JAMMER_ANCHOR_A_XZ = (-30_000.0, 310_000.0)
+JAMMER_ANCHOR_B_XZ = (30_000.0, 330_000.0)
 
 # Standing CAP (commander-managed since 5b): the racetrack anchor sits
 # over the destroyer screen (anchors at z 150/170 km) so the CAP orbits
@@ -587,6 +597,22 @@ class CombatWorld(WorldState):
             self.enemy_air.append(fighter)
         self.awacs = Awacs("awacs_00", AWACS_ANCHOR_A_XZ, AWACS_ANCHOR_B_XZ)
         self.enemy_air.append(self.awacs)
+        # ---- M3-F2 escort jammers (config.n_jammers, DEFAULT 0) ----
+        # Each is enemy_air (NOT a Ship): a standoff Growler whose always-on
+        # emitter collapses the player radar via sim/ew.py. n_jammers=0 builds
+        # NONE -> _active_enemy_jammers() empty -> _player_visible passes
+        # jammers=() -> byte-identical. Deterministic placement: a fixed deep
+        # anchor (no RNG — the brain stations off BELIEF, not a seeded spawn);
+        # extra jammers fan out across the standoff band.
+        self._jammers: list[JammerAircraft] = []
+        for j in range(config.n_jammers):
+            ax = (JAMMER_ANCHOR_A_XZ[0] + j * 70_000.0,
+                  JAMMER_ANCHOR_A_XZ[1])
+            bx = (JAMMER_ANCHOR_B_XZ[0] + j * 70_000.0,
+                  JAMMER_ANCHOR_B_XZ[1])
+            jammer = JammerAircraft(f"jammer_{j:02d}", ax, bx)
+            self._jammers.append(jammer)
+            self.enemy_air.append(jammer)
         self._cap_next_t = 0.0
         self._cap_base_idx = 0          # round-robin launch base pointer
         # Fog of war for fixed installations: latched once ANY player
@@ -604,7 +630,8 @@ class CombatWorld(WorldState):
                               if isinstance(e, Fighter)]
         self.commander = EnemyCommander(
             self._fighter_list, self.awacs, destroyers, seed=rng_seed,
-            ground_radars=self._enemy_ground_radars)
+            ground_radars=self._enemy_ground_radars,
+            jammers=self._jammers)
         self._cmd_rng = np.random.default_rng([rng_seed, 5])
         self._cmd_feed_next_t = 0.0
         self._cmd_weapon_next_t = 0.0
@@ -744,14 +771,32 @@ class CombatWorld(WorldState):
         return ContactBoard((BASE_POS[0], BASE_POS[2]),
                             visible_fn=self._player_visible)
 
+    def _active_enemy_jammers(self) -> list:
+        """The live enemy escort-jammer emitters currently radiating the
+        barrage corridor — the duck-typed jammers (``.pos`` + ``.jam_power_w``)
+        the sim/ew.py field model consumes when gating the player radar.
+
+        With config.n_jammers=0 NO jammer is built, so this is EMPTY and
+        _player_visible passes ``jammers=()`` (the byte-identical legacy path —
+        the EW field model is never consulted).  The field model itself
+        LOS-gates each jammer against the victim radar, so we need only filter
+        to live, emitting beacons here."""
+        return [j.emitter for j in getattr(self, "_jammers", [])
+                if j.alive and j.emitter.emitting]
+
     def _player_visible(self, pos, size_class: str) -> bool:
         """The player picture's visibility gate: the radar net, OR (Phase
         4) the live drone's SAR strip for SURFACE targets — every surface
         entity rates 'ship' today, and SAR never images air targets, so a
         silent hull overflown by the drone enters the picture through the
         board's normal sustained-detection flow. Guarded with getattr:
-        the board is built in super().__init__ before the drone exists."""
-        if self.radar_net.visible(pos, size_class):
+        the board is built in super().__init__ before the drone exists.
+
+        M3-F2: any active enemy escort jammer collapses the radar-net range
+        ring via the EW burn-through field model (sim/ew.py) — passed through
+        as ``jammers``.  Empty (the default n_jammers=0) -> byte-identical."""
+        if self.radar_net.visible(pos, size_class,
+                                  jammers=self._active_enemy_jammers()):
             return True
         drone = getattr(self, "drone", None)
         return (size_class == "ship" and drone is not None
@@ -900,7 +945,15 @@ class CombatWorld(WorldState):
         for e in self.enemy_air:
             if not e.alive:
                 continue
-            kind = "AWACS" if isinstance(e, Awacs) else "FIGHTER"
+            # JammerAircraft subclasses Awacs — test it FIRST so the Growler
+            # gets its own label (and so its empty-ranges beacon is correctly
+            # surfaced as a player-targetable emitter for SEAD).
+            if isinstance(e, JammerAircraft):
+                kind = "JAMMER"
+            elif isinstance(e, Awacs):
+                kind = "AWACS"
+            else:
+                kind = "FIGHTER"
             tgt[e.radar.radar_id] = (kind, e.radar, e)
         for r in getattr(self, "_enemy_ground_radars", []):
             if not r.alive:
@@ -1313,6 +1366,27 @@ class CombatWorld(WorldState):
             if radar is None or not radar.alive:
                 return
             radar.emitting = (kind == "ground_radar_emit")
+        elif kind in ("jammer_jam", "jammer_lift", "jammer_flee"):
+            # M3-F2 escort-jammer orders (sim/commander._defend_jammer):
+            #   jammer_jam  -> radiate the corridor + (re)station the orbit on
+            #                  the believed-emitter bearing,
+            #   jammer_lift -> go dark (deny a radiation-homing seeker its
+            #                  beacon — degrades the inbound round),
+            #   jammer_flee -> turn tail and run from the sensed threat.
+            jammer = next((j for j in getattr(self, "_jammers", [])
+                           if j.aircraft_id == order["aircraft_id"]), None)
+            if jammer is None or not jammer.alive:
+                return
+            if kind == "jammer_lift":
+                jammer.emitter.emitting = False
+            elif kind == "jammer_flee":
+                jammer.flee(order["threat_pos"])
+            else:  # jammer_jam
+                jammer.emitter.emitting = True
+                jammer.stop_flee()
+                station = order.get("station_xz")
+                if station is not None and "bearing" in order:
+                    jammer.station_to(station, float(order["bearing"]))
         elif kind in ("harm_package", "jassm_package"):
             self._launch_strike_package(order, sead=(kind == "harm_package"))
         elif kind == "tomahawk_salvo":

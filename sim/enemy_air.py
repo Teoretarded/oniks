@@ -231,6 +231,29 @@ AWACS_FLEE_SPEED_MPS: float = AWACS_CRUISE_MPS
 # Orbit half-length for the AWACS racetrack.
 AWACS_ORBIT_HALF_LEN_M: float = 80_000.0
 
+# ---------------------------------------------------------------------------
+# M3-F2 escort jammer (EA-18G-class Growler) flight model
+# ---------------------------------------------------------------------------
+# The jammer mirrors the AWACS racetrack orbiter (same altitude band, same
+# slow cruise, same flee/fall machinery) but ALSO radiates a barrage-noise
+# corridor via its always-on ``emitter`` (a Radar-shaped beacon carrying
+# ``jam_power_w``, consumed by the sim/ew.py field model).  It carries no
+# search radar of its own — it IS a fat beacon.  Values match the EW
+# calibration (sim/ew.EW_DEFAULT_*): ~12 km standoff altitude, ~150 km behind
+# the screen, ~200 W effective in-band power.
+JAMMER_ALT_M: float = 12_000.0            # standoff orbit altitude (clears horizon)
+JAMMER_CRUISE_MPS: float = AWACS_CRUISE_MPS    # same slow loiter as the AWACS
+JAMMER_FLEE_SPEED_MPS: float = AWACS_FLEE_SPEED_MPS
+JAMMER_ORBIT_HALF_LEN_M: float = 40_000.0      # 40 km legs (tighter than AWACS)
+# Effective in-band barrage power (watts) — the duck-typed jammer datum the EW
+# field model reads.  Matches sim/ew.EW_DEFAULT_JAM_POWER_W (a deliberately
+# round game-balance figure, NOT an ELINT datum).
+JAMMER_POWER_W: float = 200.0
+# Standoff distance (m) from the fleet centroid the jammer holds when it
+# re-anchors its orbit toward a believed-emitter bearing (station_to).  Matches
+# sim/ew.EW_DEFAULT_STANDOFF_M so the calibrated burn-through holds in play.
+JAMMER_STANDOFF_M: float = 150_000.0
+
 # Carrier racetrack geometry.
 CARRIER_PATROL_RADIUS_M: float = 15_000.0  # 15 km legs (slow hull, small orbit)
 
@@ -1547,3 +1570,127 @@ class Awacs:
         self.radar.pos[0] = self.pos[0]
         self.radar.pos[1] = self.pos[1]   # antenna at aircraft altitude
         self.radar.pos[2] = self.pos[2]
+
+
+# ---------------------------------------------------------------------------
+# JammerAircraft (M3-F2 escort jammer, EA-18G-class Growler)
+# ---------------------------------------------------------------------------
+
+class JammerAircraft(Awacs):
+    """EA-18G-class escort jammer orbiting deep behind the carrier screen.
+
+    A SIBLING of the AWACS: it reuses the AWACS racetrack loiter, flee()/
+    stop_flee(), and kill-spiral fall machinery UNCHANGED.  The differences:
+
+      * it carries NO search radar.  Its mount (``self.radar``, kept for the
+        duck-type the world's _emitters()/RWR/_player_targetable_emitters loops
+        expect over ``enemy_air``) is the SAME object as ``self.emitter`` and
+        has EMPTY ranges, so it can never detect anything — it is a pure
+        always-on BEACON, not a sensor (it never joins _enemy_sensor_radars /
+        _enemy_cue_radars, which use explicit ship/awacs/fighter lists).
+      * ``self.emitter`` exposes ``.jam_power_w`` (watts) consumed by the
+        sim/ew.py burn-through field model and ``emitting`` (True while
+        radiating the corridor — the commander's _defend_jammer toggles it).
+      * ``station_to(bearing, centroid)`` re-anchors the orbit so it loiters
+        at JAMMER_STANDOFF_M from the fleet centroid along a believed-emitter
+        bearing (the brain's STATION order).
+
+    Orbits at JAMMER_ALT_M (~12 km, clears the horizon) at the AWACS cruise.
+    """
+
+    radar_size: str = "fighter"   # radar-trackable as a fighter-class air contact
+
+    def __init__(
+        self,
+        aircraft_id: str,
+        anchor_a_xz,
+        anchor_b_xz,
+        jam_power_w: float = JAMMER_POWER_W,
+    ):
+        super().__init__(aircraft_id, anchor_a_xz, anchor_b_xz)
+        # Jammer flies its own altitude band (the AWACS __init__ planted it at
+        # AWACS_ALT_M); lift it to the standoff orbit altitude.
+        self.pos[1] = JAMMER_ALT_M
+        self._speed = JAMMER_CRUISE_MPS
+        self.turn_radius = JAMMER_CRUISE_MPS / math.radians(1.5)
+
+        # Replace the inherited AWACS SEARCH radar with a pure jam BEACON:
+        # empty ranges => detects nothing (never a sensor); jam_power_w drives
+        # the EW field model; emitting=True => radiating the corridor.
+        self.emitter = _radar_mod.Radar(
+            radar_id=f"{aircraft_id}_jammer",
+            pos=self.pos.copy(),
+            antenna_m=0.0,                 # the aircraft IS the antenna
+            ranges={},                     # a jammer SEES nothing
+        )
+        self.emitter.jam_power_w = float(jam_power_w)
+        self.emitter.emitting = True
+        # The world iterates enemy_air.<.radar> for the PLAYER-facing ELINT/RWR/
+        # targetable-emitter loops; point .radar at the beacon so the player
+        # hears + can SEAD the jammer (it stays out of the enemy sensor set,
+        # which is built from explicit lists, not this attribute).
+        self.radar = self.emitter
+
+    @property
+    def jam_power_w(self) -> float:
+        """Duck-type for sim/ew.py: the effective in-band barrage power (W)."""
+        return float(self.emitter.jam_power_w)
+
+    def station_to(self, station_xz, bearing_rad: float) -> None:
+        """Re-anchor the racetrack so the jammer loiters AROUND ``station_xz``
+        (the orbit centre the commander computed = fleet centroid +
+        JAMMER_STANDOFF_M along the believed-emitter ``bearing_rad``).  The
+        corridor then points fleet->believed-emitter.
+
+        Deterministic: pure geometry, no RNG.  The orbit is a short racetrack
+        centred on the station point, legs JAMMER_ORBIT_HALF_LEN_M long, laid
+        PERPENDICULAR to the bearing so the broadside faces the threat axis."""
+        sx, sz = float(station_xz[0]), float(station_xz[1])
+        hx = JAMMER_ORBIT_HALF_LEN_M * math.cos(bearing_rad)
+        hz = -JAMMER_ORBIT_HALF_LEN_M * math.sin(bearing_rad)
+        ax, az = sx - hx, sz - hz
+        bx, bz = sx + hx, sz + hz
+        x0, x1 = min(ax, bx), max(ax, bx)
+        z0, z1 = min(az, bz), max(az, bz)
+        self._corners = ((x0, z0), (x0, z1), (x1, z1), (x1, z0))
+        # Keep the same waypoint index machinery as the AWACS racetrack.
+        self._wp = self._wp % 4
+
+    def update(self, dt: float) -> None:
+        """Fly the jammer (mirrors Awacs.update with jammer constants) and keep
+        the jam BEACON position synced to the airframe."""
+        if not self._alive and not self._falling:
+            return
+
+        if self._falling:
+            self._update_falling(dt)
+            self.emitter.pos[:] = self.pos
+            return
+
+        if self._fleeing:
+            err = (self._flee_heading - self.heading + math.pi) % (2.0 * math.pi) - math.pi
+            limit = math.radians(1.5) * dt
+            self.heading += min(max(err, -limit), limit)
+            self.heading = (self.heading + math.pi) % (2.0 * math.pi) - math.pi
+            self._speed = JAMMER_FLEE_SPEED_MPS
+        else:
+            self._advance_waypoint()
+            wx, wz = self._corners[self._wp]
+            dx = wx - float(self.pos[0])
+            dz = wz - float(self.pos[2])
+            if abs(dx) > 0.1 or abs(dz) > 0.1:
+                bearing = math.atan2(dx, dz)
+                err = (bearing - self.heading + math.pi) % (2.0 * math.pi) - math.pi
+                limit = math.radians(1.5) * dt
+                self.heading += min(max(err, -limit), limit)
+                self.heading = (self.heading + math.pi) % (2.0 * math.pi) - math.pi
+            self._speed = JAMMER_CRUISE_MPS
+
+        self.pos[0] += math.sin(self.heading) * self._speed * dt
+        self.pos[2] += math.cos(self.heading) * self._speed * dt
+        self.pos[1] = JAMMER_ALT_M
+
+        # Keep the jam beacon co-located with the airframe.
+        self.emitter.pos[0] = self.pos[0]
+        self.emitter.pos[1] = self.pos[1]
+        self.emitter.pos[2] = self.pos[2]

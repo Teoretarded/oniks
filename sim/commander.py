@@ -198,6 +198,34 @@ ARM_EMCON_DWELL_S: float = AWACS_EMCON_DWELL_S  # 60 s; hold silent after the
 #   un-blinds the instant its own dark track ages out re-radiates at the worst
 #   moment — the dwell rides out the terminal threat window).
 
+# M3-F2 escort jammer (Growler) doctrine. The jammer is a fat always-on beacon
+# the player can ELINT-localize + SEAD; the brain (_defend_jammer) trades the
+# corridor for survival when threatened — exactly the AWACS EMCON pattern.
+JAMMER_THREAT_RANGE_M: float = 90_000.0  # m; a sensed inbound ARM/SAM missile
+#   track within this radius of the jammer makes it LIFT the jam (go dark) — the
+#   jammer's emission is what a radiation-homing seeker chases, so lifting (which
+#   degrades the live round) is the survivable counter, mirroring ARM-EMCON.
+#   90 km is wider than the ship ARM_EMCON_RANGE_M (the slow, deep, defenceless
+#   jammer reacts earlier than a SAM-armed hull) yet inside a closing round's
+#   terminal window, so a far snooper does not pin the corridor down.
+JAMMER_FLEE_RANGE_M: float = 90_000.0    # m; a closing missile track inside this
+#   radius ALSO orders a flee toward the carrier (same trigger geometry as the
+#   lift — the jammer both darks AND runs; reuses the AWACS flee()).
+JAMMER_EMCON_DWELL_S: float = AWACS_EMCON_DWELL_S  # 60 s; hold the jam LIFTED
+#   after the threat track was last seen before re-radiating — the AWACS EMCON
+#   anti-strobe dwell, so the corridor does not blink the instant the jammer's
+#   own dark track ages out (re-illuminating at the worst moment).
+JAMMER_RESTATION_EPS_RAD: float = math.radians(3.0)  # the believed-emitter
+#   bearing must move at least this much before the jammer re-stations its orbit
+#   — anti-strobe so a jittering ESM fix doesn't re-issue a station order every
+#   tick (mirrors the AWACS/ARM "enter once" discipline for the STATION half).
+# Standoff distance (m) from the fleet centroid the commanded STATION point
+# sits along the believed-emitter bearing.  MUST match the flight model's
+# sim.enemy_air.JAMMER_STANDOFF_M (and sim.ew.EW_DEFAULT_STANDOFF_M) so the
+# calibrated burn-through holds — kept as a doctrine constant here to avoid a
+# circular import of the flight module at module load.
+JAMMER_STANDOFF_M: float = 150_000.0
+
 # Strike geometry (spec section 6 mission generator).
 HARM_INGRESS_ALT_M: float = 150.0     # m AGL ingress altitude for HARM package
 HARM_STANDOFF_M: float = 90_000.0     # m HARM launch standoff (within HARM
@@ -601,6 +629,7 @@ class EnemyCommander:
         weapon_stock: Optional[WeaponStock] = None,
         seed: int = 0,
         ground_radars: Optional[list] = None,
+        jammers: Optional[list] = None,
     ) -> None:
         self.fighters = list(fighters)
         self.awacs = awacs
@@ -609,6 +638,10 @@ class EnemyCommander:
         # ARM-EMCON doctrine (_defend_ground_radars) can read their positions.
         # Default empty -> the n==0 / test paths Just Work.
         self.ground_radars = list(ground_radars) if ground_radars else []
+        # M3-F2 escort jammers (sim.enemy_air.JammerAircraft): wired in like the
+        # AWACS so _defend_jammer can station/lift/flee them. Default empty ->
+        # the n_jammers==0 default battle builds none, never touching this path.
+        self.jammers = list(jammers) if jammers else []
         self.picture: EnemyPicture = (picture
                                       if picture is not None else EnemyPicture())
         self.stock: WeaponStock = (weapon_stock
@@ -640,6 +673,19 @@ class EnemyCommander:
         self._ground_arm_emcon: set[str] = set()
         self._ground_arm_silent_until: dict[str, float] = {}
 
+        # M3-F2 escort-jammer EMCON state (mirrors the AWACS dwell, PER jammer):
+        #   *_jammer_lifted: aircraft_ids whose jam the commander is HOLDING
+        #     LIFTED for an inbound threat (only re-jams what IT lifted).
+        #   *_jammer_lift_until: id -> sim_time the lift dwell expires.
+        #   *_jammer_fleeing: ids currently under a flee order (anti-spam).
+        self._jammer_lifted: set[str] = set()
+        self._jammer_lift_until: dict[str, float] = {}
+        self._jammer_fleeing: set[str] = set()
+        # Last commanded station bearing per jammer (rad) — a STATION order is
+        # re-issued only when the believed bearing MOVES past JAMMER_RESTATION_
+        # EPS_RAD or after a lift, so normal operation never strobes jam orders.
+        self._jammer_station_bearing: dict[str, float] = {}
+
     # ------------------------------------------------------------------ tick
 
     def tick(self, sim_time: float, dt: float) -> list[dict]:
@@ -666,11 +712,13 @@ class EnemyCommander:
     # ---------------------------------------------------------------- defend
 
     def _doctrine_defend(self, sim_time: float) -> None:
-        """DEFEND: drone vectoring, AWACS flee, ship + ground radar silence."""
+        """DEFEND: drone vectoring, AWACS flee, ship + ground radar silence,
+        escort-jammer station/lift/flee."""
         self._defend_vs_drone(sim_time)
         self._defend_awacs(sim_time)
         self._defend_ship_radars(sim_time)
         self._defend_ground_radars(sim_time)
+        self._defend_jammer(sim_time)
 
     def _sensed_arm_within(self, sim_time: float, pos, range_m: float) -> bool:
         """True when the SENSED picture holds a live ARM-kind missile track
@@ -878,6 +926,155 @@ class EnemyCommander:
                         "type": "ground_radar_emit",
                         "radar_id": rid,
                     })
+
+    # ---------------------------------------------------------------- jammer
+
+    def _fleet_centroid_xz(self) -> Optional[np.ndarray]:
+        """The (x, z) centroid of the live destroyer screen — the jammer's own
+        side's positions (NOT a truth read of the player).  None if the screen
+        is gone (the jammer then holds its current orbit)."""
+        pts = [(float(s.pos[0]), float(s.pos[2]))
+               for s in self.destroyers if getattr(s, "alive", False)]
+        if not pts:
+            return None
+        return np.array([sum(p[0] for p in pts) / len(pts),
+                         sum(p[1] for p in pts) / len(pts)],
+                        dtype=np.float64)
+
+    def _loudest_believed_emitter_xz(self) -> Optional[np.ndarray]:
+        """The (x, z) BELIEF estimate of the loudest player emitter the picture
+        holds — the EmitterIntel with the HIGHEST fix progress (else, the most
+        targetable back-plot cluster centroid).  NO-CHEAT: reads ONLY the
+        sensor-derived EnemyPicture (believed_pos / cluster centres), NEVER the
+        real player radar/launcher truth.  None if the side believes nothing."""
+        best_ei = None
+        for ei in self.picture.emitters.values():
+            if not ei.alive:
+                continue
+            if best_ei is None or ei.fix_progress > best_ei.fix_progress:
+                best_ei = ei
+        if best_ei is not None and best_ei.fix_progress > 0.0:
+            bp = best_ei.believed_pos
+            return np.array([float(bp[0]), float(bp[2])], dtype=np.float64)
+        # Fallback: the strongest back-plot launch cluster centroid (XZ).
+        best_c = None
+        for c in self.picture.clusters:
+            if not c.believed_alive:
+                continue
+            if best_c is None or len(c.fixes) > len(best_c.fixes):
+                best_c = c
+        if best_c is not None:
+            return np.array([float(best_c.centre[0]), float(best_c.centre[1])],
+                            dtype=np.float64)
+        return None
+
+    def _defend_jammer(self, sim_time: float) -> None:
+        """STATION / LIFT / FLEE the escort jammer(s) — NO-CHEAT, sensor-only.
+
+        Per live jammer:
+          * THREAT (lift + flee): a sensed inbound missile track within
+            JAMMER_THREAT_RANGE_M of the jammer -> LIFT the jam (going dark
+            denies a radiation-homing seeker its beacon, degrading the round —
+            the ARM-EMCON logic) and FLEE toward the rear (reuse the AWACS
+            flee()).  Anti-strobe: enter ONCE, refresh the dwell each tick the
+            threat is seen, HOLD the lift through JAMMER_EMCON_DWELL_S after it
+            was last seen (no per-tick strobe), THEN re-jam + stop fleeing.
+          * STATION (no threat): aim the orbit on the fleet-centroid ->
+            LOUDEST-BELIEVED-emitter bearing (the EnemyPicture belief, never
+            truth).  If nothing is believed, hold the current orbit.
+
+        Determinism: a pure function of the picture + the side's own positions
+        + sim_time; NO RNG, no wallclock.
+        """
+        if not self.jammers:
+            return
+        missile_tracks = self.picture.live_missile_tracks(sim_time)
+        centroid = self._fleet_centroid_xz()
+        belief = self._loudest_believed_emitter_xz()
+
+        for jam in self.jammers:
+            if not getattr(jam, "alive", False):
+                continue
+            jid = jam.aircraft_id
+            jpos = jam.pos   # the jammer's OWN position (own-side, not truth)
+
+            # --- inbound-threat gate (mirrors the AWACS / ARM EMCON) ---
+            threat_pos = None
+            for mt in missile_tracks:
+                mpos = mt["pos"]
+                if math.hypot(float(mpos[0]) - float(jpos[0]),
+                              float(mpos[2]) - float(jpos[2])) \
+                        <= JAMMER_THREAT_RANGE_M:
+                    threat_pos = mpos
+                    break
+
+            if threat_pos is not None:
+                # Refresh the lift dwell while the threat is seen (anti-strobe).
+                self._jammer_lift_until[jid] = sim_time + JAMMER_EMCON_DWELL_S
+                if jid not in self._jammer_lifted:
+                    # Enter lift ONCE (anti-spam) — and flee ONCE.
+                    self._jammer_lifted.add(jid)
+                    self.pending_orders.append({
+                        "type": "jammer_lift",
+                        "aircraft_id": jid,
+                        "threat_pos": np.asarray(threat_pos,
+                                                 dtype=np.float64).copy(),
+                    })
+                if (math.hypot(float(threat_pos[0]) - float(jpos[0]),
+                               float(threat_pos[2]) - float(jpos[2]))
+                        <= JAMMER_FLEE_RANGE_M
+                        and jid not in self._jammer_fleeing):
+                    self._jammer_fleeing.add(jid)
+                    self.pending_orders.append({
+                        "type": "jammer_flee",
+                        "aircraft_id": jid,
+                        "threat_pos": np.asarray(threat_pos,
+                                                 dtype=np.float64).copy(),
+                    })
+                continue   # threatened: no stationing this tick
+
+            # Threat clear: hold the lift through the dwell (no self-strobe).
+            if (jid in self._jammer_lifted
+                    and sim_time < self._jammer_lift_until.get(jid, 0.0)):
+                continue
+
+            # Threat clear AND any lift dwell elapsed.  Compute the STATION
+            # bearing off BELIEF (None if nothing believed -> hold current orbit).
+            station_xz = None
+            bearing = None
+            if centroid is not None and belief is not None:
+                bearing = math.atan2(float(belief[0]) - float(centroid[0]),
+                                     float(belief[1]) - float(centroid[1]))
+                station_xz = np.array([
+                    float(centroid[0]) + JAMMER_STANDOFF_M * math.sin(bearing),
+                    float(centroid[1]) + JAMMER_STANDOFF_M * math.cos(bearing),
+                ], dtype=np.float64)
+
+            was_lifted = jid in self._jammer_lifted
+            self._jammer_lifted.discard(jid)
+            self._jammer_fleeing.discard(jid)
+
+            # Decide whether to (re-)issue a jam/station order.  Emit when:
+            #   * we are coming out of a lift (must turn the corridor back on), OR
+            #   * the believed bearing has MOVED past the re-station epsilon
+            #     (or this is the first station) — otherwise hold (anti-strobe:
+            #     steady-state operation issues no per-tick order spam).
+            restation = False
+            if bearing is not None:
+                last = self._jammer_station_bearing.get(jid)
+                if last is None or abs(
+                        (bearing - last + math.pi) % (2.0 * math.pi) - math.pi
+                ) >= JAMMER_RESTATION_EPS_RAD:
+                    restation = True
+            if not (was_lifted or restation):
+                continue
+
+            order = {"type": "jammer_jam", "aircraft_id": jid}
+            if station_xz is not None:
+                order["station_xz"] = station_xz
+                order["bearing"] = bearing
+                self._jammer_station_bearing[jid] = bearing
+            self.pending_orders.append(order)
 
     # ----------------------------------------------------------------- blind
 

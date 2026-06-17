@@ -24,6 +24,11 @@ class CombatConfig:
     seed: int = 1337
     n_destroyers: int = 3        # carrier is ALWAYS 1, not configurable
     n_awacs: int = 1
+    # M3-F2 EA-18G-class escort jammers. DEFAULT 0 so the out-of-the-box battle
+    # stays BYTE-IDENTICAL (no jammer built -> _player_visible passes jammers=()
+    # -> the EW field model is never consulted). A non-zero count spawns standoff
+    # jammers that collapse the player radar via sim/ew.py.
+    n_jammers: int = 0
     n_enemy_radars: int = 2      # enemy coastal ground radars (Oniks targets, win condition)
     n_player_radars: int = 1
     n_pantsir: int = 2
@@ -50,6 +55,10 @@ class CombatConfig:
 #     (min, max) inclusive
 CLAMP_DESTROYERS:    tuple = (0, 12)
 CLAMP_AWACS:         tuple = (0, 3)
+# M3-F2 escort jammers: floor 0 (OFF default survives a clamp_config round-trip
+# — like CLAMP_AWACS the setup-default path runs every field through clamp_config;
+# clamping n_jammers=0 with a (1, ..) range would silently turn the corridor ON).
+CLAMP_JAMMERS:       tuple = (0, 3)
 CLAMP_ENEMY_RADARS:  tuple = (0, 6)
 CLAMP_PLAYER_RADARS: tuple = (1, 4)
 CLAMP_PANTSIR:       tuple = (0, 6)
@@ -88,6 +97,7 @@ def clamp_config(
     seed: int = CombatConfig.seed,
     n_destroyers: int = CombatConfig.n_destroyers,
     n_awacs: int = CombatConfig.n_awacs,
+    n_jammers: int = CombatConfig.n_jammers,
     n_enemy_radars: int = CombatConfig.n_enemy_radars,
     n_player_radars: int = CombatConfig.n_player_radars,
     n_pantsir: int = CombatConfig.n_pantsir,
@@ -111,6 +121,7 @@ def clamp_config(
     """
     lo_d, hi_d = CLAMP_DESTROYERS
     lo_aw, hi_aw = CLAMP_AWACS
+    lo_jm, hi_jm = CLAMP_JAMMERS
     lo_er, hi_er = CLAMP_ENEMY_RADARS
     lo_pr, hi_pr = CLAMP_PLAYER_RADARS
     lo_pa, hi_pa = CLAMP_PANTSIR
@@ -126,6 +137,7 @@ def clamp_config(
         seed=int(seed),
         n_destroyers=clamp_field(int(n_destroyers), lo_d, hi_d),
         n_awacs=clamp_field(int(n_awacs), lo_aw, hi_aw),
+        n_jammers=clamp_field(int(n_jammers), lo_jm, hi_jm),
         n_enemy_radars=clamp_field(int(n_enemy_radars), lo_er, hi_er),
         n_player_radars=clamp_field(int(n_player_radars), lo_pr, hi_pr),
         n_pantsir=clamp_field(int(n_pantsir), lo_pa, hi_pa),

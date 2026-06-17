@@ -25,7 +25,8 @@ import pytest
 from sim.ships import ST_GONE
 from world.combat_config import (
     DEFAULT, CombatConfig, clamp_config, clamp_field,
-    CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_ENEMY_RADARS, CLAMP_PLAYER_RADARS,
+    CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_JAMMERS, CLAMP_ENEMY_RADARS,
+    CLAMP_PLAYER_RADARS,
     CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_RELOAD_S,
 )
 
@@ -41,6 +42,9 @@ def test_defaults_match_locked_schema():
     assert c.seed == 1337
     assert c.n_destroyers == 3
     assert c.n_awacs == 1
+    # M3-F2: escort jammers DEFAULT to 0 (OFF) so the out-of-the-box battle
+    # stays byte-identical (no jammer built -> _player_visible jammers=()).
+    assert c.n_jammers == 0
     assert c.n_enemy_radars == 2
     assert c.n_player_radars == 1
     assert c.n_pantsir == 2
@@ -76,12 +80,13 @@ def test_clamp_field_bounds():
 
 def test_clamp_config_count_floors():
     c = clamp_config(
-        n_destroyers=-5, n_awacs=-1, n_enemy_radars=-1,
+        n_destroyers=-5, n_awacs=-1, n_jammers=-1, n_enemy_radars=-1,
         n_player_radars=0,   # below min 1
         n_pantsir=-1, n_drones=-1,
     )
     assert c.n_destroyers == CLAMP_DESTROYERS[0]
     assert c.n_awacs == CLAMP_AWACS[0]
+    assert c.n_jammers == CLAMP_JAMMERS[0]    # floor 0 -> OFF survives clamp
     assert c.n_enemy_radars == CLAMP_ENEMY_RADARS[0]
     assert c.n_player_radars == CLAMP_PLAYER_RADARS[0]  # min=1
     assert c.n_pantsir == CLAMP_PANTSIR[0]
@@ -90,11 +95,12 @@ def test_clamp_config_count_floors():
 
 def test_clamp_config_count_ceilings():
     c = clamp_config(
-        n_destroyers=999, n_awacs=999, n_enemy_radars=999,
+        n_destroyers=999, n_awacs=999, n_jammers=999, n_enemy_radars=999,
         n_player_radars=999, n_pantsir=999, n_drones=999,
     )
     assert c.n_destroyers == CLAMP_DESTROYERS[1]
     assert c.n_awacs == CLAMP_AWACS[1]
+    assert c.n_jammers == CLAMP_JAMMERS[1]
     assert c.n_enemy_radars == CLAMP_ENEMY_RADARS[1]
     assert c.n_player_radars == CLAMP_PLAYER_RADARS[1]
     assert c.n_pantsir == CLAMP_PANTSIR[1]
