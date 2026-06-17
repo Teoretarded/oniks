@@ -12,9 +12,11 @@
 ## MORNING REPORT  (live — updated as work proceeds; branch `feat/combat-expansion`, do NOT touch `main`)
 
 **Headline:** 2 of 6 milestones SHIPPED, GATED, and PLAYABLE overnight (M1, M2),
-the new weapon's 3D model + reference photos, AND M3's EW keystone (the J/S
-burn-through field model) shipped + verified as a gated feature (M3 in progress).
-Full test suite **930 passed, exit 0**;
+the new weapon's 3D model + reference photos, AND M3's EW CORE shipped + gated as
+two reviewed features — the J/S burn-through field model AND the enemy Growler
+that uses it to collapse the player's radar (M3 in progress; the player can already
+SEAD-ARM the Growler via M2 — the two-sided EW↔SEAD loop closes). Full test suite
+**937 passed, exit 0**;
 combat smoke **70/70 exit 0**; the locked regression contracts (Oniks-vs-SM-2 duel,
 Oniks/SAM flight, same-seed determinism, byte-identical out-of-the-box battle) all
 held BIT-IDENTICAL throughout. Every feature went through the Fable-Method loop
@@ -215,8 +217,20 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
   (half, monotonic). Orchestrator re-verified (EW tests + regression contracts +
   re-ran probe). The EW keystone — remaining M3 consumers queued.
 
-### Next
-- Continue M3: enemy Growler (`JammerAircraft` + `_defend_jammer` doctrine) — the
-  threat that makes the field model bite — then player EW pod, ELINT-sigma,
-  JAMMED UI, and the HeightField/terrain work. Each a gateable increment.
+- `build:M3-F2` — IMPLEMENTER / opus — enemy Growler (`JammerAircraft` +
+  `_defend_jammer` no-cheat doctrine + world wiring so the field model bites the
+  player radar) + 7 tests — DONE (937 passed, smoke 70/70, byte-identical).
+  Commit `f6c4a77`. e2e: 300 km target dropped under jam, restored on lift.
+- `review:M3-F2-nocheat` — NO-CHEAT + REGRESSION / opus — CLEAN / PASS; stations
+  off belief (verified by moving the real radar to the map edge), no truth read,
+  byte-identical to parent via worktree digest. No fixes needed.
+
+### Next (M3 remaining + M4–M6)
+- M3 remaining: player drone EW pod (symmetric jamming), ELINT bearing-sigma
+  elevation under jam, JAMMED-band UI + emissions meter, HeightField refactor +
+  terrain uplift + seeded map presets.
+- M4 (ASBM + swarm), M5 (fleet/sub/amphibious/scoot/CBR/decoys), M6 (campaign/
+  scoring/salvo/auto-warp/presets) — each a coherent gateable milestone; resume
+  from this report + the last commit. Future new models (ASBM/swarm/Buk/etc.) get
+  the build-mesh + reference-photo treatment (task #7) when their milestones land.
 

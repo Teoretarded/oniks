@@ -956,7 +956,33 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
   byte-identical → full suite 930 green (920+10), smoke 70/70 exit 0,
   Oniks-duel + contacts-gating + enemy-defense + missile-flight all bit-identical.
   Orchestrator re-verified (EW tests + regression contracts + re-ran the probe).
-- **Remaining M3 features** (consume this field model): enemy Growler
-  (`JammerAircraft` + `_defend_jammer` doctrine), player drone EW pod, ELINT
-  bearing-sigma elevation under jam, JAMMED-band UI + emissions meter, the
-  HeightField refactor + terrain/graphics uplift + seeded map presets.
+### M3-F2 Enemy Growler escort jammer (commit `f6c4a77`)
+- **Files:** `sim/enemy_air.py` (`JammerAircraft(Awacs)` — racetrack/flee reused +
+  an empty-ranges `emitter` beacon carrying `jam_power_w` + `station_to`);
+  `sim/commander.py` (`_defend_jammer` no-cheat doctrine + `_fleet_centroid_xz`/
+  `_loudest_believed_emitter_xz`); `world/combat.py` (build `n_jammers`, step,
+  `_emitters` beacon, `_active_enemy_jammers()` + the `_player_visible`
+  `jammers=` plumbing, `jammer_jam/lift/flee` orders); `world/combat_config.py`
+  (`n_jammers:int=0` + `CLAMP_JAMMERS=(0,3)`); NEW `tests/test_ew_jammer.py` (7).
+- **The field model BITES (e2e):** a 300 km air target tracked at `n_jammers=0`
+  is DROPPED at `n_jammers=1` (the 200 W corridor collapses the 350 km ring to
+  ~255 km burn-through through `_player_visible`), and RESTORED when the jammer
+  lifts. Close-in floor still detects a knife-range target under jam.
+- **AI is no-cheat:** `_defend_jammer` stations on the fleet→loudest-BELIEVED-
+  emitter bearing (reads `picture.emitters`/clusters + own fleet pos, never
+  truth), lifts the jam on a sensed inbound ARM/missile track within 90 km
+  (anti-strobe 60 s dwell), flees on a closing track. NO RNG (pure picture+pos+time).
+- **The two-sided SEAD↔EW loop now closes:** the Growler's beacon is in
+  `_emitters()` → the drone ELINT hears it → it surfaces in `emitter_contacts`
+  → the player can SEAD-ARM it (M2). Lifting-when-ARM-inbound is the enemy's
+  counter (and lifting = the player's win, jam down).
+- **Reviews:** independent NO-CHEAT + REGRESSION reviewer → CLEAN / PASS (94
+  targeted tests, smoke 70/70, byte-identical to parent `19d26c7` confirmed via
+  worktree digest `2613aef`; stations-off-belief verified by moving the real
+  radar to the map edge). No fixes needed.
+- **Gate:** full suite 937 passed, smoke 70/70 exit 0, byte-identical default.
+- **Remaining M3 features** (queued): player drone EW pod (symmetric — player
+  jams the enemy net so a salvo leaks), ELINT bearing-sigma elevation under jam,
+  JAMMED-band UI + emissions meter, the HeightField refactor + terrain/graphics
+  uplift + seeded map presets. (Cosmetic follow-up: the jammer uses the AWACS
+  mesh + has no distinct map glyph yet.)
