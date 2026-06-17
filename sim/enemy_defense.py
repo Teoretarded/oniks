@@ -611,14 +611,23 @@ class ShipDefense:
 
     def step(self, world, dt):
         ship = self.ship
-        ship.radar.alive = ship.alive   # a sinking ship's SPY-1 is off
         if not ship.alive:
+            # A sunk ship's SPY-1 is off, and STAYS off.
+            ship.radar.alive = False
             self._tracks.clear()
             self._inflight.clear()
             self._drone_tracks.clear()
             self._drone_inflight.clear()
             self._sm6_inflight.clear()
             return
+        # Ship alive: leave radar.alive AS-IS. It is True in normal play, but a
+        # player ARM (Kh-31P) fuse flips it False directly — that kill must
+        # STICK (M2 GATE Finding 2). The previous unconditional
+        # `radar.alive = ship.alive` resurrected an ARM-killed SPY-1 every tick
+        # while the hull floated, so an ARM could only blink a radar, never kill
+        # it. The only behavior change: a radar killed while the ship LIVES now
+        # stays dead (the intended ARM effect). A sunk ship still kills its
+        # radar via the branch above.
         now = world.sim_time
         # Hostiles = player cruise missiles. SamMissile is a separate type
         # (never a Missile subclass), so every interceptor — player S-300

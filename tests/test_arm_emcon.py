@@ -343,3 +343,147 @@ def test_emcon_determinism():
                              "ground_radar_silent", "ground_radar_emit")))
 
     assert run() == run(), "same-seed ARM-EMCON orders must be identical"
+
+
+# ===========================================================================
+# REAL-ARM END-TO-END (M2 GATE): a PlayerArmMissile fired through the FULL
+# world.step() loop — NO synthetic injected track. The enemy must SENSE the
+# real round via _feed_enemy_picture (Finding 1), form a kind=="kh31p" track,
+# and react. These are the contract both review agents flagged as missing; the
+# synthetic-track unit tests above remain valid coverage of the doctrine in
+# isolation.
+#
+# Geometry: relocate the first destroyer's SPY-1 down-range of the launcher,
+# HOLD STATION (speed=0) for a stable, deterministic intercept, and localize
+# its emitter (the fog gate launch_arm requires). The ARM kill envelope over
+# real terrain at this offset is exercised by the closest-approach assertions.
+# ===========================================================================
+
+# Down-range offset (m) of the relocated ship SPY-1 from the Oniks launcher.
+#   60 km: inside the ARM's terrain-flyoff fuse envelope for a STATIONARY ship
+#   (probed closest ~11 m < fuse_radius) -> a clean kill when NOT EMCON'd.
+_E2E_KILL_RANGE_M = 60_000.0
+#   90 km: still well within ARM reach (the round arrives) but far enough that
+#   the EMCON dwell has time to degrade it to the CEP ring before terminal.
+_E2E_EMCON_RANGE_M = 90_000.0
+_E2E_MAX_T_S = 260.0   # generous flight-time budget for the longest shot
+
+
+def _place_ship_spy1(w, range_m):
+    """Relocate the first destroyer + its SPY-1 ``range_m`` down-range of the
+    launcher, hold it on station (speed 0 -> deterministic intercept), set it
+    EMITTING, and localize the emitter so ``launch_arm`` passes the fog gate.
+    Returns (ship, radar)."""
+    ship, radar = _first_destroyer(w)
+    ship.speed = 0.0                       # hold station: stable ARM intercept
+    lp = w._oniks_tubes[0]["pos"]
+    nx = float(lp[0])
+    nz = float(lp[2]) + float(range_m)
+    radar.pos = np.array([nx, 18.0, nz], dtype=np.float64)
+    ship.pos = np.array([nx, 0.0, nz], dtype=np.float64)
+    radar.emitting = True
+    w.emitter_contacts[radar.radar_id] = dict(
+        pos=radar.pos.copy(), kind="SPY-1", quality=50.0,
+        last_heard=w.sim_time, age=10.0)
+    return ship, radar
+
+
+def test_real_arm_is_sensed_and_triggers_ship_emcon():
+    """A REAL Kh-31P fired through the world step loop is SENSED by the enemy
+    (a kind=="kh31p" track appears in the commander's picture, via
+    _feed_enemy_picture — NOT injected) and the threatened ship goes EMCON
+    (radar stops emitting). This is the integration the M2 gate restored:
+    before Finding 1 the ARM was filtered out before classification, so no
+    kh31p track ever formed in play and the EMCON doctrine was unreachable."""
+    w = CombatWorld(CombatConfig(seed=1337, kh31p_ammo=1, n_enemy_radars=0))
+    ship, radar = _place_ship_spy1(w, _E2E_EMCON_RANGE_M)
+
+    m = w.launch_arm(radar.radar_id)
+    assert m is not None and m.target_radar is radar
+
+    saw_kh31p = False
+    went_emcon = False
+    for _ in range(int(_E2E_MAX_T_S / DT)):
+        if not m.alive:
+            break
+        w.step(DT)            # FULL loop: _feed_enemy_picture senses the ARM
+        if any(t.get("kind") == "kh31p"
+               for t in w.commander.picture.live_missile_tracks(w.sim_time)):
+            saw_kh31p = True
+        if not radar.emitting:
+            went_emcon = True
+
+    assert saw_kh31p, (
+        "the enemy must SENSE the real ARM (a kind=='kh31p' track must appear "
+        "in commander.picture.missile_tracks via _feed_enemy_picture)")
+    assert went_emcon, (
+        "the threatened ship must go EMCON (radar.emitting -> False) off the "
+        "sensed ARM track")
+
+
+def test_real_arm_kills_ship_spy1_when_not_emcon():
+    """With the ship's ARM-EMCON suppressed (the radar keeps emitting), a REAL
+    ARM fired through the world loop FUSES and kills the SPY-1 — and the kill
+    STAYS dead after another step. This proves Finding 2's resurrection fix:
+    the previous unconditional ``ship.radar.alive = ship.alive`` revived an
+    ARM-killed radar the same tick, so an ARM could only blink it, never kill
+    it. The EMCON path is disabled here (not the SENSING path) so we isolate
+    the kill+credit mechanism; the EMCON-saves duel is asserted separately."""
+    w = CombatWorld(CombatConfig(seed=1337, kh31p_ammo=1, n_enemy_radars=0))
+    ship, radar = _place_ship_spy1(w, _E2E_KILL_RANGE_M)
+    # Deny the ship its EMCON counter so the radar keeps emitting and the ARM
+    # homes to a fuse kill (we are testing the KILL + no-resurrection, not the
+    # doctrine — that has its own e2e below). The SENSING feed stays live.
+    w.commander._defend_ship_radars = lambda *a, **k: None
+
+    m = w.launch_arm(radar.radar_id)
+    assert m is not None and m.target_radar is radar
+
+    for _ in range(int(_E2E_MAX_T_S / DT)):
+        if not m.alive:
+            break
+        w.step(DT)
+
+    assert not m.alive, "the ARM must have fused/expended"
+    assert m._miss_offset is None, (
+        "an emitting (non-EMCON) radar must NOT degrade the ARM to the CEP "
+        "ring — the round homes on the live emission to a kill")
+    assert not radar.alive, (
+        "the ARM must KILL the emitting SPY-1 (radar.alive -> False)")
+
+    # Resurrection guard: step further — the killed radar must STAY dead while
+    # the hull still floats (the ShipDefenseController must not revive it).
+    assert ship.alive, "the hull survives an anti-RADAR hit (only the SPY-1 dies)"
+    for _ in range(int(5.0 / DT)):
+        w.step(DT)
+    assert not radar.alive, (
+        "a radar killed by an ARM while the ship LIVES must STAY dead — no "
+        "per-tick resurrection (Finding 2)")
+
+
+def test_real_arm_emcon_saves_ship_spy1():
+    """The full duel through the world loop: the ship SENSES the real inbound
+    ARM, goes EMCON, the ARM loses the emission and degrades to its seeded CEP
+    ring, and the SPY-1 SURVIVES (radar.alive stays True). Physics-not-dice:
+    the save is a real radar.emitting=False the ARM's homing reads, not a
+    probability roll. No track is injected — the enemy senses the round
+    itself."""
+    w = CombatWorld(CombatConfig(seed=1337, kh31p_ammo=1, n_enemy_radars=0))
+    ship, radar = _place_ship_spy1(w, _E2E_EMCON_RANGE_M)
+
+    m = w.launch_arm(radar.radar_id)
+    assert m is not None and m.target_radar is radar
+
+    went_emcon = False
+    for _ in range(int(_E2E_MAX_T_S / DT)):
+        if not m.alive:
+            break
+        w.step(DT)
+        if not radar.emitting:
+            went_emcon = True
+
+    assert went_emcon, "the ship must have gone EMCON off the sensed real ARM"
+    assert radar.alive, (
+        "an EMCON'd SPY-1 must SURVIVE the ARM (degraded to the CEP ring)")
+    assert m._miss_offset is not None, (
+        "the silenced-emitter path must have drawn the seeded CEP miss offset")

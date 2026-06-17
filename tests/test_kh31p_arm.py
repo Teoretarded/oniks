@@ -351,6 +351,17 @@ def test_arm_kills_ground_radar_for_victory_credit():
     radar.pos = np.array([nx, ny + 18.0, nz], dtype=np.float64)
     struct.pos = np.array([nx, ny, nz], dtype=np.float64)
 
+    # Suppress ground-radar ARM-EMCON for THIS test. We are exercising the
+    # victory-CREDIT mechanism (fuse -> radar dead -> Structure dead -> win
+    # gate), not the EMCON doctrine. Once the M2 GATE feed-fix made a real ARM
+    # SENSED in play, the relocated ground radar (now within ARM_EMCON_RANGE_M
+    # of the inbound track) would otherwise go SILENT and survive on the CEP
+    # ring — which is correct doctrine, covered by its own EMCON tests. Here we
+    # need the radar to keep emitting so the round actually fuses and we can
+    # assert the credit path. No-op the ground EMCON; the EMCON-saves-radar duel
+    # is asserted separately in the e2e suite.
+    cw.commander._defend_ground_radars = lambda *a, **k: None
+
     _localize(cw, radar)
     assert struct.alive and radar.alive
 

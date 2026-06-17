@@ -1177,14 +1177,23 @@ class CombatWorld(WorldState):
         # metadata recorded at the first physical detection).  Filter:
         # player rounds only — the Oniks (Missile) and the S-300/40N6
         # (SamMissile with no launch_platform; enemy SM-2s carry their
-        # launching ship there, sim/enemy_defense.py).
+        # launching ship there, sim/enemy_defense.py).  The player ARM
+        # (PlayerArmMissile, a StrikeMissile) is ALSO fed so an enemy radar
+        # that physically detects it forms a kind=="kh31p" track — the only
+        # thing that makes M2-T3 ARM-EMCON reachable in real play (M2 GATE
+        # Finding 1).  The ARM is is_hostile=False and carries
+        # launch_platform=self (a self-hit guard set at launch, NOT an
+        # enemy-round marker), so it must bypass the launch_platform gate
+        # below; the gate stays for the SamMissile case it was written for.
         live_keys = set()
         for m in self.missiles:
             if not m.alive or getattr(m, "is_hostile", False):
                 continue
-            if not isinstance(m, (Missile, SamMissile)):
+            is_player_arm = isinstance(m, PlayerArmMissile)
+            if not (is_player_arm or isinstance(m, (Missile, SamMissile))):
                 continue
-            if getattr(m, "launch_platform", None) is not None:
+            if (not is_player_arm
+                    and getattr(m, "launch_platform", None) is not None):
                 continue
             key = id(m)
             live_keys.add(key)
@@ -1719,6 +1728,18 @@ class CombatWorld(WorldState):
                 t["reload_left"] = max(0.0, t["reload_left"] - dt)
 
     # ----------------------------------------------------- Kh-31P player ARM
+    #
+    # INTENDED TARGETS / RANGE GAP (M2 GATE Finding 2-geometry, doc-only):
+    #   The Kh-31P ARM (~130 km reach) is an anti-EMITTER SEAD round whose
+    #   reachable prey are the SHIP SPY-1s, the AWACS when dragged in close,
+    #   and fighter radars — NOT the win-condition INLAND ground radars
+    #   (those sit at z~502 km, ~505 km away, far beyond ARM range, and are
+    #   killed by Oniks / strike packages by design). The ground-radar
+    #   victory-credit path below (_arm_radar_bindings -> _apply_arm_radar_kills)
+    #   is sound and stays in place for closer / future engagements where a
+    #   ground radar IS within reach — it simply does not fire in the default
+    #   inland geometry. Do NOT extend ARM range or relocate the radars to
+    #   "fix" this; that is a balance decision out of scope for the gate.
     def launch_arm(self, emitter_id):
         """Fire one Kh-31P player anti-radiation missile at a LOCALIZED enemy
         emitter (M2-T2).  The player SEAD round: it homes passively on the
@@ -1817,11 +1838,28 @@ class CombatWorld(WorldState):
         condition advances.  Emits the same ('base_hit'/'base_destroyed')
         events the Oniks sweep does so the renderer/HUD react identically.
         Resolved or spent bindings are dropped so the list cannot grow without
-        bound."""
+        bound.
+
+        Attribution (M2 GATE Finding 4): when two ARMs bind the SAME ground
+        radar, the credit/``base_hit`` event must come from the round that
+        ACTUALLY fused, not merely the first binding in list order — otherwise
+        the impact-event position can be stamped from a round that never
+        detonated (impact_pos None -> struct.pos fallback) while its twin was
+        the real killer. We therefore process bindings sorted so a fused round
+        (``impact_pos is not None``) is preferred over an unfused one for the
+        same struct. The win condition is unaffected either way (it keys on
+        ``struct.alive``); this only sharpens the event coordinates."""
         if not self._arm_radar_bindings:
             return
+        # Prefer a binding whose round actually fused (impact_pos set) so a
+        # shared-struct credit takes the real detonation's coordinates. Stable
+        # sort: same-struct fused rounds float ahead of unfused; cross-struct
+        # order is otherwise preserved (single-ARM-per-radar is unchanged).
+        ordered = sorted(
+            self._arm_radar_bindings,
+            key=lambda b: 0 if b[0].impact_pos is not None else 1)
         survivors = []
-        for m, struct in self._arm_radar_bindings:
+        for m, struct in ordered:
             if not struct.alive:
                 continue                          # already credited / dead
             radar_dead = not m.target_radar.alive
