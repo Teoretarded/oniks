@@ -69,6 +69,20 @@ EW_DEFAULT_JAM_POWER_W: float = 200.0
 EW_DEFAULT_STANDOFF_M: float = 150_000.0   # behind the threat screen
 EW_DEFAULT_JAMMER_ALT_M: float = 12_000.0  # standoff orbit altitude (clears horizon)
 
+# ---------------------------------------------------------------------------
+# M3-F3 ELINT noise floor (consumed by sim/recon.ElintReceiver to widen the
+# passive bearing sigma under jamming).  DIMENSIONLESS, normalised so the
+# DEFAULT Growler (EW_DEFAULT_JAM_POWER_W) at its DEFAULT standoff
+# (EW_DEFAULT_STANDOFF_M) yields floor == 1.0 at a receiver that far from it:
+#     EW_NOISE_REF = R_default**2 / jam_power_default
+#                  = 150000**2 / 200 = 1.125e8  (m**2 / W)
+#     floor(rx) = sum_jammers jam_power_w * EW_NOISE_REF / R_jammer(rx)**2
+# i.e. floor ~ received jam power, scaled so "1.0" reads as "one nominal
+# Growler at nominal standoff range".  Pure 1/R**2 one-way geometry — the
+# SAME physics as the burn-through field; LOS-gated (a terrain-screened
+# jammer raises no floor).  RNG-FREE.
+EW_NOISE_REF: float = (EW_DEFAULT_STANDOFF_M ** 2) / EW_DEFAULT_JAM_POWER_W
+
 
 def _ground_range(a, b) -> float:
     """Horizontal (x,z) range in meters between two (x, y, z) points."""
@@ -156,3 +170,42 @@ def effective_range(radar, size_class: str, target_pos, jammers,
     bt = burn_through_range(radar, target_pos, jammers, height_fn=height_fn)
     collapsed = min(radar_max, bt)
     return max(EW_CLOSE_FLOOR_M, collapsed)
+
+
+def noise_floor_at(receiver_pos, jammers, height_fn=None) -> float:
+    """Dimensionless jam noise floor at ``receiver_pos`` from ``jammers``.
+
+    The drone's PASSIVE ELINT receiver hears the SAME barrage corridor a victim
+    radar does, but one-way from the jammer to the RECEIVER (not the radar):
+    received jam power ~ jam_power_w / R_jammer(receiver)**2.  Summed over all
+    jammers with clear line of sight to the receiver and normalised by
+    EW_NOISE_REF so the DEFAULT Growler at its DEFAULT standoff reads ~1.0
+    (see the EW_NOISE_REF comment).
+
+    Returns 0.0 when there are NO jammers (the byte-identical default the
+    ELINT receiver relies on: floor 0 -> sigma unchanged -> draw untouched).
+    A terrain-screened jammer (no LOS to the receiver) contributes nothing.
+    PURE, DETERMINISTIC, NO RNG — the only randomness in the ELINT chain stays
+    the existing seeded bearing draw.
+
+    ``receiver_pos`` is a (3,) [x, y, z] point; ``jammers`` is an iterable of
+    duck-typed objects with ``.pos`` (3,) and ``.jam_power_w`` (watts).
+    """
+    if not jammers:
+        return 0.0
+    rx = (float(receiver_pos[0]), float(receiver_pos[1]), float(receiver_pos[2]))
+    total = 0.0
+    for jam in jammers:
+        jpos = (float(jam.pos[0]), float(jam.pos[1]), float(jam.pos[2]))
+        # LOS gate: a jammer screened from the receiver by terrain raises no
+        # floor at it (mirrors the burn_through_range LOS gate).
+        if height_fn is None:
+            masked = terrain_blocks(jpos, rx)
+        else:
+            masked = terrain_blocks(jpos, rx, height_fn=height_fn)
+        if masked:
+            continue
+        r_j = max(_ground_range(rx, jpos), 1e-6)
+        jam_power = max(float(jam.jam_power_w), 0.0)
+        total += jam_power * EW_NOISE_REF / (r_j ** 2)
+    return total

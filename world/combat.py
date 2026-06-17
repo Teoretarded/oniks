@@ -872,7 +872,13 @@ class CombatWorld(WorldState):
         now = self.sim_time
         if now >= self._elint_next_t:
             self._elint_next_t = now + ELINT_LISTEN_PERIOD_S
-            self.elint.update(drone.pos, self._emitters(), sim_time=now)
+            # M3-F3: active enemy barrage jammers raise the passive ELINT noise
+            # floor at the drone, widening the bearing sigma (sim/ew.noise_floor_at
+            # -> sim/recon sigma scaling) so real-emitter fixes get HONESTLY
+            # softer.  n_jammers=0 -> _active_enemy_jammers() empty -> floor 0 ->
+            # byte-identical to the legacy draw.
+            self.elint.update(drone.pos, self._emitters(), sim_time=now,
+                              jammers=self._active_enemy_jammers())
         if now >= self._rwr_next_t:
             self._rwr_next_t = now + RWR_PERIOD_S
             # Threat emitters = ship mounts + airborne enemy air radars

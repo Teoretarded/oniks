@@ -127,6 +127,35 @@ ELINT_MIN_PAIR_SPACING_M: float = 800.0
 ELINT_FIX_ACTIONABLE_M: float = 5_000.0
 # Quality threshold below which the fix is good enough to cue a weapon.
 
+EW_ELINT_SIGMA_K: float = 1.0
+# M3-F3: how strongly an enemy barrage-jam noise floor widens the passive
+# ELINT bearing sigma.  The per-bearing draw uses
+#     sigma_eff = ELINT_BEARING_SIGMA_RAD * (1.0 + EW_ELINT_SIGMA_K * floor)
+# where ``floor = ew.noise_floor_at(drone_pos, jammers)`` is the DIMENSIONLESS
+# jam floor (sim/ew.noise_floor_at; ~1.0 for a nominal Growler at nominal
+# standoff range, RNG-free).  CRITICAL: floor == 0 (the default jammers=()) ->
+# 1.0 + K*0 == 1.0 EXACTLY -> sigma_eff == ELINT_BEARING_SIGMA_RAD bit-for-bit
+# -> the seeded draw is BYTE-IDENTICAL to the no-jam path (the load-bearing
+# regression gate).
+#
+# MODEST by design and CALIBRATED by tools/probe_ew_elint_sigma.py
+# (run 2026-06-17, 24 seeds).  At the DEFAULT Growler geometry (200 W,
+# EW_DEFAULT_STANDOFF ~150 km behind the screen ~= 230 km from a drone working
+# 80 km emitters) the floor reads ~0.42, so sigma inflates ~1.42x and the
+# full-pass fix quality is ~1.34x WORSE (probe mean; min 1.16, max 1.42) — a
+# real, honest softening the CRLB reports, no flat penalty.  A determined
+# cross-track pass STILL reaches an actionable fix under the default Growler on
+# EVERY seed (0/24 failures); it just costs more baseline on average (probe:
+# ~44.3 -> ~46.9 pairs, 1.06x), and a CLOSER/louder jammer (higher floor)
+# softens the fix MORE, exactly as the 1/R**2 physics demands.  Calibrated DOWN
+# from a trial K=1.5/2.0: those inflated the fix more (1.5-1.6x) but a moderately
+# closer jammer then walled OFF localization entirely (the explicit spec risk:
+# "too high and the player can never localize anything while jammed").  K=1.0
+# keeps the jam a genuine cost without that wall.  NOTE the single-seed pairs-to-
+# actionable is NOT monotone in sigma (a wider draw can luck into an early
+# crossing); the monotone effects are the per-step quality (worse at fixed
+# baseline) and the seed-AVERAGED pairs cost.
+
 ELINT_CONSISTENCY_MULT: float = 2.0
 # Angle-domain self-consistency gate (see _triangulate): a least-squares
 # fix whose predicted bearings disagree with the measured ones by more
@@ -496,6 +525,7 @@ class ElintReceiver:
         drone_pos: np.ndarray,
         emitters: Sequence[Tuple[str, object]],
         sim_time: float = 0.0,
+        jammers: Sequence[object] = (),
     ) -> None:
         """Process one sim step of passive listening.
 
@@ -508,10 +538,28 @@ class ElintReceiver:
         sim_time  : world clock (s); stamps ``last_heard`` per emitter so
                     the integrator can age intel.  Optional (defaults 0.0)
                     so sensor-level callers/tests stay signature-compatible.
+        jammers   : M3-F3 — iterable of active enemy barrage jammers (duck-typed
+                    ``.pos`` + ``.jam_power_w``).  Their noise floor at the drone
+                    (sim/ew.noise_floor_at) widens the per-bearing sigma so a
+                    REAL emitter's fix gets HONESTLY softer under jam (the CRLB
+                    then reports a worse quality — physics, not a flat penalty).
+                    DEFAULT () -> floor 0 -> sigma unchanged -> the seeded draw
+                    is BYTE-IDENTICAL to the no-jammer path (regression gate).
         """
         dx = float(drone_pos[0])
         dy = float(drone_pos[1])
         dz = float(drone_pos[2])
+
+        # Jam noise floor once per pass (lazy import to avoid a sim.ew<->recon
+        # import cycle).  Empty jammers -> 0.0 -> sigma scale factor 1.0 ->
+        # IDENTICAL draw to today.  RNG-free, pure geometry.
+        if jammers:
+            import sim.ew as _ew
+            floor = _ew.noise_floor_at(drone_pos, jammers,
+                                       height_fn=self._height_fn)
+        else:
+            floor = 0.0
+        sigma_eff = ELINT_BEARING_SIGMA_RAD * (1.0 + EW_ELINT_SIGMA_K * floor)
 
         for emitter_id, radar in emitters:
             if not (radar.alive and radar.emitting):
@@ -548,10 +596,12 @@ class ElintReceiver:
                         < ELINT_MIN_PAIR_SPACING_M:
                     continue      # redundant parallax: keep the window wide
 
-            # Accumulate a bearing fix with gaussian noise
+            # Accumulate a bearing fix with gaussian noise.  sigma_eff is the
+            # base sigma scaled by the jam floor (== base when floor==0, so the
+            # draw is byte-identical to the no-jam path).
             true_bearing = math.atan2(ex - dx, ez - dz)  # drone -> emitter
             noisy_bearing = true_bearing + float(
-                self._rng.normal(0.0, ELINT_BEARING_SIGMA_RAD)
+                self._rng.normal(0.0, sigma_eff)
             )
             # Normalise to (-pi, pi]
             noisy_bearing = (noisy_bearing + math.pi) % (2.0 * math.pi) - math.pi
