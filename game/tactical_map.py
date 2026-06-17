@@ -96,6 +96,18 @@ ELINT_CIRCLE_SEGMENTS = 48
 DRONE_DIAMOND_PX = 7.0
 DRONE_RECON_HINT = "DRONE: RECON ONLY"       # LMB/SPACE with drone active
 
+# M2-T4 — localized enemy EMITTER glyphs (the player's passive-SIGINT picture,
+# world.emitter_contacts).  Rendered in the SENSOR-ESTIMATE idiom (a faded
+# diamond-in-ring), distinct from friendly cyan/green and from the amber
+# ship/air contact symbols, so the player reads them as a BELIEF (fog-honest
+# est_pos), never as friendly truth.  The uncertainty ring reuses the ELINT
+# circle colour/segments; the diamond reuses the ELINT estimate hue.
+EMITTER_COL = ELINT_CIRCLE_COL               # estimate-violet (belief, not truth)
+EMITTER_SEL_COL = (0.95, 0.80, 1.00, 0.95)   # brighter ring when ARM-selected
+EMITTER_DIAMOND_PX = 6.0
+EMITTER_RING_PX = 11.0                        # minimum on-screen ring radius
+EMITTER_RING_SEGMENTS = ELINT_CIRCLE_SEGMENTS
+
 SITE_HALF_PX = 5.0             # site square icon half-size
 BASE_STAR_PX = 8.0             # base star spoke length
 # Phase 6 — Pantsir SHORAD markers: small friendly diamonds near the base
@@ -331,6 +343,24 @@ def pick_missile(view: MapView, missiles, mouse_px):
     return best
 
 
+def pick_emitter(view: MapView, emitter_contacts, mouse_px):
+    """emitter_id of the LOCALIZED emitter (world.emitter_contacts) whose
+    est_pos belief is nearest to ``mouse_px`` within PICK_RADIUS_PX, else None
+    (M2-T4 ARM target selection).  Pure / GL-free — mirrors ``pick_contact``.
+
+    FOG / NO CHEAT: the pick resolves at the SIGINT ``pos`` (the drone's
+    triangulated belief, the SAME vector the emitter glyph renders), never a
+    radar truth position.  An empty picture or a miss returns None."""
+    best, best_d = None, PICK_RADIUS_PX
+    for eid, c in emitter_contacts.items():
+        pos = c["pos"]
+        sx, sy = view.world_to_screen((float(pos[0]), float(pos[2])))
+        d = float(np.hypot(sx - float(mouse_px[0]), sy - float(mouse_px[1])))
+        if d <= best_d:
+            best, best_d = eid, d
+    return best
+
+
 def contact_symbol(track) -> str:
     """'air' (diamond + altitude tag) or 'surface' (course triangle)."""
     return "air" if track.get("is_air") else "surface"
@@ -405,6 +435,7 @@ class TacticalMap:
         self.view: MapView | None = None     # sized at first draw
         self.selected_contact = None         # ship_id the target tracks
         self.selected_missile = None         # own round LMB-selected (RTG)
+        self.selected_emitter = None         # emitter_id the ARM targets (M2-T4)
         self._panning = False
         self._trails: dict[int, list] = {}   # id(missile) -> [(x, z), ...]
 
@@ -577,6 +608,16 @@ class TacticalMap:
             # RMB waypoints are the whole tasking language.
             sandbox.show_hint(DRONE_RECON_HINT)
             return
+        if sandbox.active_platform == "bastion" and getattr(
+                sandbox, "oniks_weapon", "oniks") == "kh31p":
+            # M2-T4: with the ARM active the Bastion click selects a LOCALIZED
+            # enemy EMITTER (the passive-SIGINT picture), NOT a ship/coordinate
+            # target — the ARM homes on a radar, not an aim point.  A miss
+            # clears the selection.  The existing contact/target click flow is
+            # untouched for every other weapon/platform.
+            self.selected_emitter = pick_emitter(
+                self.view, world.emitter_contacts, pos)
+            return
         air = sandbox.active_platform == "s300"
         sid = pick_contact(self.view, world.contacts, world.sim_time, pos,
                            air_only=air)
@@ -663,6 +704,7 @@ class TacticalMap:
         self._plan_chain()
         self._seeker_cone()
         self._elint_overlay()
+        self._emitter_overlay()
         self._contacts()
         self._missiles()
         self._drone_overlay()
@@ -1048,6 +1090,49 @@ class TacticalMap:
             self._poly_world(
                 zip(est[0] + err * np.sin(ang), est[2] + err * np.cos(ang)),
                 ELINT_CIRCLE_COL, 1.0)
+
+    def _emitter_overlay(self) -> None:
+        """Localized enemy EMITTERS (M2-T4): the player's passive-SIGINT
+        picture (world.emitter_contacts) drawn as faded diamond-in-ring glyphs
+        at the SIGINT est_pos BELIEF — never radar truth (FOG / NO CHEAT).  The
+        glyph is rendered in the sensor-estimate idiom (estimate-violet, the
+        ELINT family) so it can never be misread as friendly truth or as a
+        ship/air contact.  Always on whenever the picture is non-empty (the
+        fog-honest SIGINT layer); when the ARM is the active Bastion weapon the
+        currently-selected emitter gets a brighter ring.
+
+        Render-only: this reads world.emitter_contacts (already injected by the
+        sim) and touches NO sim state — no determinism change."""
+        world = self.sandbox.world
+        ec = getattr(world, "emitter_contacts", None)
+        if not ec:
+            return
+        arm_active = (self.sandbox.active_platform == "bastion"
+                      and getattr(self.sandbox, "oniks_weapon", "oniks")
+                      == "kh31p")
+        d = EMITTER_DIAMOND_PX
+        ring_ang = np.linspace(0.0, 2.0 * np.pi, EMITTER_RING_SEGMENTS + 1)
+        for eid, c in ec.items():
+            pos = c["pos"]
+            sx, sy = self.view.world_to_screen((float(pos[0]), float(pos[2])))
+            if not self._on_screen(sx, sy):
+                continue
+            selected = arm_active and eid == self.selected_emitter
+            glyph_col = EMITTER_SEL_COL if selected else EMITTER_COL
+            # Diamond at the estimate.
+            self.text.draw_lines(
+                [(sx, sy - d), (sx + d, sy), (sx, sy + d),
+                 (sx - d, sy), (sx, sy - d)], glyph_col, 1.5)
+            # Uncertainty ring: the larger of the SIGINT fix error (world
+            # metres -> px) and a readable minimum, so a tight fix still reads
+            # as a ring rather than collapsing onto the diamond.
+            err_px = float(c.get("quality", 0.0)) / self.view.meters_per_px
+            r = max(EMITTER_RING_PX, err_px)
+            self.text.draw_lines(
+                list(zip(sx + r * np.cos(ring_ang),
+                         sy + r * np.sin(ring_ang))), glyph_col, 1.0)
+            kind = str(c.get("kind", "EMITTER"))
+            self.text.draw_text(sx + d + 4, sy - 9, kind, glyph_col)
 
     # --------------------------------------------------------------- chrome
 

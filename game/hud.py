@@ -415,6 +415,61 @@ def oniks_ammo_row(world):
     return ("AMMO", f"0/{cap} RLDG {int(np.ceil(left - 1e-9))}s", RELOAD_COL)
 
 
+def bastion_weapon_strip(sandbox, world) -> list:
+    """The Bastion weapon-select strip (M2-T4) — pure, GL-free, unit-testable.
+
+    Returns ``[(label, selected_bool, ammo_text)]`` for the rounds the Bastion
+    TEL can chamber: ONIKS, ZIRCON, and (only when the Kh-31P ARM pool is
+    CONFIGURED, i.e. ``_kh31p_ammo`` is a non-None pool) KH-31P.  ``selected``
+    flags the active ``sandbox.oniks_weapon``.  Ammo text:
+      * ONIKS  -> magazine ``"<n>/<cap>"`` (renewable, rate-limited);
+      * ZIRCON / KH-31P -> the scarce pool count ``"<n>"``.
+    The KH-31P row is OMITTED when the ARM is unconfigured (default battle:
+    ``_kh31p_ammo`` 0/None) so the out-of-the-box Bastion strip is exactly the
+    two-round ONIKS|ZIRCON list — matching the gated 2-way B cycle."""
+    active = getattr(sandbox, "oniks_weapon", "oniks")
+    oniks_ammo = getattr(world, "_oniks_ammo", None)
+    oniks_cap = getattr(world, "_oniks_mag_cap", oniks_ammo)
+    oniks_text = (f"{oniks_ammo}/{oniks_cap}" if oniks_ammo is not None
+                  else "--")
+    zircon = getattr(world, "_zircon_ammo", None)
+    rows = [
+        ("ONIKS",  active == "oniks",  oniks_text),
+        ("ZIRCON", active == "zircon",
+         str(int(zircon)) if zircon is not None else "--"),
+    ]
+    arm = getattr(world, "_kh31p_ammo", None)
+    if arm:                                  # configured pool (non-None, > 0)
+        rows.append(("KH-31P", active == "kh31p", str(int(arm))))
+    return rows
+
+
+def arm_seeker_row(missile):
+    """Seeker-state readout for a FOLLOWED player ARM (M2-T4) — pure, GL-free.
+
+    Returns ``(label, color)`` for a live ``PlayerArmMissile`` mapping its OWN
+    seeker state (reading the followed round's own attributes is allowed — no
+    enemy truth):
+      * LOCK       — target radar alive AND emitting, no miss offset (homing on
+                     the live emission); SEMANTIC 'READY' green.
+      * SILENT-CEP — a miss offset has been drawn (the radar went silent; the
+                     round flies a seeded CEP basket); SEMANTIC 'RELOADING'
+                     amber (degraded but still in flight).
+      * MEMORY     — no miss offset and the target is NOT emitting: the round
+                     coasts to the last-known position; SEMANTIC 'ESTIMATE'
+                     (sensor-belief idiom, dimmer than friendly truth).
+    Returns None for any non-ARM missile (no ``target_radar`` / not a
+    PlayerArmMissile), so the flight block shows it only for the player ARM."""
+    radar = getattr(missile, "target_radar", None)
+    if radar is None or not hasattr(missile, "_miss_offset"):
+        return None
+    if getattr(missile, "_miss_offset", None) is not None:
+        return ("SILENT-CEP", SEMANTIC_COLORS["RELOADING"])
+    if getattr(radar, "alive", False) and getattr(radar, "emitting", False):
+        return ("LOCK", SEMANTIC_COLORS["READY"])
+    return ("MEMORY", SEMANTIC_COLORS["ESTIMATE"])
+
+
 def drone_panel_rows(world) -> list[tuple]:
     """The recon-drone platform's panel rows (Phase 4) — pure, GL-free,
     unit-testable. (label, value, color) tuples:
@@ -672,6 +727,14 @@ class HUD:
         phase_col = TERMINAL_COL if label == "TERMINAL" else VALUE_COL
         rows = [
             ("PHASE", label, phase_col),
+        ]
+        # M2-T4: a followed player ARM gets a seeker-state row (LOCK /
+        # SILENT-CEP / MEMORY) read off its OWN homing state; None (skipped)
+        # for every non-ARM round, so the Oniks/SAM flight block is unchanged.
+        seeker = arm_seeker_row(m)
+        if seeker is not None:
+            rows.append(("SEEKER", seeker[0], seeker[1]))
+        rows += [
             ("MACH", f"{float(mach(speed, alt)):.2f}", VALUE_COL),
             ("ALT", f"{alt:,.0f} m", VALUE_COL),
             ("SPD", f"{speed:,.0f} m/s", VALUE_COL),
@@ -725,10 +788,19 @@ class HUD:
             # the exact second, which would ceil one second too high.
             status = f"RELOADING {int(np.ceil(world.reload_left - 1e-9))} s"
             col = RELOAD_COL
-        rows = [
-            ("STATUS", status, col),
-            ("WEAPON", ONIKS.display_name.upper(), VALUE_COL),
-        ]
+        rows = [("STATUS", status, col)]
+        # M2-T4: the Bastion weapon-select strip — one row per chamberable
+        # round (ONIKS|ZIRCON, plus KH-31P only when the ARM pool is stocked),
+        # the active one flagged with a '>' marker and accent colour, ammo
+        # right-aligned in the value.  In the DEFAULT battle (ARM off, ONIKS
+        # active) this renders the two-round strip; the ONIKS magazine row
+        # still follows so the per-tube AMMO readout is unchanged.
+        strip = bastion_weapon_strip(sandbox, world)
+        for label, selected, ammo_text in strip:
+            marker = "> " if selected else "  "
+            wcol = ACCENT if selected else VALUE_COL
+            rows.append(("WEAPON" if label == strip[0][0] else "",
+                         f"{marker}{label}  {ammo_text}", wcol))
         ammo = oniks_ammo_row(world)        # COMBAT magazine; None in sandbox
         if ammo is not None:
             rows.append(ammo)

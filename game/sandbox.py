@@ -208,6 +208,11 @@ HINT_ONIKS_SURFACE = "ONIKS HITS SHIPS ONLY - TAB TO S-300 FOR AIR"
 HINT_ZIRCON = "ZIRCON SELECTED - hypersonic"
 HINT_ZIRCON_RANGE = "ZIRCON: TARGET BEYOND FUEL RANGE - WILL FALL SHORT"
 HINT_ONIKS_SEL = "ONIKS SELECTED"
+# M2-T4 player Kh-31P anti-radiation (SEAD) round. Selected with B (3-way
+# cycle, gated on ARM ammo); fired at a LOCALIZED enemy emitter chosen on the
+# tactical map (tactical_map.selected_emitter, fog-honest SIGINT picture).
+HINT_ARM_SEL = "KH-31P ANTI-RADIATION SELECTED"
+HINT_ARM_NO_EMITTER = "KH-31P: SELECT AN EMITTER"
 # Zircon fuel-limited effective reach vs a surface target (measured,
 # tools/probe_zircon_traj.py): hi-lo ~250 km, lo-lo ~150 km — past these it
 # coasts fuel-starved and splashes short. Warn the player instead of a silent whiff.
@@ -462,13 +467,37 @@ class SandboxState(GameState):
         return self.sam_round
 
     def cycle_oniks_weapon(self) -> str:
-        """B (oniks_weapon binding): toggle the Bastion round between the P-800
-        Oniks (default) and the hypersonic 3M22 Zircon (scarce, M5+ - punches
-        through the SM-2 screen). Both fire from the same TEL tubes."""
-        self.oniks_weapon = ("zircon" if self.oniks_weapon == "oniks"
-                             else "oniks")
-        self.show_hint(HINT_ZIRCON if self.oniks_weapon == "zircon"
-                       else HINT_ONIKS_SEL)
+        """B (oniks_weapon binding): cycle the Bastion round.
+
+        Base 2-way (LOCKED default UX): P-800 Oniks (default) <-> hypersonic
+        3M22 Zircon (scarce, M5+ - punches through the SM-2 screen).  Both fire
+        from the same TEL tubes.
+
+        M2-T4: when the world carries a Kh-31P ARM pool (kh31p_ammo > 0 from the
+        setup armory), the cycle EXTENDS to 3-way oniks->zircon->kh31p->oniks so
+        the player can select the anti-radiation round.  The ARM is GATED OUT of
+        the cycle when the pool is empty/absent (None or 0): the default battle
+        (kh31p_ammo == 0) keeps the EXACT 2-way oniks<->zircon UX, byte-identical
+        — zircon wraps straight back to oniks, kh31p is never reachable.
+
+        From kh31p the cycle always returns to oniks (even if the pool drained
+        to 0 mid-battle), so the player can never get stuck on an empty ARM."""
+        arm_available = getattr(self.world, "_kh31p_ammo", 0) not in (None, 0)
+        if self.oniks_weapon == "oniks":
+            self.oniks_weapon = "zircon"
+        elif self.oniks_weapon == "zircon":
+            # Step onto the ARM only when it's stocked; else wrap to oniks
+            # (this is the 2-way default-battle path — byte-identical).
+            self.oniks_weapon = "kh31p" if arm_available else "oniks"
+        else:                                   # kh31p (or any stray) -> oniks
+            self.oniks_weapon = "oniks"
+        if self.oniks_weapon == "zircon":
+            hint = HINT_ZIRCON
+        elif self.oniks_weapon == "kh31p":
+            hint = HINT_ARM_SEL
+        else:
+            hint = HINT_ONIKS_SEL
+        self.show_hint(hint)
         self.app.audio.ui_click()
         return self.oniks_weapon
 
@@ -520,6 +549,8 @@ class SandboxState(GameState):
             return None
         if self.active_platform == "s300":
             return self._request_sam_launch()
+        if self.oniks_weapon == "kh31p":
+            return self._request_arm_launch()
         if self._selected_air_track() is not None:
             self.show_hint(HINT_ONIKS_SURFACE)
             return None
@@ -544,6 +575,33 @@ class SandboxState(GameState):
             self.rig.retarget()         # smooth swing onto the new round
             # Hot launch t = 0: muzzle fireball + pink-grey cloud + ground
             # wash + the canister cap blown off in chunks (storyboard step 2).
+            self.effects.muzzle_blast(m.pos,
+                                      ground_y=float(self._tel_pos[1]) + 1.5)
+            self._spawn_cover_debris(m.pos)
+            self.app.audio.play("launch", pos=m.pos)
+            self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
+        return m
+
+    def _request_arm_launch(self):
+        """SPACE with the Kh-31P selected (M2-T4): fire the player ARM at the
+        emitter selected on the tactical map.  The ARM homes on a LOCALIZED
+        enemy radar (passive SIGINT, fog-honest) rather than a surface/air
+        contact — so it needs a selected EMITTER, NOT a target_point.
+
+        No emitter selected -> flash HINT_ARM_NO_EMITTER, return None (no fire).
+        Otherwise call ``world.launch_arm(eid)``; on success follow the round +
+        retarget the rig and play the same launch effects as the Oniks path
+        (the ARM ships with the coastal strike battery and fires from the same
+        TEL mouth, world/combat.py launch_arm)."""
+        eid = getattr(self.tactical_map, "selected_emitter", None)
+        if eid is None:
+            self.show_hint(HINT_ARM_NO_EMITTER)
+            return None
+        launch_arm = getattr(self.world, "launch_arm", None)
+        m = launch_arm(eid) if launch_arm is not None else None
+        if m is not None:
+            self.followed = m
+            self.rig.retarget()             # smooth swing onto the new round
             self.effects.muzzle_blast(m.pos,
                                       ground_y=float(self._tel_pos[1]) + 1.5)
             self._spawn_cover_debris(m.pos)

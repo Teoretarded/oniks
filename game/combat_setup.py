@@ -38,7 +38,7 @@ from game.states import (
 )
 from world.combat_config import (
     CombatConfig,
-    CLAMP_AMMO, CLAMP_DESTROYERS,
+    CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_DESTROYERS,
     CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_ONIKS, CLAMP_PANTSIR,
     CLAMP_RELOAD_S, CLAMP_S300, clamp_config,
 )
@@ -110,6 +110,13 @@ _ARMORY_ROWS = [
     {"kind": "stepper", "label": "ONIKS  RELOAD (s)",
      "field": "oniks_mag_reload_s",
      "step": 5,  "lo": CLAMP_RELOAD_S[0], "hi": CLAMP_RELOAD_S[1]},
+    # M2-T4: the player Kh-31P anti-radiation pool. Floor is 0 (CLAMP_ARM_AMMO,
+    # NOT CLAMP_AMMO) so leaving it at 0 keeps the ARM OFF and the default
+    # battle byte-identical; a non-zero stock unlocks launch_arm() + the 3-way
+    # B weapon cycle. Ships with the coastal strike battery (Bastion-launched).
+    {"kind": "stepper", "label": "KH-31P AMMO",
+     "field": "kh31p_ammo",
+     "step": 1,  "lo": CLAMP_ARM_AMMO[0], "hi": CLAMP_ARM_AMMO[1]},
     {"kind": "stepper", "label": "S-300  48N6 AMMO",
      "field": "s300_48n6_ammo",
      "step": 1,  "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
@@ -164,6 +171,7 @@ class CombatSetupState(GameState):
             "n_s300":             defaults.n_s300,
             "oniks_ammo":         defaults.oniks_ammo,
             "oniks_mag_reload_s": defaults.oniks_mag_reload_s,
+            "kh31p_ammo":         defaults.kh31p_ammo,
             "s300_48n6_ammo":     defaults.s300_48n6_ammo,
             "s300_40n6_ammo":     defaults.s300_40n6_ammo,
             "s300_mag_reload_s":  defaults.s300_mag_reload_s,
@@ -375,6 +383,7 @@ class CombatSetupState(GameState):
             n_s300             = int(f["n_s300"]),
             oniks_ammo         = int(f["oniks_ammo"]),
             oniks_mag_reload_s = float(f["oniks_mag_reload_s"]),
+            kh31p_ammo         = int(f["kh31p_ammo"]),
             s300_48n6_ammo     = int(f["s300_48n6_ammo"]),
             s300_40n6_ammo     = int(f["s300_40n6_ammo"]),
             s300_mag_reload_s  = float(f["s300_mag_reload_s"]),

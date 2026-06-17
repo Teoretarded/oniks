@@ -263,6 +263,25 @@ def test_reload_stepper_step_5(setup):
     assert setup._fields["oniks_mag_reload_s"] == before + 5
 
 
+def test_armory_has_kh31p_ammo_stepper(setup):
+    """M2-T4: the ARMORY page exposes a KH-31P AMMO stepper (field kh31p_ammo)
+    bounded by CLAMP_ARM_AMMO, step 1, so the player can stock the player ARM.
+    OFF (0) by default keeps the byte-identical out-of-the-box battle."""
+    from world.combat_config import CLAMP_ARM_AMMO
+    setup.handle_event(key_event(pygame.K_TAB))     # armory page
+    row = next(r for r in setup._rows() if r.get("field") == "kh31p_ammo")
+    assert row["kind"] == "stepper"
+    assert row["step"] == 1
+    assert (row["lo"], row["hi"]) == CLAMP_ARM_AMMO
+    assert setup._fields["kh31p_ammo"] == 0
+
+
+def test_build_config_carries_kh31p_ammo(setup):
+    """A stocked ARM pool survives build_config() onto the emitted config."""
+    setup._fields["kh31p_ammo"] = 7
+    assert setup.build_config().kh31p_ammo == 7
+
+
 # ---------------------------------------------------------------- navigation
 
 def test_nav_up_down_wraps(setup):
