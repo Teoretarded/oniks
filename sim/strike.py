@@ -749,3 +749,32 @@ class HarmMissile(StrikeMissile):
             dz = float(aim[2]) - float(self.pos[2])
             if math.hypot(dx, dz) < TERMINAL_RANGE_M:
                 self.phase = SPH_STRIKE_TERMINAL
+
+
+# ---------------------------------------------------------------------------
+# PlayerArmMissile (M2-T2 — player Kh-31P anti-radiation round)
+# ---------------------------------------------------------------------------
+
+class PlayerArmMissile(HarmMissile):
+    """Player anti-radiation missile (Kh-31P-class, sim.arsenal.KH31P).
+
+    The PLAYER counterpart to the enemy AGM-88 HarmMissile.  Reuses the
+    HarmMissile flight/homing machine VERBATIM (loft climb, PN homing on an
+    emitting sim.radar.Radar, seeded silence-CEP miss ring, re-lock on
+    re-emit, proximity fuse).  The ONLY difference is the side flag:
+
+      is_hostile = False   (class-attribute override)
+
+    StrikeMissile sets ``is_hostile = True`` as a class attr; without this
+    override the player's own ARM would be swept against the PLAYER base in
+    world/combat.py ``apply_missile_hits_structures`` (hostile rounds vs the
+    player structures) and could demolish the base it flew over.  A subclass
+    is cleaner than mutating the instance: the flag is part of the type, so
+    every PlayerArmMissile is friendly by construction and isinstance/class
+    checks read true.
+
+    Constructor signature is inherited unchanged:
+        PlayerArmMissile(weapon, pos_f64, vel_f64, target_radar, rng)
+    """
+
+    is_hostile = False

@@ -335,6 +335,86 @@ HARM = StrikeDef(
     fuse_radius=15.0,      # m proximity fuse (game spec §8: "proximity 15 m")
 )
 
+# --- Kh-31P (player anti-radiation, M2-T2) ------------------------------------
+# Reference: Kh-31P (Zvezda-Strela), open-source unclassified data.
+#   The PLAYER counterpart to the enemy AGM-88 HARM: a passive-radar-homing
+#   SEAD round.  Reuses the HarmMissile flight/homing machine VERBATIM (it
+#   loft-climbs, PN-homes on an emitting sim.radar.Radar, draws the seeded
+#   silence-CEP miss ring on radar silence, re-locks on re-emit).  This def is
+#   a StrikeDef like HARM; the only behavioural difference is is_hostile=False
+#   (PlayerArmMissile subclass — see sim/strike.py).
+#
+#   Real Kh-31P figures (open sources):
+#     Length 4.7 m, diameter 0.36 m, launch mass ~600 kg, warhead ~87 kg.
+#     Propulsion: solid BOOSTER cartridge (burns inside the ramjet duct) then
+#       a kerosene RAMJET sustainer to ~Mach 3.  Stated range ~110 km (later
+#       Kh-31PD ~250 km; we model the classic ~110 km round per the spec).
+#     Passive radar seeker (L-111E family), homes on emitting SAM/EW radars.
+#
+#   TUNING (measured with tools/probe_kh31p_flyoff.py — MEASURE FIRST, never
+#   assume the airframe behaves).  CRITICAL airframe finding: the reused
+#   HarmMissile flight model's altitude-hold gains (CRUISE_ALT_* in
+#   sim/strike.py) are tuned for the subsonic-to-Mach-2 HARM/Tomahawk regime
+#   and CANNOT arrest a Mach-3 round's climb — at any cruise_alt the round
+#   zoom-climbs to ~15 km, then the lofted glide carries it far.  (The
+#   existing HARM exhibits the SAME behaviour: it apogees ~19 km and kills out
+#   past 160 km in a flyoff — its 110 km "max_range" is a nominal label, not a
+#   measured flyoff gate.)  Changing the shared gains would alter HARM /
+#   Tomahawk / JASSM flight (a regression), so they are LEFT ALONE and the
+#   KH31P envelope is whatever this airframe HONESTLY produces.
+#
+#   The achievable two-sided envelope (NOT the textbook 110 km) — measured by
+#   the probe at seed [1337, 8], stationary EMITTING radar:
+#       range  peak Mach  cruise Mach   closest    result
+#        60 km    2.94       2.80          11 m     HIT
+#        90 km    2.94       2.80          12 m     HIT   <- locked KILL range
+#       110 km    2.97       2.82          11 m     HIT   (also a clean kill)
+#       130 km    2.98       2.84          11 m     HIT
+#       140 km    2.98       2.84        1022 m     MISS  <- locked SHORT range
+#     Cruise Mach >= 2.80 (meets the >= ~2.8 target); a clean two-sided gate:
+#     kills out to 130 km, fuel/range-limited (falls short) at 140 km.  The
+#     classic 110 km figure is exceeded on this glide-heavy machine — the
+#     env test is locked to the MEASURED kill (90 km) and short (140 km).
+#     (Long ToF — ~200 s at 110 km — is the lofted-glide signature inherent
+#     to the shared flight model; the same applies to the in-game HARM.)
+#
+#   Propulsion model + budget (mirrors the HARM/Oniks fields):
+#     booster (solid cartridge): 63,000 N for 3.0 s spikes the round to the
+#       ramjet take-over speed off the rail.  At isp 950 s the booster grain
+#       is mdot = 63,000/(950*9.81) = 6.76 kg/s -> 3 s = ~20 kg of the budget.
+#     ramjet sustain: 9,000 N holds the Mach-3 cruise against drag; the
+#       remaining ~43 kg of the 63 kg fuel budget is the powered-cruise reserve
+#       and the RANGE GATE (kills to 130 km, short at 140 km).  isp 950 s is
+#       the air-breathing ramjet value (cf. Oniks 1100 s) — solid-booster grain
+#       is the small first slice, the kerosene ramjet is the rest.
+KH31P = StrikeDef(
+    weapon_id="kh31p", display_name="Kh-31P",
+    length=4.7, diameter=0.36,
+    launch_mass=600.0,     # kg (cited launch mass ~600 kg)
+    fuel_mass=63.0,        # kg (booster grain + ramjet kerosene; probe-tuned)
+    # Solid booster cartridge: high thrust off the rail to ramjet take-over
+    # speed in ~3 s, then the ramjet duct sustains.
+    booster_thrust=63_000.0,   # N (probe-tuned boost spike)
+    booster_time=3.0,          # s booster burn
+    eject_speed=0.0,       # air-launched: inherits aircraft release velocity
+    eject_time=0.2,        # s brief free-fall before motor ignition
+    # RAMJET sustain: air-breathing, so isp is high (cf. Oniks ramjet 1100 s).
+    # Sustain thrust holds the Mach-3 cruise against drag; the fuel budget is
+    # the range gate (kills to 130 km, falls short at 140 km — see table above).
+    max_thrust=9_000.0,    # N ramjet sustain thrust (probe-tuned)
+    isp=950.0,             # s ramjet-dominated specific impulse (air-breathing)
+    cruise_mach=3.0,       # Mach ~3 ramjet cruise (real Kh-31P figure)
+    # Loft profile: a low loft (3.5 km commanded) keeps the zoom-climb from
+    # overshooting as far; the reused HarmMissile loft+PN geometry still works.
+    cruise_alt=3_500.0,    # m commanded loft altitude (round zooms to ~15 km)
+    max_range=130_000.0,   # m (MEASURED kill reach on this airframe; the
+    #                        classic 110 km spec is exceeded — see table above)
+    ref_area=0.1018,       # m^2 = pi * (0.36/2)^2
+    max_g=15.0,            # g, agile anti-radiation seeker head (= HARM)
+    warhead_mass=87.0,     # kg (cited Kh-31P warhead)
+    fuse_radius=12.0,      # m proximity fuse (slightly tighter than HARM's 15 m)
+)
+
 # --- 40N6-class very-long-range SAM (player, Phase 5) -------------------------
 # Derivation from the 48N6 (S300) as reference platform:
 #
@@ -506,6 +586,6 @@ SM6 = SamDef(
 WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON}
 SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6,
         "sm6": SM6}
-STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM}
+STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM, "kh31p": KH31P}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
              "40n6_tel": N40N6_TEL}

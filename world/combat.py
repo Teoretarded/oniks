@@ -138,7 +138,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sim.arsenal import N40N6, ONIKS, S300, S300_TEL, TOMAHAWK, ZIRCON
+from sim.arsenal import KH31P, N40N6, ONIKS, S300, S300_TEL, TOMAHAWK, ZIRCON
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
@@ -155,7 +155,7 @@ from sim.radar import Radar, RadarNetwork
 from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
 from sim.sam import SamMissile
-from sim.strike import StrikeMissile
+from sim.strike import PlayerArmMissile, StrikeMissile
 from world.combat_config import CombatConfig, DEFAULT as _DEFAULT_CONFIG
 from world.generation import BASE_POS, SEED, terrain_height_scalar
 from world.spawn_zones import sample_fleet
@@ -417,6 +417,20 @@ class CombatWorld(WorldState):
         self._build_oniks_battery(config.n_oniks)
         self._build_s300_battery(config.n_s300)
         self._zircon_ammo = int(config.zircon_ammo)   # scarce hypersonic pool
+        # M2-T2: player Kh-31P anti-radiation pool (scarce SEAD rounds) +
+        # its seeded miss-offset stream.  The ARM stream is the SeedSequence
+        # child [rng_seed, 8] — phase tag 8, reserved here so it can NEVER
+        # collide with the existing child streams (fleet [seed,3], recon
+        # [seed,4], commander [seed,5], pantsir [seed,6], enemy-radar [seed,7]).
+        # Each PlayerArmMissile launch is constructed with THIS generator, so
+        # the silence-CEP miss offset is deterministic per battle (same seed ->
+        # same offset; physics-not-dice contract).
+        self._kh31p_ammo = int(config.kh31p_ammo)
+        self._arm_rng = np.random.default_rng([rng_seed, 8])
+        # (missile, Structure) bindings for ARM ground-radar victory credit;
+        # see _apply_arm_radar_kills (kept apart from self.missiles because the
+        # base step prunes dead rounds before the credit pass runs).
+        self._arm_radar_bindings: list[tuple] = []
 
         destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
         # The enemy side's fire control: CIWS randomness derives from the
@@ -1688,6 +1702,131 @@ class CombatWorld(WorldState):
             if t["reload_left"] > 0.0:
                 t["reload_left"] = max(0.0, t["reload_left"] - dt)
 
+    # ----------------------------------------------------- Kh-31P player ARM
+    def launch_arm(self, emitter_id):
+        """Fire one Kh-31P player anti-radiation missile at a LOCALIZED enemy
+        emitter (M2-T2).  The player SEAD round: it homes passively on the
+        live emitting radar (the reused HarmMissile machine), not on truth.
+
+        Returns the PlayerArmMissile, or None if any gate fails:
+          * ``_kh31p_ammo <= 0`` — empty pool (default config has 0, so the
+            out-of-the-box battle never offers an ARM);
+          * ``emitter_id`` is None, or NOT in ``self.emitter_contacts`` — the
+            FOG GATE: the player may only ARM an emitter the drone's passive
+            SIGINT has LOCALIZED (no truth leak / no-cheat contract); an
+            un-localized or unknown emitter is un-targetable;
+          * the emitter does not resolve to a live targetable Radar via
+            ``_player_targetable_emitters()`` (e.g. it just died).
+
+        On success: spawn a PlayerArmMissile from a Bastion launcher mouth
+        (reusing the Oniks battery's first launcher position — the player's
+        coastal SEAD shooter sits with the strike battery; documented choice),
+        homing on the resolved LIVE Radar, seeded by ``self._arm_rng``
+        ([seed, 8]); decrement the pool; set ``launch_platform`` so the
+        structure sweep can't self-hit; tag the ground-radar Structure (if
+        any) for the victory-credit sync (``_apply_arm_radar_kills``).
+        Mirrors ``launch_sam``'s ammo/None-gate structure.
+        """
+        if self._kh31p_ammo <= 0:
+            return None
+        # FOG GATE: only a LOCALIZED emitter (passive-SIGINT picture) is
+        # targetable — never a truth-only entity the player hasn't heard.
+        if emitter_id is None or emitter_id not in self.emitter_contacts:
+            return None
+        entry = self._player_targetable_emitters().get(emitter_id)
+        if entry is None:
+            return None                          # localized but no live radar
+        _kind, target_radar, _owner = entry
+        if not getattr(target_radar, "alive", False):
+            return None
+
+        # Launch position: the first Oniks launcher mouth (the SEAD round ships
+        # with the coastal strike battery; the Bastion TEL is the player's only
+        # ground launcher in COMBAT). Reuse a tube position for the muzzle point.
+        if self._oniks_tubes:
+            launch_pos = np.asarray(self._oniks_tubes[0]["pos"],
+                                    dtype=np.float64).copy()
+        else:
+            launch_pos = np.asarray(BASE_POS, dtype=np.float64).copy()
+        # Brief forward toss toward the emitter so the air-launched CLIMB phase
+        # has a heading to steer (mirrors a rail kick; magnitude is the same
+        # eject beat the HARM uses — small vs the boost that follows).
+        import math as _math
+        ex = float(target_radar.pos[0]) - float(launch_pos[0])
+        ez = float(target_radar.pos[2]) - float(launch_pos[2])
+        hdg = _math.atan2(ex, ez)
+        vel0 = np.array([_math.sin(hdg) * 60.0, 0.0, _math.cos(hdg) * 60.0],
+                        dtype=np.float64)
+
+        m = PlayerArmMissile(KH31P, launch_pos, vel0, target_radar,
+                             self._arm_rng)
+        # launch_platform: defensive (the ARM is is_hostile=False and is not a
+        # sim.missile.Missile, so it traverses NEITHER structure sweep — it can
+        # never hit the player base nor auto-credit enemy structures; the
+        # victory credit is the explicit binding below). Mirrors launch_sam.
+        m.launch_platform = self
+
+        self.missiles.append(m)
+        self._kh31p_ammo -= 1
+
+        # Victory-credit binding (spec risk #2): if the target is an enemy
+        # GROUND radar, register (missile, Structure) so a fuse kill also flips
+        # the Structure dead (the win condition checks struct.alive, NOT
+        # radar.alive — see ``victorious``).  The binding is kept SEPARATE from
+        # self.missiles because the base step() PRUNES dead missiles before
+        # CombatWorld.step() reaches _apply_arm_radar_kills(); the binding
+        # holds its own missile ref so the credit survives the prune.  Ship /
+        # air radar kills carry no Structure and are not bound here.
+        for struct, r in getattr(self, "enemy_radars", []):
+            if r is target_radar:
+                self._arm_radar_bindings.append((m, struct))
+                break
+        return m
+
+    def _apply_arm_radar_kills(self) -> None:
+        """Victory-credit sync for the player ARM (spec risk #2).
+
+        A PlayerArmMissile fuse sets ``target_radar.alive = False`` directly
+        (HarmMissile._fuse_check), but the win condition (``victorious``) and
+        the on-map kill bookkeeping key on the enemy-radar STRUCTURE's
+        ``alive`` flag, not the Radar's.  The ARM is a StrikeMissile (not a
+        sim.missile.Missile), so it does NOT travel the
+        ``apply_missile_hits_structures`` enemy-structure sweep that the Oniks
+        uses — and the base step() prunes it from self.missiles the moment it
+        dies.  So this works off ``self._arm_radar_bindings`` (set at launch):
+        for every bound ARM whose radar has genuinely been fused dead (radar
+        dead AND no silence miss offset — a CEP near-miss leaves the radar
+        alive, so this never fires on a survived-emitter shot), kill the
+        Structure via ``s.hit()`` so its ``on_destroyed`` runs and the win
+        condition advances.  Emits the same ('base_hit'/'base_destroyed')
+        events the Oniks sweep does so the renderer/HUD react identically.
+        Resolved or spent bindings are dropped so the list cannot grow without
+        bound."""
+        if not self._arm_radar_bindings:
+            return
+        survivors = []
+        for m, struct in self._arm_radar_bindings:
+            if not struct.alive:
+                continue                          # already credited / dead
+            radar_dead = not m.target_radar.alive
+            genuine_hit = (radar_dead
+                           and getattr(m, "_miss_offset", None) is None)
+            if genuine_hit:
+                impact = (np.asarray(m.impact_pos, dtype=np.float64).copy()
+                          if m.impact_pos is not None
+                          else np.asarray(struct.pos, dtype=np.float64).copy())
+                struct.hit()
+                self.events.append(("base_hit", impact.copy()))
+                if not struct.alive:
+                    self.events.append(("base_destroyed", impact.copy()))
+                continue                          # binding resolved
+            if not m.alive:
+                # Round spent without a genuine hit (silence CEP miss, or a
+                # surface impact short of the emitter): drop the binding.
+                continue
+            survivors.append((m, struct))         # still in flight
+        self._arm_radar_bindings = survivors
+
     def _update_strike_contacts(self, dt: float) -> None:
         """Feed hostile rounds to the player picture. Two channels:
 
@@ -1775,6 +1914,11 @@ class CombatWorld(WorldState):
         apply_missile_hits_structures(
             [m for m in self.missiles if isinstance(m, Missile)],
             self.enemy_structures, self.events)
+        # M2-T2 victory-credit sync: a player ARM (PlayerArmMissile, a
+        # StrikeMissile — NOT a sim.missile.Missile, so it skips BOTH sweeps
+        # above) that fused on an enemy GROUND radar flips the radar dead but
+        # not its Structure; bridge that to the win condition here.
+        self._apply_arm_radar_kills()
         self._update_strike_contacts(dt)
         # Enemy air -> the gated player picture: fighters/AWACS are air
         # entities (radar_size 'fighter'), tracked once the radar net

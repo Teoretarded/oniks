@@ -34,6 +34,10 @@ class CombatConfig:
     oniks_ammo: int = 8
     oniks_mag_reload_s: float = 120.0
     zircon_ammo: int = 4         # scarce hypersonic anti-ship rounds (B selects)
+    # M2-T2 Kh-31P player anti-radiation pool. DEFAULT 0 so the out-of-the-box
+    # battle stays BYTE-IDENTICAL (no ARM available until a setup screen arms
+    # it); a non-zero pool enables launch_arm() against localized emitters.
+    kh31p_ammo: int = 0
     s300_48n6_ammo: int = 4
     s300_40n6_ammo: int = 2
     s300_mag_reload_s: float = 45.0
@@ -61,6 +65,12 @@ CLAMP_AMMO:          tuple = (1, 200)
 # the missile range silently truncates the belt to 200).  Floor stays 1 so
 # tests/test_combat_config.py::test_clamp_config_ammo_floor is unchanged.
 CLAMP_GUN_AMMO:      tuple = (1, 1000)
+# M2-T2 Kh-31P ARM pool: floor 0 (not 1) so the OFF default survives a
+# clamp_config() round-trip. The setup-default path runs every field through
+# clamp_config; clamping kh31p_ammo=0 with the missile CLAMP_AMMO=(1,200)
+# would silently turn the ARM ON (1 round) and break the byte-identical
+# out-of-the-box battle. Ceiling matches the other missile pools (200).
+CLAMP_ARM_AMMO:      tuple = (0, 200)
 CLAMP_RELOAD_S:      tuple = (5, 600)
 
 
@@ -87,6 +97,7 @@ def clamp_config(
     oniks_ammo: int = CombatConfig.oniks_ammo,
     oniks_mag_reload_s: float = CombatConfig.oniks_mag_reload_s,
     zircon_ammo: int = CombatConfig.zircon_ammo,
+    kh31p_ammo: int = CombatConfig.kh31p_ammo,
     s300_48n6_ammo: int = CombatConfig.s300_48n6_ammo,
     s300_40n6_ammo: int = CombatConfig.s300_40n6_ammo,
     s300_mag_reload_s: float = CombatConfig.s300_mag_reload_s,
@@ -108,6 +119,7 @@ def clamp_config(
     lo_s3, hi_s3 = CLAMP_S300
     lo_am, hi_am = CLAMP_AMMO
     lo_gun, hi_gun = CLAMP_GUN_AMMO
+    lo_arm, hi_arm = CLAMP_ARM_AMMO
     lo_re, hi_re = CLAMP_RELOAD_S
 
     return CombatConfig(
@@ -122,6 +134,7 @@ def clamp_config(
         n_s300=clamp_field(int(n_s300), lo_s3, hi_s3),
         oniks_ammo=clamp_field(int(oniks_ammo), lo_am, hi_am),
         zircon_ammo=clamp_field(int(zircon_ammo), lo_am, hi_am),
+        kh31p_ammo=clamp_field(int(kh31p_ammo), lo_arm, hi_arm),
         oniks_mag_reload_s=clamp_field(float(oniks_mag_reload_s), lo_re, hi_re),
         s300_48n6_ammo=clamp_field(int(s300_48n6_ammo), lo_am, hi_am),
         s300_40n6_ammo=clamp_field(int(s300_40n6_ammo), lo_am, hi_am),

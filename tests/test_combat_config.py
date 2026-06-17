@@ -26,7 +26,7 @@ from sim.ships import ST_GONE
 from world.combat_config import (
     DEFAULT, CombatConfig, clamp_config, clamp_field,
     CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_ENEMY_RADARS, CLAMP_PLAYER_RADARS,
-    CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_RELOAD_S,
+    CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_RELOAD_S,
 )
 
 DT = 1.0 / 120.0
@@ -53,6 +53,9 @@ def test_defaults_match_locked_schema():
     assert c.pantsir_57e6_ammo == 12
     assert c.pantsir_gun_ammo == 700
     assert c.pantsir_mag_reload_s == 60.0
+    # M2-T2: Kh-31P player ARM pool DEFAULTS to 0 (OFF) so the out-of-the-box
+    # battle stays byte-identical until a setup screen arms it.
+    assert c.kh31p_ammo == 0
 
 
 def test_default_is_frozen():
@@ -116,6 +119,25 @@ def test_clamp_config_ammo_ceiling():
     )
     assert c.oniks_ammo == CLAMP_AMMO[1]        # max 200
     assert c.s300_48n6_ammo == CLAMP_AMMO[1]
+
+
+def test_clamp_config_kh31p_arm_pool():
+    """M2-T2 Kh-31P ARM pool clamp round-trip. UNLIKE the other missile pools,
+    its floor is 0 (CLAMP_ARM_AMMO), so the OFF default survives the
+    default-through-setup path (clamp_config runs every field): clamping
+    kh31p_ammo=0 with the missile CLAMP_AMMO=(1,200) would silently turn the
+    ARM ON. Two-sided: floor 0 preserved, ceiling honoured, default unchanged."""
+    assert CLAMP_ARM_AMMO[0] == 0, "ARM pool floor must be 0 (OFF survivable)"
+    # A 0 pool stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(kh31p_ammo=0).kh31p_ammo == 0
+    # A negative slider clamps up to the 0 floor.
+    assert clamp_config(kh31p_ammo=-5).kh31p_ammo == CLAMP_ARM_AMMO[0]
+    # The ceiling matches the other missile pools.
+    assert clamp_config(kh31p_ammo=9999).kh31p_ammo == CLAMP_ARM_AMMO[1]
+    # An in-band value round-trips unchanged.
+    assert clamp_config(kh31p_ammo=4).kh31p_ammo == 4
+    # A default-config build (no edits) keeps the ARM OFF.
+    assert clamp_config().kh31p_ammo == 0
 
 
 def test_clamp_config_preserves_default_gun_belt():
