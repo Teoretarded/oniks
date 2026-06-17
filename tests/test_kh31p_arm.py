@@ -25,17 +25,20 @@ HarmMissile flight/homing machine but flies as a PLAYER round
     the SAME miss offset.
 
 MEASURED FLYOFF (tools/probe_kh31p_flyoff.py, seed [1337, 8], emitting radar):
-    range  cruise Mach   closest    result
-     60 km    2.64        9.9 m      HIT
-     90 km    2.80       10.7 m      HIT   <- LOCKED KILL range (K)
-    110 km    2.83       11.8 m      HIT
-    130 km    2.84       11.0 m      HIT
-    140 km    2.85      639.2 m      MISS  <- LOCKED SHORT range (S)
-    160 km    2.86     7707.5 m      MISS
+    range  peakMach   ToF      closest    result
+     60 km    2.63    118.0 s    11.6 m    HIT
+     90 km    2.80    192.1 s    11.8 m    HIT   <- LOCKED KILL range (K)
+    110 km    2.82    240.1 s    10.7 m    HIT
+    130 km    2.84    284.9 s    11.4 m    HIT
+    140 km    2.84    300.0 s  1022.4 m    MISS  <- LOCKED SHORT range (S)
+    160 km    2.85    300.0 s  8227.0 m    MISS
+  Silence-CEP (90 km shot, silent @40 s): closest 366.6 m, radar survives
+  (inside the 150..400 m seeded ring).
   Cruise Mach >= 2.80 (meets the >= ~2.8 target).  The reused HarmMissile
   machine's altitude-hold gains are Mach-2-tuned, so a Mach-3 round zoom-glides
-  and over-reaches the textbook 110 km (the in-game HARM does the same); the
-  HONEST measured envelope is kill <= 130 km / short @ 140 km.  K=90, S=140.
+  and over-reaches the textbook 110 km (the in-game HARM does the same — its
+  "110 km" is a data-sheet label, not a flyoff gate); the HONEST measured
+  envelope is kill <= 130 km / short @ 140 km.  K=90, S=140.
 """
 
 import math

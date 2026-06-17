@@ -1815,6 +1815,13 @@ class CombatWorld(WorldState):
                 impact = (np.asarray(m.impact_pos, dtype=np.float64).copy()
                           if m.impact_pos is not None
                           else np.asarray(struct.pos, dtype=np.float64).copy())
+                # One warhead = one ``hit``.  Enemy radar Structures are HP 1
+                # (sim.bases HP_RADAR_STATION), so a single ARM destroys one —
+                # matching the spec ("one-shots a soft radar").  If a radar's
+                # HP is ever raised >1, the round below drops the binding after
+                # one hit (it is spent), leaving the Radar blinded but the
+                # Structure standing until further ARMs finish it — revisit
+                # this site (loop to dead, or re-bind) if hardened radars land.
                 struct.hit()
                 self.events.append(("base_hit", impact.copy()))
                 if not struct.alive:
