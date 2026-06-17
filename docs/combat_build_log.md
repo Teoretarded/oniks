@@ -1042,3 +1042,43 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
 - **EW cluster status:** field model + Growler + ELINT-sigma + player pod all
   shipped. Remaining M3: JAMMED-band UI + emissions meter, then the terrain/
   HeightField sub-cluster (spec 09).
+
+### M3-F5 JAMMED-band UI + RADAR-DEGRADED row + emissions meter (commit `5af9f7b`)
+- **Files:** `world/combat.py` (`ew_state` published read-only at end of `step()`
+  via `_publish_ew_state` + `_believed_jammer_fix`); `game/hud.py`
+  (`radar_jam_row` BURN-THRU/NET-DEGRADED + `emissions_exposure` EMCON gauge,
+  anchored below the data-driven panel bottom — `_block` now returns its height);
+  `game/tactical_map.py` (`_jam_overlay` corridor wedge from BELIEF + dashed
+  degraded ring); NEW `tests/test_ew_ui.py` (15 GL-free FakeText tests).
+- **Single source of truth:** the burn-through km == `sim/ew.effective_range`
+  (verified byte-equal). **Fog:** the wedge reads `ew_state.jammer_fix_xz`
+  (ELINT/SIGINT belief), proven by a test that moves truth away from belief and
+  asserts the apex follows belief. **Byte-identical default:** `n_jammers=0` ->
+  inactive `ew_state` -> `radar_jam_row` None + `_jam_overlay` no-op.
+- **Fable loop:** implementer DONE -> spec review PASS -> quality review FAIL
+  (gauge used a magic Y offset overlapping the panel) -> quality fix DONE (anchor
+  off the real panel height). Orchestrator gate: full suite green, smoke 70/70.
+- **Deferred polish (noted):** wedge narrow/fade-on-kill; corridor is outlined
+  not filled (no rotated-fill primitive in the one-flush budget). **M3 EW cluster
+  (F1-F5) COMPLETE.**
+
+### Zero-bias whole-game audit + fixes (commit `57fd0a8`)
+- Two independent Opus reviewers swept the whole game (zero shared context),
+  every finding adversarially verified (refute-by-default), deduped, ranked.
+  6 raw -> 4 confirmed (1 HIGH, 1 MEDIUM, 2 LOW), 2 rejected. Report:
+  `docs/reviews/zero_bias_audit_2026-06-18.md`.
+- **HIGH (FIXED) no-cheat:** a fighter kept truth-steering + firing AIM-9X on the
+  drone after a *single* radar hit. `sim/enemy_air.py` now gates both on a CURRENT
+  nose-radar hold; on loss it flies the cached last-known for an 8 s anti-strobe
+  dwell (`FIGHTER_INTERCEPT_HOLD_S`) then drops the track. TDD regression
+  `tests/test_fighter_nocheat.py` (3 cases, red->green).
+- **LOW (FIXED):** enemy SM-2/SM-6 could OBB-hit a sister hull -> `sim/damage.py`
+  skips `is_hostile` rounds (forward-compatible: M4 ASBM is `is_hostile=False`).
+- **LOW (FIXED):** a jammed radar gained an 8 km floor for a blind class ->
+  `sim/ew.py` returns 0.0 for a zero-range class.
+- **MEDIUM (DEFERRED -> M3-terrain):** `terrain_blocks` takes 0 samples under
+  ~4 km. Folded into the HeightField refactor (its natural home; conflicts with an
+  existing unit test + changes the LOS seam). **Rejected (verified non-bugs):** the
+  "dead setup spinners" (they're FIXED rows) and the "Tomahawk truth-aim" (the
+  commander path aims at the same surveyed believed_pos; symmetric + locked).
+- Full suite green, smoke 70/70, Oniks-vs-SM-2 duel + determinism bit-identical.
