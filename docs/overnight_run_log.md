@@ -9,20 +9,76 @@
 
 ---
 
-## MORNING REPORT
+## MORNING REPORT  (live — updated as work proceeds; branch `feat/combat-expansion`, do NOT touch `main`)
 
-*(Filled in at halt. See the chronological ledger below until then.)*
+**Headline:** 2 of 6 milestones SHIPPED, GATED, and PLAYABLE overnight, plus the
+new weapon's 3D model + reference photos. Full test suite **920 passed, exit 0**;
+combat smoke **70/70 exit 0**; the locked regression contracts (Oniks-vs-SM-2 duel,
+Oniks/SAM flight, same-seed determinism, byte-identical out-of-the-box battle) all
+held BIT-IDENTICAL throughout. Every feature went through the Fable-Method loop
+(opus implementer → hostile spec/physics/no-cheat review → code-quality review →
+fixer) and every milestone through a personal gate + an adversarial agent fleet
+(game-test in live battles + bug-hunt + no-cheat auditor).
 
-**Status so far (updated 2026-06-17, overnight continuing):**
-- Grounding complete (README, ROADMAP, specs 01–09, fable-method refs). Baseline
-  green, branch `feat/combat-expansion` off `master`, baseline checkpoint `ac697d2`.
-- **MILESTONE 1 (Legibility Foundation) — SHIPPED & GATED** (tip `3c10066`):
-  widget primitives + SEMANTIC_COLORS + hud_widgets; track kind/size stamps;
-  threat-warning strip; click-contact intel panel; per-tube battery panel.
-  Full suite exit 0 (~864), smoke 70/70, Oniks-duel + determinism bit-identical
-  (delta 0.0), fog honest (confirmed in a live battle), no-cheat CLEAN.
-  Deferred: M1-F6 toast/hint upgrade (cosmetic). Human playtest recommended in AM.
-- Now building Milestone 2 (SEAD / Anti-Radiation Warfare).
+### Shipped milestone-by-milestone
+- **M1 — Legibility Foundation** (tip `434d825`): widget primitive library
+  (`badge`/`gauge_bar`/`mini_compass`/`tab_strip`/`scroll_list` + `SEMANTIC_COLORS`
+  + `hud_widgets.py`); track `kind`/`size` stamps; threat-warning strip;
+  click-contact intel panel; per-tube battery panel. **Measured (game-test):**
+  severity bands exercised live (DANGER<20s/WARN<60s/MUTED), TTI monotonic,
+  determinism delta **0.0** @15k steps, fog confirmed in a live battle
+  (under-horizon hostiles never on the strip), 795 calls 0 exceptions. No-cheat
+  CLEAN; bug-hunt SAFE (1 latent guard fixed). Deferred: M1-F6 toast upgrade (cosmetic).
+- **M2 — SEAD / Anti-Radiation Warfare** (tip `0d5635f`): emitter ELINT SIGINT
+  channel; **Kh-31P player ARM** (reuses HarmMissile, fog-gated launch, victory
+  credit); enemy radar **EMCON vs a sensed ARM**; full player UI (armory ammo,
+  3-way B-cycle, emitter map glyph + selection, ARM seeker readout). **Measured:**
+  flyoff kill@90km / short@140km / peak Mach 2.80 (envelope locked to the MEASURED
+  band — the airframe over-reaches the textbook 110km on the reused Mach-2 loft
+  machine, exactly as the in-game HARM does; documented, AWACS@407km stays
+  unreachable). The SEAD duel works end-to-end: a ship senses the ARM → EMCON →
+  ARM degrades to its seeded CEP ring → radar survives (physics-not-dice). No-cheat
+  CLEAN (all 7 surfaces; EMCON reads only sensed tracks). **The M2 gate caught 2
+  HIGH integration gaps that all unit tests masked** — the ARM wasn't fed to the
+  enemy picture (EMCON was dead code in play) and ship radars resurrected each tick
+  (ARM couldn't kill them) — both FIXED, with the missing real-ARM e2e tests added.
+- **3D model (task #7):** `build_kh31p` mesh (Kh-31 signature: 4 mid-body ramjet
+  intakes), registered for the in-flight render; reference photos
+  `kh31p_side.png` + `kh31p_front.png` saved to
+  `Assets of oinks/New models 1 needs improving and updating/` and orchestrator-verified.
+
+### Open items / deviations / TODO (for the morning reviewer)
+1. **Hands-on playtest recommended.** Agent game-tests substituted for the human
+   playtest per the unattended mandate; the legibility + SEAD layers are now in
+   place to make a real playtest informative. Try: arm KH-31P in the armory,
+   localize an enemy emitter via the drone, fire the ARM, watch the enemy EMCON.
+2. **Deviation (honest, measured):** the KH-31P kills to ~130km not the textbook
+   110km — the reused HarmMissile loft gains are Mach-2-tuned and a Mach-3 round
+   over-glides (the existing HARM does the same). Locked to measured reality, not
+   faked. AWACS (407km) stays out of reach as designed.
+3. **Geometry note:** the ARM (130km) can't reach the inland enemy ground radars
+   (~505km) — by design it's anti-ship-SPY-1 / anti-AWACS-when-dragged-in SEAD;
+   the ground-radar victory-credit path is sound and serves closer engagements.
+4. **Pre-existing flake (NOT introduced by this run):**
+   `tests/test_phase5b_e2e.py::test_backplot_jassm_strike_reaches_defeat` is
+   order-dependent (passes in isolation + in the full after-run; untouched sim).
+   Worth a look.
+5. **Deferred cosmetics:** M1 toast/hint stacked-upgrade; the threat-strip
+   badge-per-row pills. Both non-blocking.
+6. **User's broader "improve existing models" ask** is OPEN (existing model photos
+   live in `Assets of oinks/updated models/`; a quality-lift pass is its own task).
+
+### Recommended next step
+Milestones 3–6 remain (EW + terrain; ASBM + swarm; fleet/sub/amphibious; meta
+loop). The dependency-correct next build is M3's keystone — `sim/ew.py` J/S
+burn-through field model (measure-calibrated; `Radar.detects(jammers=())` defaults
+empty = byte-identical). Each remaining milestone is a coherent, gateable increment;
+resume from this report + the last commit. The two shipped milestones are
+production-quality and safe to merge/playtest as-is.
+
+---
+
+*(Chronological ledger below.)*
 
 ---
 
@@ -132,7 +188,23 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
   no-cheat auditor, 1st M2-T4 implementer, 1st M1 game-test socket close). All
   re-dispatched and succeeded — no work lost (completed/committed work is never redone).
 
+### Task #7 — KH-31P model + reference photos
+- `model:kh31p` — MODELER / opus — `build_kh31p()` (slim ramjet body, ogive ARM
+  seeker nose, 4 mid-body ramjet intake scoops = the Kh-31 signature, cruciform
+  tail fins), registered in `_missile_meshes`/`DEDICATED_MISSILE_IDS` (in-flight
+  ARM now uses the real mesh), `tools/shoot_kh31p.py`, test_models asserts —
+  DONE (920 passed, smoke 70/70), 4-iteration render self-critique. Commit `31846a8`.
+- Photos saved + ORCHESTRATOR-VERIFIED (viewed both): `kh31p_side.png` +
+  `kh31p_front.png` in `Assets of oinks/New models 1 needs improving and updating/`.
+  Both read as a Kh-31 (4 intakes visible), montage-style sky/sea backdrop.
+- **Model-task status:** the NEW M2 weapon (KH-31P) is modeled + photographed per
+  the user's ask. Future new models (M4 ASBM/swarm, M5 Buk/sub/etc.) get the same
+  treatment when their milestones build them. The user's broader "improve the
+  EXISTING models" ask is OPEN (the existing fleet of model photos lives in
+  `Assets of oinks/updated models/`; a quality-lift pass is a separate task).
+
 ### Next
-- Task #7: dedicated KH-31P mesh (`build_kh31p`) + reference photos to
-  `Assets of oinks/New models 1` (the user's explicit ask). Then assess M3.
+- Begin Milestone 3 (EW + terrain) with its keystone feature: `sim/ew.py`
+  J/S burn-through field model (measure-calibrated, Radar.detects(jammers=())
+  defaults empty = byte-identical). Then assess remaining runway.
 
