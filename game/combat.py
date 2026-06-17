@@ -42,9 +42,10 @@ from models.common import rot_x, rot_y, rot_z
 from models.destroyer import build_destroyer
 from models.drone import build_recon_drone
 from models.fighter import build_fighter
+from models.jammer import build_jammer
 from models.pantsir import build_pantsir
 from models.structures import build_radar_station
-from sim.enemy_air import FS_GONE, FS_PARKED, FS_REARMING, Fighter
+from sim.enemy_air import FS_GONE, FS_PARKED, FS_REARMING, Fighter, JammerAircraft
 from sim.recon import DRONE_GONE
 from world.combat import CombatWorld
 
@@ -187,6 +188,11 @@ class CombatState(SandboxState):
         self._mesh_drone = Mesh(build_recon_drone())
         self._mesh_fighter = Mesh(build_fighter())
         self._mesh_awacs = Mesh(build_awacs())
+        # M3-F2 escort jammer (EA-18G Growler): a dedicated mesh so the player
+        # can tell a Growler from the E-2/E-3 AWACS it used to share a mesh
+        # with.  Built unconditionally; the draw pass only picks it for a live
+        # JammerAircraft, so the n_jammers=0 default never touches it.
+        self._mesh_jammer = Mesh(build_jammer())
         # Phase 6: the player's Pantsir-S1 SHORAD vehicles (friendly, static
         # ground units guarding the base).  One shared mesh drawn at each
         # unit's terrain-pinned position in _draw_pantsirs.
@@ -213,6 +219,7 @@ class CombatState(SandboxState):
         self._mesh_drone.delete()
         self._mesh_fighter.delete()
         self._mesh_awacs.delete()
+        self._mesh_jammer.delete()
         self._mesh_pantsir.delete()
         super().dispose()
 
@@ -275,9 +282,13 @@ class CombatState(SandboxState):
                     continue
                 mesh = self._mesh_fighter
             else:
-                if e.impact_pos is not None:    # AWACS wreck on the ground
+                if e.impact_pos is not None:    # AWACS/jammer wreck on ground
                     continue
-                mesh = self._mesh_awacs
+                # JammerAircraft subclasses Awacs — test it FIRST so the
+                # Growler draws as a Growler, not an E-2/E-3 (the AWACS mesh
+                # is the fallthrough for the genuine AWACS).
+                mesh = (self._mesh_jammer if isinstance(e, JammerAircraft)
+                        else self._mesh_awacs)
             p = e.pos
             dx = p[0] - eye[0]
             dy = p[1] - eye[1]

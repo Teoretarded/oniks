@@ -21,6 +21,7 @@ import pytest
 from engine.meshdata import MeshData
 from models.aircraft_model import build_fast_aircraft
 from models.fighter  import build_fighter
+from models.jammer   import build_jammer
 from models.awacs    import build_awacs
 from models.carrier  import build_carrier
 from models.airfield import build_airfield
@@ -134,6 +135,92 @@ def test_fighter_origin_near_mid(fighter):
     lo, hi = _bbox(fighter)
     z_mid = float((hi[2] + lo[2]) * 0.5)
     assert abs(z_mid) <= 2.0, f"fighter z-midpoint {z_mid:.2f} m not near 0"
+
+
+# ===========================================================================
+# EA-18G Growler escort jammer (M3-F2)
+# ===========================================================================
+
+@pytest.fixture(scope="module")
+def jammer():
+    return build_jammer()
+
+
+def test_jammer_returns_meshdata(jammer):
+    assert isinstance(jammer, MeshData)
+
+
+def test_jammer_sanity(jammer):
+    _check_sanity(jammer)
+
+
+def test_jammer_length(jammer):
+    """A Super Hornet airframe: same ~18.3 m length (pods stay inside it)."""
+    lo, hi = _bbox(jammer)
+    length = float(hi[2] - lo[2])
+    assert abs(length - _FIGHTER_LENGTH_M) / _FIGHTER_LENGTH_M <= _TOL, (
+        f"jammer length {length:.2f} m not within 20% of {_FIGHTER_LENGTH_M} m"
+    )
+
+
+def test_jammer_span(jammer):
+    """~13.6 m span — the wingtip ALQ-218 pods sit just inboard of the tips."""
+    lo, hi = _bbox(jammer)
+    span = float(hi[0] - lo[0])
+    assert abs(span - _FIGHTER_SPAN_M) / _FIGHTER_SPAN_M <= _TOL, (
+        f"jammer span {span:.2f} m not within 20% of {_FIGHTER_SPAN_M} m"
+    )
+
+
+def test_jammer_x_symmetry(jammer):
+    assert _x_sym_ok(jammer), "jammer model is not symmetric about x = 0"
+
+
+def test_jammer_origin_near_mid(jammer):
+    lo, hi = _bbox(jammer)
+    z_mid = float((hi[2] + lo[2]) * 0.5)
+    assert abs(z_mid) <= 2.0, f"jammer z-midpoint {z_mid:.2f} m not near 0"
+
+
+def test_jammer_pod_palette():
+    """The EW-pod paint must be registered (added for the Growler)."""
+    assert "jammer_pod" in PALETTE, "'jammer_pod' missing from PALETTE"
+
+
+def test_jammer_has_ew_pods(jammer):
+    """THE Growler signature: jammer_pod-coloured EW pods that the plain
+    Super Hornet does NOT carry — pods on both wings (±x) plus the centreline,
+    so the player can tell a Growler from a fighter (and from the AWACS)."""
+    pod_mask = np.all(
+        np.isclose(jammer.vertices[:, 6:9], PALETTE["jammer_pod"], atol=1e-4),
+        axis=1,
+    )
+    assert pod_mask.any(), "no jammer_pod vertices — EW pods missing?"
+    pods = jammer.vertices[pod_mask]
+    assert (pods[:, 0] > 1.0).any(), "no pod on the starboard (+x) wing"
+    assert (pods[:, 0] < -1.0).any(), "no pod on the port (−x) wing"
+    assert (np.abs(pods[:, 0]) < 1.0).any(), "no centreline belly pod"
+    # The plain fighter wears none of this paint — the meshes are distinct.
+    fighter_mask = np.all(
+        np.isclose(build_fighter().vertices[:, 6:9], PALETTE["jammer_pod"],
+                   atol=1e-4),
+        axis=1,
+    )
+    assert not fighter_mask.any(), "plain fighter unexpectedly has EW pods"
+
+
+def test_jammer_distinct_from_awacs(jammer):
+    """A Growler is NOT a 707/AWACS: it must carry no rotodome (no
+    radar_white above the fuselage) and be a far smaller airframe."""
+    white_above = np.all(
+        np.isclose(jammer.vertices[:, 6:9], PALETTE["radar_white"], atol=1e-4),
+        axis=1,
+    ) & (jammer.vertices[:, 1] > 1.0)
+    assert not white_above.any(), "jammer has an AWACS-style rotodome"
+    lo, hi = _bbox(jammer)
+    assert float(hi[0] - lo[0]) < _AWACS_SPAN_M * 0.5, (
+        "jammer span is AWACS-sized — should be a Super Hornet"
+    )
 
 
 # ===========================================================================

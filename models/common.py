@@ -24,6 +24,10 @@ PALETTE = dict(
     concrete=(0.58, 0.57, 0.54), radar_white=(0.85, 0.86, 0.84), tank_white=(0.80, 0.79, 0.75),
     s300_green=(0.30, 0.34, 0.26), tube_grey=(0.42, 0.44, 0.42),
     aircraft_grey=(0.58, 0.62, 0.68), aircraft_dark=(0.30, 0.33, 0.38),
+    # EA-18G Growler electronic-attack pods (models/jammer.py): a muted sand
+    # tone so the jamming kit reads as EW equipment, not ordnance, and sets
+    # the escort jammer apart from the haze-grey Super Hornet at a glance.
+    jammer_pod=(0.80, 0.78, 0.62),
     # Task OM2 reference builds (oniks_reference.md / s300_reference.md):
     # gull-grey/grey-green Oniks skin, body-toned wings a shade darker, the
     # DEEP BLACK intake annulus, the red tail cap accent; 5P85 tube clamp

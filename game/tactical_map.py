@@ -1132,6 +1132,18 @@ class TacticalMap:
                 list(zip(sx + r * np.cos(ring_ang),
                          sy + r * np.sin(ring_ang))), glyph_col, 1.0)
             kind = str(c.get("kind", "EMITTER"))
+            if kind == "JAMMER":
+                # Jammer-specific glyph: a noise-burst star — short radial
+                # spokes from the diamond out to the ring — marking an emitter
+                # that is RADIATING a broad barrage corridor rather than a
+                # discrete search beam.  Same estimate-violet hue: still a
+                # SIGINT belief at the est_pos, never radar truth.
+                for k in range(8):
+                    a = (k + 0.5) * (math.pi / 4.0)
+                    ca, sa = math.cos(a), math.sin(a)
+                    self.text.draw_lines(
+                        [(sx + (d + 2.0) * ca, sy + (d + 2.0) * sa),
+                         (sx + r * ca, sy + r * sa)], glyph_col, 1.0)
             self.text.draw_text(sx + d + 4, sy - 9, kind, glyph_col)
 
     # --------------------------------------------------------------- chrome
