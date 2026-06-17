@@ -11,8 +11,10 @@
 
 ## MORNING REPORT  (live — updated as work proceeds; branch `feat/combat-expansion`, do NOT touch `main`)
 
-**Headline:** 2 of 6 milestones SHIPPED, GATED, and PLAYABLE overnight, plus the
-new weapon's 3D model + reference photos. Full test suite **920 passed, exit 0**;
+**Headline:** 2 of 6 milestones SHIPPED, GATED, and PLAYABLE overnight (M1, M2),
+the new weapon's 3D model + reference photos, AND M3's EW keystone (the J/S
+burn-through field model) shipped + verified as a gated feature (M3 in progress).
+Full test suite **930 passed, exit 0**;
 combat smoke **70/70 exit 0**; the locked regression contracts (Oniks-vs-SM-2 duel,
 Oniks/SAM flight, same-seed determinism, byte-identical out-of-the-box battle) all
 held BIT-IDENTICAL throughout. Every feature went through the Fable-Method loop
@@ -203,8 +205,18 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
   EXISTING models" ask is OPEN (the existing fleet of model photos lives in
   `Assets of oinks/updated models/`; a quality-lift pass is a separate task).
 
+### M3 — Electronic Warfare + Terrain depth (IN PROGRESS)
+- `build:M3-F1` (1st) — IMPLEMENTER / opus — ran 34m then user-stopped; left
+  nothing committed (clean tree). Re-dispatched.
+- `build:M3-F1` — IMPLEMENTER / opus — `sim/ew.py` J/S burn-through field model +
+  `Radar.detects(jammers=())` byte-identical default + calibration probe + 10
+  tests — DONE (930 passed, smoke 70/70, byte-identical). Commit `3637ea7`.
+  MEASURED: EW_CAL=1.2e-13, default jammer collapses the 350 km ring to 175 km
+  (half, monotonic). Orchestrator re-verified (EW tests + regression contracts +
+  re-ran probe). The EW keystone — remaining M3 consumers queued.
+
 ### Next
-- Begin Milestone 3 (EW + terrain) with its keystone feature: `sim/ew.py`
-  J/S burn-through field model (measure-calibrated, Radar.detects(jammers=())
-  defaults empty = byte-identical). Then assess remaining runway.
+- Continue M3: enemy Growler (`JammerAircraft` + `_defend_jammer` doctrine) — the
+  threat that makes the field model bite — then player EW pod, ELINT-sigma,
+  JAMMED UI, and the HeightField/terrain work. Each a gateable increment.
 

@@ -934,3 +934,29 @@ reference photos (task #7 — placeholder mesh in flight today); (2) a pre-exist
 order-dependent flake in `tests/test_phase5b_e2e.py::test_backplot_jassm_strike_
 reaches_defeat` (passes in isolation + in the full after-run; untouched sim —
 flagged, not introduced by M2); (3) hands-on playtest recommended.
+
+## Milestone 3 — Electronic Warfare + Terrain depth (IN PROGRESS)
+
+### M3-F1 EW J/S burn-through field model — the keystone (commit `3637ea7`)
+- **Files:** NEW `sim/ew.py` (`js_db`, `burn_through_range`, `effective_range`;
+  pure, GL-free, NO RNG); `sim/radar.py` (`Radar.detects`/`RadarNetwork.visible`
+  gain optional `jammers=()` — the empty path keeps the original
+  `ranges.get(...)` line verbatim = byte-identical); NEW `tools/probe_ew_burnthrough.py`;
+  NEW `tests/test_ew_field.py` (10 tests).
+- **Physics:** echo ~1/R_t⁴, jam ~1/R_j² → the target burns through (is seen)
+  only inside the burn-through (crossover) range. MONOTONIC + CONTINUOUS, a
+  close-in floor (`EW_CLOSE_FLOOR_M=8 km`, below the Pantsir horizon so it never
+  masks a real engagement), MIN burn-through for multi-jammer (loudest wins),
+  LOS-gated (a terrain-masked jammer doesn't jam).
+- **MEASURED calibration (probe, not guessed):** `EW_CAL=1.2e-13` derived from
+  `R_j²/(P_jam·R_bt⁴)`; the default Growler-class jammer (200 W, 150 km standoff)
+  collapses the player's 350 km ship ring to **175 km — exactly half** (ratio
+  1.000), monotonic across standoff. Locked test band `165 km < eff < 185 km`.
+- **REGRESSION = THE GATE:** `jammers=()` default → `detects`/`visible`
+  byte-identical → full suite 930 green (920+10), smoke 70/70 exit 0,
+  Oniks-duel + contacts-gating + enemy-defense + missile-flight all bit-identical.
+  Orchestrator re-verified (EW tests + regression contracts + re-ran the probe).
+- **Remaining M3 features** (consume this field model): enemy Growler
+  (`JammerAircraft` + `_defend_jammer` doctrine), player drone EW pod, ELINT
+  bearing-sigma elevation under jam, JAMMED-band UI + emissions meter, the
+  HeightField refactor + terrain/graphics uplift + seeded map presets.
