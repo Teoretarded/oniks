@@ -150,6 +150,75 @@ def build_harm() -> MeshData:
     return b.build()
 
 
+def build_kh31p() -> MeshData:
+    """Zvezda Kh-31P (anti-radiation 'P'): slim grey ramjet round, ~4.7 m /
+    0.36 m — longer and fatter than the HARM. THE signature is the four
+    mid-to-aft ramjet (PVRD) air intakes spaced cruciform around the body;
+    pointed dielectric ogive nose for the broadband passive ARM seeker, four
+    cruciform tail fins, four small mid control fins and a rear nozzle."""
+    b = MeshBuilder()
+    body = PALETTE["missile_body"]
+    fin_c = (0.74, 0.75, 0.74)
+    dark = PALETTE["radome"]            # darker dielectric ARM radome
+    intake_c = PALETTE["intake_black"]  # deep-black ramjet duct mouths
+    duct_c = (0.58, 0.59, 0.60)         # mid-grey duct shell, reads off the body
+
+    # 4.7 m round, fatter than the HARM: r = 0.18 m (0.36 m caliber).
+    tail, nose = -2.35, 2.35
+    r = 0.18
+    profile = [(tail, 0.13), (tail + 0.20, r), (1.55, r)]
+    # Long pointed ogive seeker: a Kh-31 reads sharper/longer-nosed than HARM.
+    profile += _ogive(1.55, r, nose, 0.0, n=10, power=1.45)
+    b.add_mesh(make_lathe(profile, SEG, body))
+    # Darker dielectric ARM radome over the forward third of the ogive tip.
+    b.add_mesh(make_lathe([(1.86, 0.105), (2.12, 0.060), (nose, 0.0)],
+                          SEG, dark))
+    # Seeker collar + a thin handling band aft of it.
+    _band(b, r + 0.004, 1.62, 0.05, (0.55, 0.18, 0.13))
+    _band(b, r + 0.004, -0.05, 0.05, (0.70, 0.70, 0.68))
+
+    # --- THE Kh-31 signature: four ramjet (PVRD) air intakes mid-to-aft ----
+    # Four scoop ducts ride the body at cruciform positions (offset 45 deg so
+    # they sit between the tail-fin planes, like the real round). Each is a
+    # long flat-bottomed scoop (wedge ramp into the flow) backed by a duct box
+    # that hugs the body, with a deep-black mouth so the inlet reads as open.
+    # Modeled like the Tomahawk ventral intake but x4 around the body and
+    # noticeably longer/larger — these are the feature that must read.
+    intake_z = -0.55                     # duct center, mid-to-aft body
+    intake_lift = r + 0.115              # stand-off of the duct from the skin
+    for k in range(4):
+        rot = rot_z(math.radians(45.0 + 90.0 * k))
+        # Forward ramp scoop: wedge slopes down toward +Z (into the airflow),
+        # in the mid-grey duct tone so the inlet lip reads as its own surface.
+        b.add_mesh(make_wedge((0.165, 0.175, 0.70), duct_c),
+                   rotation=rot,
+                   offset=tuple(rot @ np.array([0.0, intake_lift, intake_z + 0.55])))
+        # Duct body running aft along the fuselage: a long slim shell, distinctly
+        # darker than the body so the four ducts separate into clean scoops.
+        b.add_mesh(make_box((0.17, 0.165, 1.15), duct_c),
+                   rotation=rot,
+                   offset=tuple(rot @ np.array([0.0, intake_lift, intake_z - 0.05])))
+        # Deep-black inlet mouth (the open ramjet throat) at the scoop front.
+        b.add_mesh(make_box((0.135, 0.145, 0.06), intake_c),
+                   rotation=rot,
+                   offset=tuple(rot @ np.array([0.0, intake_lift + 0.005, intake_z + 0.49])))
+
+    # Four small mid-body control fins, forward of the intakes.
+    mid = make_fin(0.50, 0.24, 0.26, 0.20, 0.024, fin_c,
+                   offset=(r * 0.94, 0.0, 0.62))
+    _add_cruciform(b, mid, 45.0)
+    # Four cruciform tail fins (in line with the body axes, between intakes).
+    # Root leading edge forward enough that the trailing edge sits at the body
+    # tail (-2.35), keeping the silhouette length to the round's 4.7 m.
+    tail_fin = make_fin(0.66, 0.30, 0.40, 0.28, 0.028, fin_c,
+                        offset=(r * 0.94, 0.0, -1.69))
+    _add_cruciform(b, tail_fin, 0.0)
+    # Rear ramjet nozzle.
+    b.add_mesh(make_cylinder(0.11, 0.10, SEG_LOW, PALETTE["exhaust_ring"],
+                             axis="z", offset=(0.0, 0.0, tail + 0.05)))
+    return b.build()
+
+
 def build_aim9x() -> MeshData:
     """AIM-9X Sidewinder: very small tube, glass seeker, forward
     double-delta canards and rear rolleron fins."""

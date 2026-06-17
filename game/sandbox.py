@@ -53,8 +53,8 @@ from models.bastion import build_bastion_tel
 from models.common import PALETTE, rot_x, rot_y, rot_z
 from models.missiles import (build_40n6, build_48n6, build_57e6,
                              build_aim9x, build_harm, build_jassm,
-                             build_sm2, build_sm6, build_tomahawk,
-                             build_zircon)
+                             build_kh31p, build_sm2, build_sm6,
+                             build_tomahawk, build_zircon)
 from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
@@ -87,8 +87,8 @@ LAUNCH_TRAIL_PHASES = (PH_RIDEOUT, PH_PITCHOVER)   # cream-column ribbon feed
 CAP_ON_PHASES = (PH_EJECT, PH_RIDEOUT, PH_PITCHOVER)
 WING_DEPLOY_AFTER_EXIT = 0.2   # s after muzzle clear: surfaces snap to X
 DEDICATED_MISSILE_IDS = frozenset(
-    ("tomahawk", "jassm", "harm", "s300", "40n6", "sm2", "pantsir_57e6",
-     "zircon", "sm6")
+    ("tomahawk", "jassm", "harm", "kh31p", "s300", "40n6", "sm2",
+     "pantsir_57e6", "zircon", "sm6")
 )
 
 
@@ -388,6 +388,7 @@ class SandboxState(GameState):
             "tomahawk": Mesh(build_tomahawk()),
             "jassm": Mesh(build_jassm()),
             "harm": Mesh(build_harm()),
+            "kh31p": Mesh(build_kh31p()),
             "aim9x": Mesh(build_aim9x()),
             "s300": Mesh(build_48n6()),
             "40n6": Mesh(build_40n6()),

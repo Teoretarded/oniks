@@ -9,8 +9,8 @@ from models.bastion import build_bastion_tel
 from models.common import PALETTE
 from models.missiles import (build_40n6, build_48n6, build_57e6,
                              build_aim9x, build_harm, build_jassm,
-                             build_sm2, build_sm6, build_tomahawk,
-                             build_zircon)
+                             build_kh31p, build_sm2, build_sm6,
+                             build_tomahawk, build_zircon)
 from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_missile, build_s300_tel
 from models.ships_models import build_cargo, build_tanker, build_warship
@@ -42,7 +42,7 @@ def test_all_builders_finite_unit_normals():
                build_s300_missile(),
                build_48n6(), build_40n6(), build_sm2(), build_57e6(),
                build_tomahawk(), build_jassm(), build_harm(), build_aim9x(),
-               build_zircon(), build_sm6(),
+               build_kh31p(), build_zircon(), build_sm6(),
                build_patrol_aircraft(), build_fast_aircraft(),
                build_cargo(), build_tanker(), build_warship(),
                build_radar_station(), build_fuel_depot(), build_harbor()):
@@ -229,6 +229,7 @@ def test_dedicated_missile_lengths():
         (build_tomahawk, 6.25),
         (build_jassm, 4.27),
         (build_harm, 4.17),
+        (build_kh31p, 4.70),
         (build_aim9x, 3.00),
         (build_48n6, 7.50),
         (build_40n6, 8.00),
@@ -258,6 +259,30 @@ def test_cruise_missile_silhouettes_are_distinct():
     tail = aim.vertices[(aim.vertices[:, 2] < -0.95)
                         & (_radius(aim) > 0.15)]
     assert len(canards) and len(tail)
+
+
+def test_kh31p_silhouette_has_ramjet_intakes():
+    harm = build_harm()
+    kh = build_kh31p()
+
+    # Longer and fatter than the HARM (4.7 m / 0.36 m vs 4.17 m / 0.254 m).
+    assert _span(kh, 2) > _span(harm, 2) + 0.4
+    assert _radius(kh).max() > _radius(harm).max() * 1.3
+
+    # THE signature: four ramjet intake ducts stand off the mid-to-aft body
+    # well beyond the body skin (r ~0.18 m). They sit at cruciform 45-deg
+    # positions, so they appear as four off-axis clusters around the body.
+    mid = kh.vertices[(kh.vertices[:, 2] > -1.3) & (kh.vertices[:, 2] < 0.2)]
+    rmid = _radius(mid)
+    proud = mid[rmid > 0.28]                # geometry standing clear of the skin
+    assert len(proud)
+    ang = np.degrees(np.arctan2(proud[:, 1], proud[:, 0])) % 90.0
+    # The proud intake geometry clusters near the 45-deg cruciform diagonals.
+    near_diag = proud[(np.abs(ang - 45.0) < 22.0)]
+    assert len(near_diag) > len(proud) * 0.5
+
+    # Deep-black inlet throats present (the open ramjet mouths read as dark).
+    assert _color_mask(kh, "intake_black").any()
 
 
 def test_sam_missile_silhouettes_are_distinct():
