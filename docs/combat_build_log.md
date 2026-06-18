@@ -1082,3 +1082,40 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
   "dead setup spinners" (they're FIXED rows) and the "Tomahawk truth-aim" (the
   commander path aims at the same surveyed believed_pos; symmetric + locked).
 - Full suite green, smoke 70/70, Oniks-vs-SM-2 duel + determinism bit-identical.
+
+### M3-F3 HeightField refactor (commit `17d95b0`)
+- `world/generation.py` `HeightField` class wraps terrain_height/_scalar/surface
+  (bodies moved verbatim, constants bound to self) + `max_height`; module funcs
+  become shims over `DEFAULT_FIELD`. `Radar` gains optional `height_fn`; the world
+  threads `field.height_scalar` to every player+enemy sensor (one terrain truth).
+  Prereq for presets. Bit-identical proven vs pre-refactor HEAD across 5113 grid
+  pts; full suite 1006 green, smoke 70/70, duel+determinism byte-identical. Review
+  MINORs fixed (jammer threads height_fn; dead constants removed). 20 new tests.
+
+### M3 terrain LOS fix (commit `8ca8931`, the deferred audit MEDIUM)
+- `terrain_blocks` sampled 0 interior points under ~4 km. Now fine-samples
+  (LOS_FINE_STEP_M 400 m within LOS_FINE_RANGE_M 6 km), legacy 2 km step beyond
+  (long-range byte-identical; duel is open water -> bit-identical). Probe
+  `tools/probe_terrain_los.py`: the 163 m crest 2.95 km N of the player radar now
+  masks a low target (was CLEAR). Unit test split into endpoint-exclusion vs
+  interior-ridge-masks; EW field tests isolated from terrain (flat-sea height_fn).
+  Full suite green. ALL 4 zero-bias audit findings now resolved.
+
+### M3-F4 seeded map presets (commit `57097ec`) — M3 GAMEPLAY COMPLETE
+- `make_field(preset, seed)` -> 4 maps (Open Sea/Archipelago/Narrow Strait/Fjord);
+  preset 0 IS the default field (byte-identical). 1-3 seed only mid-ocean islands
+  (+Fjord taller walls) from `[seed,12]`; coast clusters LOCKED; a +-45 km central
+  corridor kept island-free (duel + AI fire line bit-identical). Spawns dodge
+  islands; 3D Terrain + 2D map read the active field. `map_preset` config + setup
+  MAP row. **Measured:** masking +106/+203/+271 m (Arch/Strait/Fjord), duel clear;
+  per-preset smoke 16/16; full suite 1063 green; default smoke 70/70 byte-identical.
+  Rendered heightmaps eyeballed (distinct + sensible). Cosmetic follow-up: Fjord
+  coastline could read more dramatically.
+
+### M3 STATUS — gameplay COMPLETE; visual polish (F1/F2) DEFERRED
+- Shipped: EW cluster (F1-F5), HeightField refactor, terrain LOS fix, seeded
+  presets. **Deferred to a final visual pass (no downstream deps):** spec-09 F1
+  (terrain _colorize material grading, render-only) + F2 (ocean/sky/foam/fog +
+  Low/High toggle, render-only). These are GL-only polish best verified with
+  screenshots + the user's hands-on playtest; scheduled after the gameplay
+  milestones (M4-M6) so verified gameplay value lands first.
