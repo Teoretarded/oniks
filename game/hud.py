@@ -492,6 +492,29 @@ def oniks_ammo_row(world):
     return ("AMMO", f"0/{cap} RLDG {int(np.ceil(left - 1e-9))}s", RELOAD_COL)
 
 
+def swarm_status_row(world):
+    """The COMBAT loitering-swarm pod row, or None when no pod is armed
+    (SANDBOX, or a COMBAT setup with n_swarm_pods 0 -> _swarm_mag_cap 0) —
+    pure, GL-free, unit-testable.
+
+    Returns ``("SWARM", text, color)`` where text is:
+      * ``"<cells>/<cap>  <inflight> UP"`` (green) — cells ready in the pod
+        magazine + the count of swarm rounds currently in flight, or
+      * ``"0/<cap> RLDG <s>s"`` (amber) — magazine empty and the refill timer
+        running (the renewable-but-rate-limited pod mechanic)."""
+    cap = getattr(world, "_swarm_mag_cap", 0)
+    if not cap:
+        return None
+    cells = getattr(world, "_swarm_cells", 0)
+    inflight = sum(1 for m in getattr(world, "missiles", [])
+                   if getattr(getattr(m, "weapon", None), "weapon_id", None)
+                   == "swarm" and getattr(m, "alive", False))
+    if cells > 0:
+        return ("SWARM", f"{cells}/{cap}  {inflight} UP", ARMED_COL)
+    left = getattr(world, "_swarm_mag_reload_left", 0.0)
+    return ("SWARM", f"0/{cap} RLDG {int(np.ceil(left - 1e-9))}s", RELOAD_COL)
+
+
 def bastion_weapon_strip(sandbox, world) -> list:
     """The Bastion weapon-select strip (M2-T4) — pure, GL-free, unit-testable.
 

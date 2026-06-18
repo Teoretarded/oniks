@@ -78,6 +78,12 @@ ACTIONS: tuple[ActionDef, ...] = (
     ActionDef("sam_round", "S-300 ROUND SELECT", "ENGAGEMENT", pygame.K_v),
     # Oniks/Zircon select (Phase 8): B toggles the Bastion round. B is unclaimed.
     ActionDef("oniks_weapon", "ONIKS/ZIRCON SELECT", "ENGAGEMENT", pygame.K_b),
+    # M4-B loitering-swarm arrival mode: H toggles SYNC (coordinated time-on-
+    # target) <-> MAX (plain max-speed bundle) while the SWARM platform is
+    # active.  H is unclaimed by every other default; off the swarm platform
+    # the action is a graceful no-op.
+    ActionDef("swarm_arrival_mode", "SWARM ARRIVAL MODE", "ENGAGEMENT",
+              pygame.K_h),
     # M3-F4 drone EW pod (self-protect jammer): G toggles drone.set_jam while
     # the DRONE platform is active. G is unclaimed by every other default; in
     # SANDBOX / off the drone platform the action is a graceful no-op.

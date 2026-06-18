@@ -185,6 +185,12 @@ S300_TEL = LauncherDef("s300_tel", "5P85 TEL", ("s300",), 8.0,
 # one cell; reload at sea is not modelled (finite stock, no reload timer).
 SM2_VLS = LauncherDef("sm2_vls", "Mk 41 VLS", ("sm2",), 0.0,
                       tubes=8, ammo=24)
+# M4-B SWARM_POD: a multi-cell bundle launcher on the home coast.  All ready
+# cells fire as ONE bundle (world.launch_swarm) for a coordinated time-on-
+# target; the cell magazine refills on a reload timer (config-driven).  tubes
+# is the per-pod cell count (the default bundle size).
+SWARM_POD = LauncherDef("swarm_pod", "Loitering Swarm Pod", ("swarm",), 60.0,
+                        tubes=8, ammo=8)
 
 @dataclass(frozen=True)
 class StrikeDef:
@@ -645,9 +651,46 @@ BASTION_K = SamDef(
 BASTION_K_AMMO: int = 4
 
 
-WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON}
+# --- SWARM loitering munition (player, M4-B) ----------------------------------
+# A small SUBSONIC loiterer bundle-launched from a multi-cell pod (SWARM_POD).
+# Reuses the Oniks Missile flight machine VERBATIM (eject/boost/cruise/descent/
+# terminal phase machine, weave, seeker); the ONLY new behaviour is the
+# per-round _commanded_speed override (sim/missile._sustainer_thrust) that the
+# pod's launch_swarm sets via sim/swarm.compute_swarm_speeds so the whole
+# bundle reaches one aim point SIMULTANEOUSLY (coordinated time-on-target).  The
+# saturation it produces vs a ship's point defense EMERGES from the enemy's
+# in-flight caps (SM2_MAX_INFLIGHT + reload + one CIWS bubble), never a roll.
+#
+#   Reference class: a Lancet/Switchblade-600-scale loitering munition flown as
+#   an anti-ship saturation round.  Slow (Mach ~0.25-0.45 = ~85-150 m/s sea
+#   level), small (short seeker, light warhead), short legged (~40 km on a
+#   modest fuel budget).  Values chosen so the airframe flies the existing
+#   lo-lo profile honestly at the subsonic band; the SMALL booster just clears
+#   the cell and the cheap turbojet/electric sustainer holds the slow cruise.
+#     fuel budget: at ~120 m/s cruise the ~3,500 N sustainer holds against drag;
+#       a ~40 km lo-lo leg is ~330 s of flight.  mdot = 3,500/(1,400*9.81) =
+#       0.255 kg/s -> ~85 kg for 330 s; 90 kg covers boost + margin.
+#     booster: a 12,000 N / 1.5 s cell-clear kick (small canister motor).
+SWARM = WeaponDef(
+    weapon_id="swarm", display_name="Loitering Swarm",
+    length=1.9, diameter=0.20, launch_mass=55.0, fuel_mass=20.0,
+    eject_speed=22.0, eject_time=0.25,
+    booster_thrust=12_000.0, booster_time=1.5,
+    max_thrust=3_500.0, isp=1_400.0,
+    # Subsonic loiterer band (the _commanded_speed sync rides INSIDE this):
+    # hi/lo are both low so the round flies slow on either profile; lo_alt low
+    # so the bundle skims in under the SM-2 horizon (lo-lo is the swarm mode).
+    cruise_mach_hi=0.45, cruise_alt_hi=2_000.0, cruise_mach_lo=0.25, lo_alt=60.0,
+    skim_alt=10.0, terminal_range=8_000.0,
+    seeker_range=12_000.0, seeker_half_angle_deg=40.0,
+    max_g=6.0, warhead_mass=8.0,
+    ref_area=0.0314,   # pi * (0.20/2)^2
+)
+
+
+WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON, "swarm": SWARM}
 SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6,
         "sm6": SM6, "asbm": BASTION_K}
 STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM, "kh31p": KH31P}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
-             "40n6_tel": N40N6_TEL}
+             "40n6_tel": N40N6_TEL, "swarm_pod": SWARM_POD}

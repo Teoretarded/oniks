@@ -63,6 +63,15 @@ class CombatConfig:
     pantsir_57e6_ammo: int = 12
     pantsir_gun_ammo: int = 700
     pantsir_mag_reload_s: float = 60.0
+    # M4-B loitering-munition swarm pod(s).  DEFAULT 0 (OFF) so the out-of-the-
+    # box battle stays BYTE-IDENTICAL: with n_swarm_pods=0 the world builds NO
+    # SwarmPod, _swarm_cells is 0, and launch_swarm returns None (never spawns a
+    # round).  A non-zero count arms the bundle-launch saturation weapon
+    # (sim/swarm.py + world.launch_swarm); each pod carries swarm_cells_per_pod
+    # cells that refill on the swarm_mag_reload_s timer.
+    n_swarm_pods: int = 0
+    swarm_cells_per_pod: int = 8
+    swarm_mag_reload_s: float = 90.0
     # M3-F4 seeded map preset (0 OPEN SEA / 1 ARCHIPELAGO / 2 NARROW STRAIT /
     # 3 FJORD COAST). DEFAULT 0 so the out-of-the-box battle map is
     # BYTE-IDENTICAL: world/generation.make_field(0, seed) returns the default
@@ -89,6 +98,15 @@ CLAMP_PLAYER_JAMMER: tuple = (0, 1)
 CLAMP_ENEMY_RADARS:  tuple = (0, 6)
 CLAMP_PLAYER_RADARS: tuple = (1, 4)
 CLAMP_PANTSIR:       tuple = (0, 6)
+# M4-B swarm pods: floor 0 (OFF default survives a clamp_config round-trip —
+# the setup-default path runs every field through clamp_config; clamping
+# n_swarm_pods=0 with a (1, ..) range would silently arm the swarm and break
+# the byte-identical out-of-the-box battle).
+CLAMP_SWARM_PODS:    tuple = (0, 4)
+# Cells per pod: at least 4 (a bundle that small could not saturate); ceiling
+# 24 keeps a single SPACE bundle bounded.  Floor 4 is safe because the field is
+# only read when n_swarm_pods > 0.
+CLAMP_SWARM_CELLS:   tuple = (4, 24)
 CLAMP_DRONES:        tuple = (0, 3)
 CLAMP_ONIKS:         tuple = (1, 5)     # Oniks launchers (2 tubes each)
 CLAMP_S300:          tuple = (1, 2)     # S-300 launchers (4 tubes each)
@@ -160,6 +178,9 @@ def clamp_config(
     pantsir_57e6_ammo: int = CombatConfig.pantsir_57e6_ammo,
     pantsir_gun_ammo: int = CombatConfig.pantsir_gun_ammo,
     pantsir_mag_reload_s: float = CombatConfig.pantsir_mag_reload_s,
+    n_swarm_pods: int = CombatConfig.n_swarm_pods,
+    swarm_cells_per_pod: int = CombatConfig.swarm_cells_per_pod,
+    swarm_mag_reload_s: float = CombatConfig.swarm_mag_reload_s,
     map_preset: int = CombatConfig.map_preset,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
@@ -182,6 +203,8 @@ def clamp_config(
     lo_asbm, hi_asbm = CLAMP_ASBM_AMMO
     lo_re, hi_re = CLAMP_RELOAD_S
     lo_mp, hi_mp = CLAMP_MAP_PRESET
+    lo_sp, hi_sp = CLAMP_SWARM_PODS
+    lo_sc, hi_sc = CLAMP_SWARM_CELLS
 
     return CombatConfig(
         seed=int(seed),
@@ -207,6 +230,9 @@ def clamp_config(
         pantsir_gun_ammo=clamp_field(int(pantsir_gun_ammo), lo_gun, hi_gun),
         pantsir_mag_reload_s=clamp_field(float(pantsir_mag_reload_s),
                                           lo_re, hi_re),
+        n_swarm_pods=clamp_field(int(n_swarm_pods), lo_sp, hi_sp),
+        swarm_cells_per_pod=clamp_field(int(swarm_cells_per_pod), lo_sc, hi_sc),
+        swarm_mag_reload_s=clamp_field(float(swarm_mag_reload_s), lo_re, hi_re),
         map_preset=clamp_field(int(map_preset), lo_mp, hi_mp),
     )
 

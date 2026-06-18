@@ -20,7 +20,7 @@ import numpy as np
 from sim.guidance import (STEER_GAIN, STEER_MAX_A, altitude_hold_accel,
                           pn_accel, waypoint_reached)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
-                         mach_scalar)
+                         mach_scalar, speed_of_sound_scalar)
 from world.generation import TERRAIN_MAX_HEIGHT
 
 # --- Phase enum (locked convention) ------------------------------------------
@@ -331,10 +331,17 @@ class Missile:
         # Terminal weave overlay state (Task RTG): the currently applied
         # cross-track position/velocity offsets, the weave clock and the
         # per-salvo phase seed.
+        self.salvo = int(salvo)
         self.weave_phi = (int(salvo) * WEAVE_PHASE_STEP) % (2.0 * math.pi)
         self._weave_t = 0.0
         self._weave_x = self._weave_z = 0.0
         self._weave_vx = self._weave_vz = 0.0
+        # M4-B loitering swarm: an optional COMMANDED ground speed for the
+        # cruise Mach-hold (sim/swarm.compute_swarm_speeds sets it per round so
+        # a bundle reaches the aim point simultaneously).  UNSET (None) is the
+        # LOCKED contract: the _sustainer_thrust Mach-hold then runs the exact
+        # existing arithmetic, byte-for-byte (tests/test_swarm.py guard).
+        self._commanded_speed = None
 
     def _plan_vertical_profile(self):
         """Commanded cruise altitude + the range-to-go at which the hi
@@ -449,16 +456,27 @@ class Missile:
         ce = np.cos(elev)
         return np.array([np.sin(hd) * ce, np.sin(elev), np.cos(hd) * ce])
 
-    def _sustainer_thrust(self, m_now, drag_ff, dt):
+    def _sustainer_thrust(self, m_now, drag_ff, dt, alt=0.0):
         """Mach-hold thrust (PI-like: P + drag feedforward); burns ramjet
         fuel. ``m_now``/``drag_ff`` are the caller's already-computed Mach
-        and drag (Task GATE perf: one atmosphere evaluation per step)."""
+        and drag (Task GATE perf: one atmosphere evaluation per step).
+
+        M4-B: when ``self._commanded_speed`` is set (the loitering swarm's
+        per-round time-on-target ground speed), the target Mach is that
+        commanded GROUND speed expressed in the LOCAL atmosphere
+        (commanded / speed_of_sound(alt)) instead of the weapon cruise Mach.
+        The override is GUARDED so the UNSET (None) path is byte-for-byte the
+        existing arithmetic — no reordering, the cruise_mach_* selection and
+        the thrust line are untouched (the LOCKED Oniks/duel contract)."""
         if self.fuel <= 0.0:
             return 0.0
         w = self.weapon
-        target_mach = (w.cruise_mach_hi
-                       if self.hi and self.phase in (PH_CLIMB, PH_CRUISE)
-                       else w.cruise_mach_lo)
+        if self._commanded_speed is None:
+            target_mach = (w.cruise_mach_hi
+                           if self.hi and self.phase in (PH_CLIMB, PH_CRUISE)
+                           else w.cruise_mach_lo)
+        else:
+            target_mach = self._commanded_speed / speed_of_sound_scalar(alt)
         thrust = KP_THRUST * (target_mach - m_now) * THRUST_SCALE + drag_ff
         thrust = min(max(thrust, 0.0), w.max_thrust)
         self.fuel = max(0.0, self.fuel - thrust / (w.isp * GRAVITY) * dt)
@@ -723,7 +741,7 @@ class Missile:
             m_now = mach_scalar(speed, alt)
             drag = drag_force_scalar(speed, alt, cd_from_mach_scalar(m_now),
                                      w.ref_area)
-            thrust = self._sustainer_thrust(m_now, drag, dt)
+            thrust = self._sustainer_thrust(m_now, drag, dt, alt)
             gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
 
         # --- semi-implicit Euler + phase shaping clamps (scalar: Task 22) ---

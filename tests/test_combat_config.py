@@ -30,6 +30,7 @@ from world.combat_config import (
     CLAMP_PLAYER_RADARS,
     CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_ASBM_AMMO,
     CLAMP_RELOAD_S,
+    CLAMP_SWARM_PODS, CLAMP_SWARM_CELLS,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
 )
 
@@ -75,6 +76,12 @@ def test_defaults_match_locked_schema():
     # out-of-the-box battle map is byte-identical (make_field(0, .) is the
     # default field); presets 1-3 add seeded terrain.
     assert c.map_preset == 0
+    # M4-B: the loitering swarm pod count DEFAULTS to 0 (OFF) so the out-of-the-
+    # box battle stays byte-identical (no SwarmPod built -> _swarm_cells 0 ->
+    # launch_swarm returns None).
+    assert c.n_swarm_pods == 0
+    assert c.swarm_cells_per_pod == 8
+    assert c.swarm_mag_reload_s == 90.0
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +224,35 @@ def test_clamp_config_asbm_pool():
     assert clamp_config(asbm_ammo=4).asbm_ammo == 4
     # A default-config build (no edits) keeps the ASBM OFF.
     assert clamp_config().asbm_ammo == 0
+
+
+def test_clamp_config_swarm_pods():
+    """M4-B swarm pod count clamp round-trip. LIKE the ASBM/ARM pools its floor
+    is 0, so the OFF default survives the default-through-setup path
+    (clamp_config runs every field): clamping n_swarm_pods=0 with a (1, ..)
+    range would silently arm the swarm and break the byte-identical out-of-the-
+    box battle. Two-sided: floor 0 preserved, ceiling honoured, default
+    unchanged."""
+    assert CLAMP_SWARM_PODS[0] == 0, "swarm pod floor must be 0 (OFF survivable)"
+    # A 0 count stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_swarm_pods=0).n_swarm_pods == 0
+    # A negative slider clamps up to the 0 floor.
+    assert clamp_config(n_swarm_pods=-5).n_swarm_pods == CLAMP_SWARM_PODS[0]
+    # The ceiling is honoured.
+    assert clamp_config(n_swarm_pods=9999).n_swarm_pods == CLAMP_SWARM_PODS[1]
+    # An in-band value round-trips unchanged.
+    assert clamp_config(n_swarm_pods=2).n_swarm_pods == 2
+    # A default-config build (no edits) keeps the swarm OFF.
+    assert clamp_config().n_swarm_pods == 0
+    # Cells-per-pod round-trips and the documented default (8) survives the
+    # default-through-setup path (floor 4 would otherwise be a regression).
+    assert clamp_config().swarm_cells_per_pod == 8
+    assert clamp_config(swarm_cells_per_pod=1).swarm_cells_per_pod \
+        == CLAMP_SWARM_CELLS[0]
+    assert clamp_config(swarm_cells_per_pod=999).swarm_cells_per_pod \
+        == CLAMP_SWARM_CELLS[1]
+    # The reload uses the shared CLAMP_RELOAD_S; the default survives.
+    assert clamp_config().swarm_mag_reload_s == 90.0
 
 
 def test_clamp_config_player_jammer_flag():

@@ -313,6 +313,10 @@ class SandboxState(GameState):
         self.profile = "hi-lo"
         self.target_point = None        # float64 (3,) aim point (alt for air)
         self.waypoints: list = []       # (x, z) flown before the target
+        # M4-B loitering-swarm arrival mode: "sync" (coordinated time-on-target,
+        # the saturation default) or "max" (plain max-speed bundle).  Toggled by
+        # the swarm_arrival_mode key (game/keybinds.py).
+        self.swarm_arrival_mode = "sync"
         self.followed = None            # camera subject the cinematic rig
         #                                 tracks: a missile, a TEL
         #                                 StaticSubject or a contact entity
@@ -561,6 +565,16 @@ class SandboxState(GameState):
         self.app.audio.ui_click()
         return self.oniks_weapon
 
+    def toggle_swarm_arrival_mode(self) -> str:
+        """H (swarm_arrival_mode binding): toggle the loitering-swarm bundle
+        between SYNC (coordinated time-on-target — the saturation default) and
+        MAX (plain max-speed bundle, no self-adjustment).  A graceful no-op off
+        the SWARM platform other than flipping the stored mode."""
+        self.swarm_arrival_mode = ("max" if self.swarm_arrival_mode == "sync"
+                                   else "sync")
+        self.app.audio.ui_click()
+        return self.swarm_arrival_mode
+
     def _selected_air_track(self):
         """The selected contact's track if it is a live air track, else None."""
         sid = self.tactical_map.selected_contact
@@ -607,6 +621,8 @@ class SandboxState(GameState):
         if self.active_platform == "drone":
             self.show_hint(HINT_DRONE_RECON)
             return None
+        if self.active_platform == "swarm":
+            return self._request_swarm_launch()
         if self.active_platform == "s300":
             return self._request_sam_launch()
         if self.oniks_weapon == "kh31p":
@@ -691,6 +707,35 @@ class SandboxState(GameState):
             self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)
             self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
+        return m
+
+    def _request_swarm_launch(self):
+        """SPACE with the SWARM pod active (M4-B): bundle-fire every ready cell
+        at the map aim point for a coordinated time-on-target.  The pod takes a
+        SURFACE point (like the Oniks), NOT an air track.  ``swarm_arrival_mode``
+        selects SYNC (time-on-target saturation) vs MAX (plain max-speed
+        bundle).  No aim point / empty pod -> no fire.  Returns the FIRST
+        spawned round (the camera follows it), or None."""
+        if self.target_point is None:
+            return None
+        launch_swarm = getattr(self.world, "launch_swarm", None)
+        if launch_swarm is None:
+            return None
+        rounds = launch_swarm(self.profile, self.target_point,
+                              tuple(self.waypoints),
+                              sync=(self.swarm_arrival_mode == "sync"))
+        if not rounds:
+            return None
+        m = rounds[0]
+        self.followed = m
+        self.rig.retarget()
+        # The whole bundle clears the pods together: one muzzle effect per round.
+        for r in rounds:
+            self.effects.muzzle_blast(
+                r.pos, ground_y=float(self._tel_pos[1]) + 1.5)
+        self._spawn_cover_debris(m.pos)
+        self.app.audio.play("launch", pos=m.pos)
+        self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
         return m
 
     def _request_sam_launch(self):

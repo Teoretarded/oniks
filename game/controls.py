@@ -38,7 +38,22 @@ TIME_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0)
 # (bastion -> s300 -> drone -> ...). Pure data + helper so the cycle is
 # unit-testable headless (game/sandbox.py is GL-touching).
 PLATFORMS_SANDBOX = ("bastion", "s300")
+# COMBAT TAB cycle: M4-B adds the loitering-swarm pod as a fourth tasking
+# platform (bastion -> s300 -> drone -> swarm -> ...) ONLY when a pod is armed
+# (n_swarm_pods > 0); the default battle keeps the three-platform cycle so it
+# is byte-identical.  combat_platforms() builds the right tuple from the world.
 PLATFORMS_COMBAT = ("bastion", "s300", "drone")
+PLATFORMS_COMBAT_SWARM = ("bastion", "s300", "drone", "swarm")
+
+
+def combat_platforms(world) -> tuple:
+    """The COMBAT TAB cycle for ``world``: the four-platform cycle (with the
+    swarm pod) when a swarm pod is armed (``_swarm_mag_cap`` > 0), else the
+    default three-platform cycle.  Pure + headless: reads only a magazine
+    attribute, so the byte-identical default battle never grows the swarm tab."""
+    if getattr(world, "_swarm_mag_cap", 0) > 0:
+        return PLATFORMS_COMBAT_SWARM
+    return PLATFORMS_COMBAT
 
 
 def next_platform(current: str, platforms) -> str:
@@ -185,6 +200,8 @@ class SandboxControls:
             sandbox.cycle_sam_round()
         elif action == "oniks_weapon":
             sandbox.cycle_oniks_weapon()
+        elif action == "swarm_arrival_mode":
+            sandbox.toggle_swarm_arrival_mode()
         elif action == "jam":
             sandbox.toggle_jam()
         elif action == "pause":

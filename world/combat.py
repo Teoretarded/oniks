@@ -139,7 +139,7 @@ from __future__ import annotations
 import numpy as np
 
 from sim.arsenal import (BASTION_K, KH31P, N40N6, ONIKS, S300, S300_TEL,
-                         TOMAHAWK, ZIRCON)
+                         SWARM, SWARM_POD, TOMAHAWK, ZIRCON)
 from sim.asbm import AsbmMissile
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.commander import EnemyCommander
@@ -159,6 +159,7 @@ from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
 from sim.sam import SamMissile
 from sim.strike import PlayerArmMissile, StrikeMissile
+from sim.swarm import compute_swarm_speeds
 from world.combat_config import CombatConfig, DEFAULT as _DEFAULT_CONFIG
 from world import generation
 from world.generation import BASE_POS, SEED, terrain_height_scalar
@@ -342,6 +343,27 @@ PANTSIR_STRUCT_HP = 2
 # +Z with the hull, NOT +X.  Height 4.6 m tops the turret (model Y 4.58 m).
 PANTSIR_STRUCT_DIMS = (3.0, 8.0, 4.6)   # (X beam, Z length, Y height)
 
+# --- M4-B loitering swarm pod ---------------------------------------------------
+# The bundle-launch pods sit beside the Oniks battery at the home base.  Each
+# pod is a destructible Structure (a soft-skinned multi-cell box: two
+# 250 kg-class hits mission-kill it, same ladder as the Pantsir) wrapped around
+# the shared cell magazine; killing every pod struct does NOT trip the lose
+# condition (only bastion_tel does — mirror of the Pantsir wrapper).
+SWARM_POD_SPACING_M = 7.0       # gap between pods, side by side
+SWARM_POD_OFFSET = (0.0, 0.0, -40.0)   # m from BASE_POS (set back from the TELs)
+SWARM_POD_STRUCT_HP = 2
+SWARM_POD_STRUCT_DIMS = (4.0, 5.0, 2.4)   # (X beam, Z length, Y height)
+# Multi-axis attack spread: each round detours through its own lateral spread
+# waypoint (a different attack bearing) before converging on the shared aim
+# point — the realistic loitering-swarm geometry that splits the defender's
+# fire across bearings.  The spread is scaled to the run-in distance (a
+# FRACTION of the launch->first-tail range, capped) so the per-round arcs differ
+# by a meaningful amount the time-on-target math equalizes, on both short and
+# long shots.  The outer arcs run near v_max; the inner ones dawdle.
+SWARM_FAN_FRAC = 0.18           # lateral spread as a fraction of run-in range
+SWARM_FAN_MAX_HALF_WIDTH_M = 12_000.0   # cap on the half-width
+SWARM_FAN_SPREAD_FRAC = 0.33    # how far out the spread waypoint sits
+
 # --- Phase 7: enemy ground radars (spec §5.5, config.n_enemy_radars) -----------
 # Enemy ground radar deployment: on the enemy continent (z >= 500 km, dry land
 # guaranteed).  X positions are drawn uniformly in the band below.  Z is fixed
@@ -469,6 +491,16 @@ class CombatWorld(WorldState):
         # see _apply_arm_radar_kills (kept apart from self.missiles because the
         # base step prunes dead rounds before the credit pass runs).
         self._arm_radar_bindings: list[tuple] = []
+        # M4-B loitering swarm: the bundle-launch pod magazine.  DEFAULT
+        # n_swarm_pods=0 -> _swarm_cells=0, no pod struct, launch_swarm returns
+        # None: the out-of-the-box battle is byte-identical (no pod built, the
+        # round never spawns).  _build_swarm_pods sets _swarm_pod_positions
+        # (used by the structures below + any renderer) and the shared cell
+        # magazine + its config-driven refill timer.
+        self._swarm_fired = 0
+        self._build_swarm_pods(config.n_swarm_pods,
+                               config.swarm_cells_per_pod,
+                               config.swarm_mag_reload_s)
 
         destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
         # The enemy side's fire control: CIWS randomness derives from the
@@ -547,6 +579,15 @@ class CombatWorld(WorldState):
                 f"{spec['unit_id']}_struct", "pantsir", pos.copy(),
                 dims=PANTSIR_STRUCT_DIMS, hp=PANTSIR_STRUCT_HP,
                 on_destroyed=lambda _s, u=unit: u.kill()))
+        # M4-B: one destructible Structure per loitering-swarm pod (kind
+        # "swarm_pod" is NOT in sim/bases.py's locked HP/dims tables, so dims +
+        # hp pass explicitly here, like the Pantsir wrapper).  ``defeated``
+        # checks only bastion_tel, so a pod death never trips the lose
+        # condition.  Empty list when n_swarm_pods=0 (byte-identical default).
+        for i, ppos in enumerate(self._swarm_pod_positions):
+            self.structures.append(Structure(
+                f"swarm_pod_{i:02d}", "swarm_pod", ppos.copy(),
+                dims=SWARM_POD_STRUCT_DIMS, hp=SWARM_POD_STRUCT_HP))
         # The controller defends EVERY player structure (Bastion/S-300/radar
         # + the Pantsirs themselves): it prioritises the threat closest in
         # time-to-impact to any protected asset.  Stepped in step() AFTER the
@@ -1965,6 +2006,139 @@ class CombatWorld(WorldState):
         self._asbm_ammo -= 1
         return m
 
+    # ----------------------------------------------------- M4-B swarm pod
+    def _build_swarm_pods(self, n: int, cells_per_pod: int,
+                          mag_reload_s: float) -> None:
+        """N loitering-swarm pods set back from the Oniks battery, sharing one
+        cell magazine (_swarm_cells, capacity _swarm_mag_cap).  Sets
+        _swarm_pod_positions (used by the destructible structures + renderer).
+        DEFAULT n=0 -> NO pod, _swarm_cells=0, launch_swarm returns None: the
+        out-of-the-box battle is byte-identical (the round never spawns)."""
+        base = np.array(BASE_POS, dtype=np.float64)
+        off = np.asarray(SWARM_POD_OFFSET, dtype=np.float64)
+        n = max(0, int(n))
+        self._swarm_pod_positions = []
+        for i in range(n):
+            dx = (i - (n - 1) * 0.5) * SWARM_POD_SPACING_M
+            self._swarm_pod_positions.append(base + off + np.array([dx, 0.0, 0.0]))
+        self._swarm_cell_cap_per_pod = max(0, int(cells_per_pod))
+        cap = n * self._swarm_cell_cap_per_pod
+        self._swarm_cells = cap                  # cells loaded and ready
+        self._swarm_mag_cap = cap
+        self._swarm_mag_reload_s = float(mag_reload_s)
+        self._swarm_mag_reload_left = 0.0
+
+    def launch_swarm(self, profile, aim_point, waypoints=(), sync=True):
+        """Bundle-fire EVERY ready swarm cell at ``aim_point`` for a coordinated
+        time-on-target (M4-B).  One Missile(SWARM, ...) per ready cell, fanned
+        across the launch front so the per-round path lengths differ; the shared
+        T and per-round commanded GROUND speed come from
+        sim/swarm.compute_swarm_speeds (pure math, deterministic), and each
+        round's weave is seeded by its salvo ordinal so the bundle does not
+        formate.  The cell magazine is decremented by N; the empty pool then
+        runs the config-driven refill timer.
+
+        ``sync`` True  -> the per-round commanded speeds self-adjust so the
+                          rounds arrive simultaneously (the saturation mode);
+                 False -> every round runs at v_max (a plain MAX-speed bundle,
+                          no time-on-target — the trickle/compare mode).
+
+        Returns the list of spawned rounds, or None when no cell is ready
+        (default config swarm pods 0 -> always None: byte-identical battle).
+        """
+        if self.defeated:
+            return None
+        n = int(getattr(self, "_swarm_cells", 0) or 0)
+        if n <= 0:
+            return None
+        base = np.array(BASE_POS, dtype=np.float64)
+        tp = np.asarray(aim_point, dtype=np.float64)
+        route_tail = [(float(x), float(z)) for (x, z) in waypoints]
+        route_tail.append((float(tp[0]), float(tp[2])))
+        # Each round fans out to its OWN lateral spread waypoint roughly a third
+        # of the way to the aim point (the realistic "spread the attack axes"
+        # swarm geometry: multiple bearings saturate the point defense), then
+        # converges on the shared route tail.  The outer rounds fly a measurably
+        # LONGER arc than the inner ones, so the time-on-target math has real
+        # path-length differences to equalize — the inner rounds DAWDLE while
+        # the outer ones run near v_max so the whole bundle arrives together.
+        # ALL rounds share ONE launch point (the pod front centre).  The fan is
+        # synthesised purely via the per-round spread WAYPOINTS below, not by
+        # spawning each round from its own pod — so SWARM_POD_SPACING_M and the
+        # _swarm_pod_positions list are render/destructibility-only (the visible
+        # pods sit side by side; every round emerges from this shared XZ).  This
+        # keeps the time-on-target math self-consistent: compute_swarm_speeds
+        # takes a single launch_xz and the path lengths are measured from it.
+        launch_xz = (float(base[0]),
+                     float(base[2] + SWARM_POD_OFFSET[2]))
+        first_tail = route_tail[0]
+        # The lateral axis is perpendicular to the launch -> first-tail bearing.
+        dx = first_tail[0] - launch_xz[0]
+        dz = first_tail[1] - launch_xz[1]
+        d = float(np.hypot(dx, dz)) or 1.0
+        perp = (-dz / d, dx / d)               # right-hand horizontal perp
+        half_width = min(SWARM_FAN_MAX_HALF_WIDTH_M, d * SWARM_FAN_FRAC)
+        # Spread waypoint sits SWARM_FAN_SPREAD_FRAC of the way out toward the
+        # first tail point, offset laterally per round (the attack-axis spread).
+        sf = SWARM_FAN_SPREAD_FRAC
+        spread_base = (launch_xz[0] + dx * sf, launch_xz[1] + dz * sf)
+        per_round_routes = []
+        for i in range(n):
+            frac = 0.0 if n == 1 else (-1.0 + 2.0 * i / (n - 1))
+            off = frac * half_width
+            spread = (spread_base[0] + perp[0] * off,
+                      spread_base[1] + perp[1] * off)
+            per_round_routes.append([spread, *route_tail])
+        v_max = SWARM.cruise_mach_hi * 340.0
+        v_min = SWARM.cruise_mach_lo * 340.0
+        rounds = []
+        if sync:
+            # ONE shared time-on-target T across the whole fan via the pure
+            # compute_swarm_speeds (deterministic, no RNG / wall-clock).
+            speeds = compute_swarm_speeds(launch_xz, per_round_routes, v_max,
+                                          margin=8.0, v_min=v_min)
+        else:
+            speeds = [v_max] * n
+        # Spawn at the launcher AGL the rest of the codebase uses
+        # (terrain_height_scalar AT the spawn XZ, cf. lines 534/560/663/884):
+        # base[1] is the terrain height under BASE_POS, but the pod front sits
+        # SWARM_POD_OFFSET[2] back where the terrain is ~1.3 m HIGHER, so a
+        # round spawned at base[1] starts underground and goes PH_DEAD on
+        # frame 1.  Evaluating terrain at launch_xz puts it on the surface.
+        spawn_y = float(terrain_height_scalar(launch_xz[0], launch_xz[1]))
+        for i in range(n):
+            pos = np.array([launch_xz[0], spawn_y, launch_xz[1]],
+                           dtype=np.float64)
+            # The round's own waypoints: its lateral spread point, then the
+            # shared player waypoints (the aim point is the Missile target).
+            spread = per_round_routes[i][0]
+            rnd_wps = (spread,) + tuple(waypoints)
+            fx, fz = rnd_wps[0]
+            heading = float(np.arctan2(fx - pos[0], fz - pos[2]))
+            m = Missile(SWARM, pos, heading, profile, tp,
+                        waypoints=rnd_wps, salvo=self._swarm_fired)
+            m.is_hostile = False
+            m._commanded_speed = float(speeds[i])
+            self._swarm_fired += 1
+            self.missiles.append(m)
+            rounds.append(m)
+        self._swarm_cells = 0                      # the whole bundle launched
+        if self._swarm_mag_cap and self._swarm_mag_cap > 0:
+            self._swarm_mag_reload_left = self._swarm_mag_reload_s
+        return rounds
+
+    def _step_swarm_pod(self, dt: float) -> None:
+        """Cell-magazine refill: once a bundle empties the pool the reload timer
+        runs and refills it to capacity (renewable, rate-limited — the same
+        mechanic as the Oniks magazine).  No-op when no pod is configured."""
+        if getattr(self, "_swarm_mag_cap", 0) <= 0:
+            return
+        if self._swarm_cells <= 0 and self._swarm_mag_reload_left > 0.0:
+            self._swarm_mag_reload_left = max(
+                0.0, self._swarm_mag_reload_left - dt)
+            if self._swarm_mag_reload_left <= 0.0:
+                self._swarm_cells = self._swarm_mag_cap
+
     def _step_oniks_tubes(self, dt: float) -> None:
         """Per-tube reload: a fired tube re-cocks over _oniks_tube_reload_s,
         then pulls a round from the magazine reserve (rounds beyond the
@@ -2288,6 +2462,7 @@ class CombatWorld(WorldState):
         super().step(dt)
         self._step_oniks_tubes(dt)        # per-tube Oniks salvo reload
         self._step_s300_tubes(dt)         # per-tube S-300 salvo reload
+        self._step_swarm_pod(dt)          # M4-B swarm cell-magazine refill
         self._step_drones(dt)
         self._step_enemy_air(dt)
         self.defense.step(self, dt)
