@@ -39,15 +39,25 @@ import time
 import numpy as np
 
 from engine.meshdata import MeshData, make_grid
+from world import generation
 from world.generation import ISLANDS, SEED, fbm, terrain_height
 
-FEATURES = [  # (name, x0, x1, z0, z1) bounding rects
-    ("home", -340_000.0, 340_000.0, -40_000.0, 12_000.0),
-    ("enemy", -340_000.0, 340_000.0, 488_000.0, 560_000.0),
-] + [
-    (f"island_{i}", cx - 2.2 * r, cx + 2.2 * r, cz - 2.2 * r, cz + 2.2 * r)
-    for i, (cx, cz, r, _peak) in enumerate(ISLANDS)
-]
+
+def _features_for_islands(islands):
+    """The (name, x0, x1, z0, z1) bounding rects for the two continents plus a
+    padded box around each island.  M3-F4: the island boxes come from the
+    ACTIVE field's island list so the 3D coast MATCHES the sim field (the
+    renderer must draw what the sim masks with — a mismatch is a fog bug)."""
+    return [
+        ("home", -340_000.0, 340_000.0, -40_000.0, 12_000.0),
+        ("enemy", -340_000.0, 340_000.0, 488_000.0, 560_000.0),
+    ] + [
+        (f"island_{i}", cx - 2.2 * r, cx + 2.2 * r, cz - 2.2 * r, cz + 2.2 * r)
+        for i, (cx, cz, r, _peak) in enumerate(islands)
+    ]
+
+
+FEATURES = _features_for_islands(ISLANDS)   # default-map features (module-level)
 
 LODS = [(60.0, 30_000.0), (300.0, 130_000.0), (1200.0, 1e12)]  # (cell_m, max_draw_dist)
 
@@ -115,11 +125,16 @@ def _grid_coords(rect, cell: float, margin: int = 0):
     return xs, zs
 
 
-def _sample_heights(rect, cell: float, margin: int = 0):
-    """Sample terrain_height on a regular grid covering ``rect`` (+ optional
-    ``margin`` extra rows/cols each side). Returns (xs, zs, heights)."""
+def _sample_heights(rect, cell: float, margin: int = 0, height_fn=terrain_height):
+    """Sample the heightfield on a regular grid covering ``rect`` (+ optional
+    ``margin`` extra rows/cols each side). Returns (xs, zs, heights).
+
+    ``height_fn`` defaults to the module ``terrain_height`` (the default map,
+    byte-identical for existing callers/tests); M3-F4's ``Terrain`` passes the
+    ACTIVE preset field's vectorized ``height`` so the 3D coast matches the
+    sim field."""
     xs, zs = _grid_coords(rect, cell, margin)
-    return xs, zs, terrain_height(xs[None, :], zs[:, None])
+    return xs, zs, height_fn(xs[None, :], zs[:, None])
 
 
 def _grid_mesh_steps(xs, zs, h, colors, dhdx, dhdz, center):
@@ -204,9 +219,11 @@ def _mesh_from_heights(xs, zs, heights, h_ref=None, margin: int = 0,
     return make_grid(xs, zs, h, _colorize(xs, zs, h, slope, hmax))
 
 
-def build_feature_mesh(rect, cell: float, h_ref=None) -> MeshData | None:
-    """Terrain mesh for ``rect`` at ``cell`` resolution; None if all ocean."""
-    xs, zs, h = _sample_heights(rect, cell)
+def build_feature_mesh(rect, cell: float, h_ref=None,
+                       height_fn=terrain_height) -> MeshData | None:
+    """Terrain mesh for ``rect`` at ``cell`` resolution; None if all ocean.
+    ``height_fn`` defaults to the module terrain (byte-identical)."""
+    xs, zs, h = _sample_heights(rect, cell, height_fn=height_fn)
     if float(h.max()) <= 0.0:
         return None                            # rect entirely ocean: skip
     return _mesh_from_heights(xs, zs, h, h_ref)
@@ -240,9 +257,9 @@ def _catmull_rom_weights(n_cells: int, factor: int) -> np.ndarray:
 
 class _Tile:
     __slots__ = ("rect", "center", "radius", "h_ref", "meshes",
-                 "nx", "nz", "h1")
+                 "nx", "nz", "h1", "height_fn")
 
-    def __init__(self, rect, h_ref: float):
+    def __init__(self, rect, h_ref: float, height_fn=terrain_height):
         x0, x1, z0, z1 = rect
         self.rect = rect
         self.center = np.array([(x0 + x1) * 0.5, 0.0, (z0 + z1) * 0.5])
@@ -251,6 +268,9 @@ class _Tile:
         self.meshes = [None, None, None]   # per-LOD GPU meshes
         self.nx = self.nz = 0              # LOD1 grid cell counts
         self.h1 = None                     # LOD1 heights incl. margin
+        # M3-F4: the ACTIVE field's vectorized height (default map == module
+        # terrain_height) so the streamed LOD1/LOD0 meshes match the sim field.
+        self.height_fn = height_fn
 
 
 def _lod1_job(tile: _Tile):
@@ -260,9 +280,10 @@ def _lod1_job(tile: _Tile):
     cell = LODS[1][0]
     xs, zs = _grid_coords(tile.rect, cell, _LOD1_MARGIN)
     h = np.empty((len(zs), len(xs)), dtype=np.float64)
+    height_fn = tile.height_fn
     for r0 in range(0, len(zs), _SAMPLE_ROWS):
         r1 = min(r0 + _SAMPLE_ROWS, len(zs))
-        h[r0:r1] = terrain_height(xs[None, :], zs[r0:r1, None])
+        h[r0:r1] = height_fn(xs[None, :], zs[r0:r1, None])
         yield None
     tile.nx = len(xs) - 1 - 2 * _LOD1_MARGIN   # interior cell counts
     tile.nz = len(zs) - 1 - 2 * _LOD1_MARGIN
@@ -295,15 +316,23 @@ class Terrain:
     build spreads over ~10-30 frames instead of dropping 3-4 of them.
     """
 
-    def __init__(self, report: bool = True):
+    def __init__(self, field=None, report: bool = True):
         from engine.mesh import Mesh       # deferred: keep module GL-free
         self._Mesh = Mesh
+        # M3-F4: the ACTIVE terrain field. Default == generation.DEFAULT_FIELD
+        # (the legacy default map; FEATURES + module terrain_height reproduce it
+        # byte-for-byte). A preset world passes its world.height_field so the 3D
+        # coast/islands are sampled from the SAME field the sim masks LOS with —
+        # the renderer draws exactly what the sensors see (no fog mismatch).
+        self._field = field if field is not None else generation.DEFAULT_FIELD
+        height_fn = self._field.height          # vectorized field sampler
+        features = _features_for_islands(self._field.islands)
         self.tiles: list[_Tile] = []
         self._lod0_live: list[_Tile] = []
         self._jobs: list[tuple[_Tile, int, object]] = []  # FIFO (tile, lod, gen)
         self._pending: set[tuple[int, int]] = set()       # (tile id, lod)
         total_verts = 0
-        for _name, x0, x1, z0, z1 in FEATURES:
+        for _name, x0, x1, z0, z1 in features:
             ntx = max(1, int(np.ceil((x1 - x0) / _TILE)))
             ntz = max(1, int(np.ceil((z1 - z0) / _TILE)))
             sx, sz = (x1 - x0) / ntx, (z1 - z0) / ntz
@@ -312,14 +341,15 @@ class Terrain:
                 for tj in range(ntx):
                     rect = (x0 + tj * sx, x0 + (tj + 1) * sx,
                             z0 + ti * sz, z0 + (ti + 1) * sz)
-                    xs, zs, h = _sample_heights(rect, LODS[2][0], margin=1)
+                    xs, zs, h = _sample_heights(rect, LODS[2][0], margin=1,
+                                                height_fn=height_fn)
                     if float(h[1:-1, 1:-1].max()) > 0.0:
                         sampled.append((rect, xs, zs, h))
             if not sampled:
                 continue
             h_ref = max(float(h[1:-1, 1:-1].max()) for _r, _x, _z, h in sampled)
             for rect, xs, zs, h in sampled:
-                tile = _Tile(rect, h_ref)
+                tile = _Tile(rect, h_ref, height_fn=height_fn)
                 md = _mesh_from_heights(xs, zs, h, h_ref, margin=1,
                                         center=(tile.center[0], tile.center[2]))
                 tile.meshes[2] = self._Mesh(md)

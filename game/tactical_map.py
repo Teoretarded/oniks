@@ -14,6 +14,7 @@ Screen coords: origin top-left, pixels. World: X = east (right), Z = north
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import threading
@@ -24,8 +25,9 @@ import pygame
 from engine.text import BODY_SIZE, HEADER_SIZE
 from sim.arsenal import ONIKS, S300
 from sim.sam import SamMissile
-from world.generation import (BASE_POS, LANES, SAM_SITE_POS, SEED, SITES,
-                              terrain_height, terrain_height_scalar)
+from world.generation import (BASE_POS, DEFAULT_FIELD, LANES, SAM_SITE_POS,
+                              SEED, SITES, terrain_height,
+                              terrain_height_scalar)
 
 # --- Map texture extent (plan-fixed) ------------------------------------------
 
@@ -175,15 +177,19 @@ SAND = (166.0, 153.0, 116.0)
 SAND_HEIGHT = 2.5              # m of land that reads as beach
 
 
-def build_map_pixels(n: int = MAP_TEX_N) -> np.ndarray:
-    """Colorize ``terrain_height`` on an n x n grid over the map extent.
+def build_map_pixels(n: int = MAP_TEX_N, height_fn=terrain_height) -> np.ndarray:
+    """Colorize the heightfield on an n x n grid over the map extent.
 
     Returns (n, n, 3) uint8, row 0 = north (z = MAP_Z_MAX), so it uploads
     directly as a GL texture with v=0 at the top of the map quad. Pure numpy.
+
+    ``height_fn`` defaults to the module ``terrain_height`` (the default map,
+    byte-identical for the cached texture); a caller can pass an active preset
+    field's vectorized ``height`` to colorize a preset map.
     """
     xs = np.linspace(MAP_X_MIN, MAP_X_MAX, n)
     zs = np.linspace(MAP_Z_MAX, MAP_Z_MIN, n)          # row 0 = north
-    h = terrain_height(xs[None, :], zs[:, None])
+    h = height_fn(xs[None, :], zs[:, None])
 
     def lerp(c0, c1, t):
         t = np.clip(t, 0.0, 1.0)[..., None]
@@ -209,26 +215,56 @@ def build_map_pixels(n: int = MAP_TEX_N) -> np.ndarray:
 # build_map_pixels measures seconds even with the masked terrain_height — far
 # too long to run on the main thread when M is first pressed (the app went
 # "Not Responding" for the whole build: user bug report 2026-06-12). The
-# pixels are world-seed-fixed, so: build ONCE in a daemon thread (kicked off
-# at sandbox construction, while the BUILDING WORLD frame shows), cache the
-# result to disk keyed by seed/size, and have the map draw a BUILDING MAP
-# placeholder on the rare early M press. Module-level so a sandbox restart
-# reuses the array.
+# pixels are field-fixed, so: build ONCE per active field in a daemon thread
+# (kicked off at sandbox construction, while the BUILDING WORLD frame shows),
+# cache the result to disk keyed by field/size, and have the map draw a
+# BUILDING MAP placeholder on the rare early M press. Module-level so a sandbox
+# restart reuses the array.
+#
+# M3-F4 FOG FIX: the build is now keyed on the ACTIVE map field, not just the
+# module SEED — a seeded preset (world.height_field != DEFAULT_FIELD) colorizes
+# its OWN island terrain and caches/loads under its own key, so the 2D map
+# shows the SAME field the sim masks LOS with (no perception/fog mismatch).
+# The DEFAULT field keeps the EXACT legacy key/path -> the out-of-the-box
+# (preset 0) map texture is byte-identical (the cached .npy is reused unchanged).
 
 _pixels_lock = threading.Lock()
-_pixels: np.ndarray | None = None
-_pixels_thread: threading.Thread | None = None
+# key (see _field_key) -> built (n, n, 3) uint8 array.
+_pixels_by_key: dict[object, np.ndarray] = {}
+# key -> the daemon thread currently building it (at most one per key).
+_pixels_threads: dict[object, threading.Thread] = {}
 
 
-def _map_cache_path() -> str:
+def _field_key(field):
+    """A stable, hashable cache key for the active map ``field`` (or None == the
+    default field).  The DEFAULT field returns None so it reuses the EXACT
+    legacy in-memory slot + disk path (preset 0 byte-identical).  A preset field
+    keys on the terrain that distinguishes its colorized pixels: the field seed,
+    its per-field max ceiling and its island list (the only inputs that move a
+    texel vs the default coast/floor noise)."""
+    if field is None or field is DEFAULT_FIELD:
+        return None
+    islands = tuple(tuple(float(c) for c in isl) for isl in field.islands)
+    return (int(field.seed), float(field.max_height), islands)
+
+
+def _map_cache_path(key) -> str:
+    """Disk path for a built map array.  ``key is None`` (the default field)
+    returns the EXACT legacy filename so the out-of-the-box map texture loads
+    byte-identically; a preset key hashes to its own stable filename."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, "cache",
-                        f"map_pixels_v1_seed{SEED}_{MAP_TEX_N}.npy")
+    if key is None:
+        name = f"map_pixels_v1_seed{SEED}_{MAP_TEX_N}.npy"
+    else:
+        # Deterministic, filesystem-safe digest of the field key (so the same
+        # preset+seed reuses one file across restarts).
+        digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:16]
+        name = f"map_pixels_v1_preset_{digest}_{MAP_TEX_N}.npy"
+    return os.path.join(root, "cache", name)
 
 
-def _build_or_load_pixels() -> None:
-    global _pixels
-    path = _map_cache_path()
+def _build_or_load_pixels(key, height_fn) -> None:
+    path = _map_cache_path(key)
     px = None
     try:
         arr = np.load(path)
@@ -237,33 +273,43 @@ def _build_or_load_pixels() -> None:
     except (OSError, ValueError):
         px = None                       # missing/corrupt cache: rebuild
     if px is None:
-        px = build_map_pixels()
+        px = build_map_pixels(height_fn=height_fn)
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             np.save(path, px)
         except OSError:
             pass                        # cache is an optimization, never fatal
     with _pixels_lock:
-        _pixels = px
+        _pixels_by_key[key] = px
 
 
-def ensure_map_pixels_async() -> None:
-    """Start (at most one) background build/load of the map pixel array."""
-    global _pixels_thread
+def ensure_map_pixels_async(field=None) -> None:
+    """Start (at most one) background build/load of ``field``'s map pixel array.
+
+    ``field`` is the active ``HeightField`` (``world.height_field``); None or the
+    default field builds the byte-identical default map.  Idempotent per field:
+    a second call for an already-built / in-flight field is a no-op."""
+    key = _field_key(field)
+    height_fn = (DEFAULT_FIELD.height if key is None else field.height)
     with _pixels_lock:
-        if _pixels is not None or (
-                _pixels_thread is not None and _pixels_thread.is_alive()):
+        if key in _pixels_by_key:
             return
-        _pixels_thread = threading.Thread(target=_build_or_load_pixels,
-                                          daemon=True,
-                                          name="map-pixels-build")
-        _pixels_thread.start()
+        t = _pixels_threads.get(key)
+        if t is not None and t.is_alive():
+            return
+        t = threading.Thread(target=_build_or_load_pixels,
+                             args=(key, height_fn), daemon=True,
+                             name="map-pixels-build")
+        _pixels_threads[key] = t
+        t.start()
 
 
-def get_map_pixels():
-    """The (n, n, 3) uint8 map array, or None while it is still building."""
+def get_map_pixels(field=None):
+    """The (n, n, 3) uint8 map array for ``field``, or None while still building.
+
+    ``field`` is the active ``HeightField`` (None == the default map)."""
     with _pixels_lock:
-        return _pixels
+        return _pixels_by_key.get(_field_key(field))
 
 
 # --------------------------------------------------------------- pure view
@@ -741,6 +787,13 @@ class TacticalMap:
 
     # ------------------------------------------------------ terrain texture
 
+    def _active_field(self):
+        """The ACTIVE map terrain field (``world.height_field``), or None for a
+        SANDBOX world (the default map).  M3-F4: the 2D map texture is keyed on
+        and colorized from THIS field, so a seeded preset's 2D map shows the
+        same islands the sim masks LOS with — matching the 3D Terrain renderer."""
+        return getattr(self.sandbox.world, "height_field", None)
+
     def _ensure_texture(self) -> bool:
         """Upload the map texture once the async pixel build is done.
         Returns False (and kicks the build) while still pending — the
@@ -748,9 +801,10 @@ class TacticalMap:
         the main thread for the whole build."""
         if self.tex:
             return True
-        pixels = get_map_pixels()
+        field = self._active_field()
+        pixels = get_map_pixels(field)
         if pixels is None:
-            ensure_map_pixels_async()
+            ensure_map_pixels_async(field)
             return False
         gl = self._gl
         pixels = np.ascontiguousarray(pixels)

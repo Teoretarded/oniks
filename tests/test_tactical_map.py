@@ -209,3 +209,86 @@ def test_ground_aim_point_targets_the_local_surface():
     assert (p[0], p[2]) == (hx, hz)
     sea = ground_aim_point((0.0, 200_000.0))       # mid-ocean click
     assert sea[1] == 0.0
+
+
+# ---------------------------------------------- M3-F4 preset map texture (fog)
+#
+# The 2D map texture must colorize the SAME terrain field the sim masks LOS
+# with — a seeded preset map must show its OWN islands, not the default coast
+# (a 2D coastline that doesn't match the LOS field is a perception/fog bug).
+# These mirror the 3D Terrain field contract (world/terrain.Terrain(field))
+# on the 2D pixel side: build_map_pixels threads the active field's height, and
+# the disk/in-memory cache keys on that field (default -> legacy byte-identical
+# path; presets -> their own deterministic path).
+
+_TEX_N = 256        # a small fast grid (the texel diff is resolution-stable)
+_SEEDED_PRESETS = (1, 2, 3)
+
+
+def test_build_map_pixels_default_field_is_byte_identical():
+    """build_map_pixels with the DEFAULT field's height == the module-default
+    render EXACTLY — preset 0 (the out-of-the-box map) is byte-identical at the
+    render layer, not just the sim."""
+    from game.tactical_map import build_map_pixels
+    from world.generation import DEFAULT_FIELD
+
+    ref = build_map_pixels(n=_TEX_N)                       # module terrain_height
+    via_field = build_map_pixels(n=_TEX_N, height_fn=DEFAULT_FIELD.height)
+    assert np.array_equal(ref, via_field)
+
+
+def test_build_map_pixels_preset_differs_from_default_and_matches_field():
+    """For presets 1-3 the rendered texture (a) DIFFERS from the default render
+    (the islands moved) and (b) MATCHES a fresh render of that same field
+    (the map reflects the active field, the regression the F4 ship missed)."""
+    from game.tactical_map import build_map_pixels
+    from world.generation import make_field
+
+    ref = build_map_pixels(n=_TEX_N)
+    for p in _SEEDED_PRESETS:
+        field = make_field(p, 1337)
+        px = build_map_pixels(n=_TEX_N, height_fn=field.height)
+        assert not np.array_equal(px, ref), (
+            f"preset {p} map texture identical to default (fog mismatch)")
+        again = build_map_pixels(n=_TEX_N, height_fn=field.height)
+        assert np.array_equal(px, again), (
+            f"preset {p} map texture not deterministic for one field")
+
+
+def test_map_cache_key_and_path_default_is_legacy_presets_distinct():
+    """The pixel cache keys on the active field: the DEFAULT field reuses the
+    EXACT legacy in-memory slot + disk filename (so the out-of-the-box cached
+    texture loads byte-identically), and each preset field hashes to its own
+    stable, distinct path (so a preset caches/loads separately)."""
+    from game.tactical_map import SEED, MAP_TEX_N, _field_key, _map_cache_path
+    from world.generation import DEFAULT_FIELD, make_field
+
+    # Default field -> None key -> the legacy seed-named path.
+    assert _field_key(None) is None
+    assert _field_key(DEFAULT_FIELD) is None
+    legacy = _map_cache_path(None)
+    assert legacy.endswith(f"map_pixels_v1_seed{SEED}_{MAP_TEX_N}.npy")
+
+    # Each preset -> a non-None, deterministic, distinct key + path.
+    keys, paths = set(), {_map_cache_path(None)}
+    for p in _SEEDED_PRESETS:
+        k = _field_key(make_field(p, 1337))
+        assert k is not None
+        assert _field_key(make_field(p, 1337)) == k        # deterministic
+        path = _map_cache_path(k)
+        assert path != legacy                              # not the default file
+        keys.add(k)
+        paths.add(path)
+    assert len(keys) == len(_SEEDED_PRESETS)               # all distinct
+    assert len(paths) == len(_SEEDED_PRESETS) + 1
+
+
+def test_field_key_is_seed_sensitive():
+    """A preset field's cache key moves with the seed (a different seed lays
+    out different islands -> a different texture -> a different cache slot),
+    so two seeds never alias one cached map."""
+    from game.tactical_map import _field_key
+    from world.generation import make_field
+
+    for p in _SEEDED_PRESETS:
+        assert _field_key(make_field(p, 1)) != _field_key(make_field(p, 2))

@@ -289,7 +289,10 @@ class SandboxState(GameState):
         self.rig = CameraRig(self.camera)
         self.sky = Sky()
         self.ocean = Ocean()
-        self.terrain = Terrain()
+        # M3-F4: render the ACTIVE map field so the 3D coast/islands match the
+        # field the sim masks LOS with. CombatWorld carries a per-preset
+        # height_field; the sandbox WorldState has none (default map).
+        self.terrain = Terrain(field=getattr(self.world, "height_field", None))
         self.effects = Effects(seed=4)
         self.particles = ParticleRenderer()
         self.controls = SandboxControls(self)
@@ -310,7 +313,11 @@ class SandboxState(GameState):
         # Map texture pixels build in a daemon thread (seconds of numpy):
         # kicked here, under the BUILDING WORLD frame, so the first M press
         # never blocks the main thread (it shows BUILDING MAP if early).
-        tactical_map.ensure_map_pixels_async()
+        # M3-F4: build the ACTIVE map field (world.height_field) so a seeded
+        # preset colorizes its OWN terrain; the sandbox/default world has none
+        # (-> the byte-identical default map).
+        tactical_map.ensure_map_pixels_async(
+            getattr(self.world, "height_field", None))
         self.active_platform = "bastion"   # TAB toggles bastion <-> s300
         self.sam_round = "48n6"         # V toggles the S-300 round (5b)
         self.oniks_weapon = "oniks"     # B toggles Oniks <-> Zircon (Phase 8)

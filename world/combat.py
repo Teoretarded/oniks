@@ -410,15 +410,19 @@ class CombatWorld(WorldState):
         # _config must be set BEFORE super().__init__ because _spawn_ships
         # is called from there and reads it.
         self._config = config
-        # M3-terrain F3: the ONE active terrain field for this map, built once
-        # here and threaded to every sensor (player AND enemy) so they read a
-        # single terrain truth — no fog asymmetry, no truth leak. The default
-        # map uses generation.DEFAULT_FIELD (byte-identical to the legacy module
-        # functions); a future preset swaps this one assignment everywhere at
-        # once. Set BEFORE super().__init__ because _build_contacts (player
-        # radar) runs there. terrain_height_at / surface_height_at (used by the
-        # SAM / missile / strike LOS) are overridden to read THIS field too.
-        self.height_field = generation.DEFAULT_FIELD
+        # M3-terrain F3/F4: the ONE active terrain field for this map, built
+        # once here and threaded to every sensor (player AND enemy) so they
+        # read a single terrain truth — no fog asymmetry, no truth leak.
+        # make_field(map_preset, seed) selects the map: preset 0 (the default)
+        # returns generation.DEFAULT_FIELD (byte-identical to the legacy module
+        # functions — the out-of-the-box battle is unchanged), presets 1-3 add
+        # seeded mid-ocean island terrain ([seed, 12]) while keeping the
+        # home/enemy coast cluster geometry stable. This ONE assignment swaps
+        # the whole field everywhere at once. Set BEFORE super().__init__
+        # because _build_contacts (player radar) runs there. terrain_height_at
+        # / surface_height_at (used by the SAM / missile / strike LOS) are
+        # overridden to read THIS field too.
+        self.height_field = generation.make_field(config.map_preset, config.seed)
         # Bind the scalar query ONCE so every sensor stores the SAME callable
         # object (a fresh ``field.height_scalar`` access makes a new bound
         # method each time — equal but not identical; caching it lets the
@@ -711,7 +715,12 @@ class CombatWorld(WorldState):
         import math as _math
         config = getattr(self, "_config", _DEFAULT_CONFIG)
         fleet_rng = np.random.default_rng([config.seed, 3])
-        layout = sample_fleet(fleet_rng, config.n_destroyers)
+        # M3-F4: dodge the ACTIVE preset field's islands (preset 0 == the
+        # module default, so the rng draw order + result are byte-identical to
+        # the legacy fleet on the default map). _height_fn is bound before
+        # super().__init__ calls this, so it is always available here.
+        layout = sample_fleet(fleet_rng, config.n_destroyers,
+                              height_fn=self._height_fn)
 
         bx, bz = float(BASE_POS[0]), float(BASE_POS[2])
 

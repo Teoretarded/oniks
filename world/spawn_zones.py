@@ -52,13 +52,18 @@ _MAX_TRIES = 200                         # rejection-sampling cap per hull
 _BASE_XZ = (float(BASE_POS[0]), float(BASE_POS[2]))
 
 
-def is_open_water(x: float, z: float) -> bool:
+def is_open_water(x: float, z: float, height_fn=terrain_height_scalar) -> bool:
     """Open water at (x, z) and across the patrol clearance disc: center
     plus 4 cardinal offsets all below CLEAR_DEPTH_M (cheap 5-point probe
-    of the 9 km box, matching the Phase-2 anchor sweep contract)."""
+    of the 9 km box, matching the Phase-2 anchor sweep contract).
+
+    ``height_fn`` defaults to the module terrain (byte-identical for existing
+    callers); M3-F4 passes the ACTIVE preset field's scalar so the fleet
+    rejection-sampler dodges the preset's seeded mid-ocean islands, not just
+    the default map's."""
     for dx, dz in ((0.0, 0.0), (CLEAR_RADIUS_M, 0.0), (-CLEAR_RADIUS_M, 0.0),
                    (0.0, CLEAR_RADIUS_M), (0.0, -CLEAR_RADIUS_M)):
-        if terrain_height_scalar(x + dx, z + dz) > CLEAR_DEPTH_M:
+        if height_fn(x + dx, z + dz) > CLEAR_DEPTH_M:
             return False
     return True
 
@@ -79,11 +84,12 @@ def _far_enough(p: tuple[float, float], placed: list) -> bool:
 
 
 def _place(rng: np.random.Generator, placed: list, r_min: float,
-           r_mode: float, r_max: float) -> tuple[float, float]:
+           r_mode: float, r_max: float,
+           height_fn=terrain_height_scalar) -> tuple[float, float]:
     """Rejection-sample one open-water, separated point in a band."""
     for _ in range(_MAX_TRIES):
         p = _sample_sector(rng, r_min, r_mode, r_max)
-        if is_open_water(*p) and _far_enough(p, placed):
+        if is_open_water(*p, height_fn=height_fn) and _far_enough(p, placed):
             placed.append(p)
             return p
     raise RuntimeError("spawn zone could not place a hull "
@@ -91,14 +97,20 @@ def _place(rng: np.random.Generator, placed: list, r_min: float,
                        f"{len(placed)} already placed)")
 
 
-def sample_fleet(rng: np.random.Generator, n_destroyers: int) -> dict:
+def sample_fleet(rng: np.random.Generator, n_destroyers: int,
+                 height_fn=terrain_height_scalar) -> dict:
     """Seeded fleet layout: {'carrier': (x, z), 'destroyers': [(x, z)...]}.
 
     Carrier first (deep band), then up to 2 escorts on its 20-35 km ring,
-    then the remaining destroyers screening in the main zone."""
+    then the remaining destroyers screening in the main zone.
+
+    ``height_fn`` defaults to the module terrain (byte-identical for the
+    default map); M3-F4 passes the ACTIVE preset field's scalar so hulls dodge
+    the preset's seeded mid-ocean islands.  The rng draw order is UNCHANGED, so
+    on the default field the layout is bit-for-bit the same as before."""
     placed: list[tuple[float, float]] = []
     carrier = _place(rng, placed, CARRIER_RANGE_MIN_M, CARRIER_RANGE_MODE_M,
-                     CARRIER_RANGE_MAX_M)
+                     CARRIER_RANGE_MAX_M, height_fn=height_fn)
     destroyers: list[tuple[float, float]] = []
     for _ in range(min(2, n_destroyers)):           # carrier escorts
         for _ in range(_MAX_TRIES):
@@ -106,7 +118,7 @@ def sample_fleet(rng: np.random.Generator, n_destroyers: int) -> dict:
             off = rng.uniform(*ESCORT_OFFSET_M)
             p = (carrier[0] + off * math.sin(ang),
                  carrier[1] + off * math.cos(ang))
-            if is_open_water(*p) and _far_enough(p, placed):
+            if is_open_water(*p, height_fn=height_fn) and _far_enough(p, placed):
                 placed.append(p)
                 destroyers.append(p)
                 break
@@ -114,5 +126,6 @@ def sample_fleet(rng: np.random.Generator, n_destroyers: int) -> dict:
             raise RuntimeError("could not place a carrier escort")
     for _ in range(max(0, n_destroyers - 2)):       # forward screen
         destroyers.append(_place(rng, placed, ZONE_RANGE_MIN_M,
-                                 ZONE_RANGE_MODE_M, ZONE_RANGE_MAX_M))
+                                 ZONE_RANGE_MODE_M, ZONE_RANGE_MAX_M,
+                                 height_fn=height_fn))
     return {"carrier": carrier, "destroyers": destroyers}

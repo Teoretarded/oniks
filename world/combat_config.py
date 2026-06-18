@@ -56,6 +56,14 @@ class CombatConfig:
     pantsir_57e6_ammo: int = 12
     pantsir_gun_ammo: int = 700
     pantsir_mag_reload_s: float = 60.0
+    # M3-F4 seeded map preset (0 OPEN SEA / 1 ARCHIPELAGO / 2 NARROW STRAIT /
+    # 3 FJORD COAST). DEFAULT 0 so the out-of-the-box battle map is
+    # BYTE-IDENTICAL: world/generation.make_field(0, seed) returns the default
+    # field (the seed is ignored for terrain on preset 0). Presets 1-3 build
+    # seeded mid-ocean island terrain from np.random.default_rng([seed, 12]),
+    # exercising the terrain-masking + radar-horizon physics; the home/enemy
+    # coast cluster geometry stays stable across presets. Clamped to (0, 3).
+    map_preset: int = 0
 
 
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
@@ -93,6 +101,17 @@ CLAMP_GUN_AMMO:      tuple = (1, 1000)
 # out-of-the-box battle. Ceiling matches the other missile pools (200).
 CLAMP_ARM_AMMO:      tuple = (0, 200)
 CLAMP_RELOAD_S:      tuple = (5, 600)
+# M3-F4 map preset: a cyclic enum index, floor 0 (OPEN SEA = the byte-identical
+# default map survives a clamp_config round-trip — the setup-default path runs
+# every field through clamp_config; clamping map_preset=0 with a (1, ..) range
+# would silently swap the out-of-the-box battle to a terrain map). Ceiling 3
+# (FJORD COAST) — exactly len(MAP_PRESET_NAMES) - 1.
+CLAMP_MAP_PRESET:    tuple = (0, 3)
+
+# M3-F4 display names, indexed by map_preset (0..3). One per CLAMP_MAP_PRESET
+# value — the setup MAP row renders MAP_PRESET_NAMES[map_preset].
+MAP_PRESET_NAMES:    tuple = ("OPEN SEA", "ARCHIPELAGO",
+                              "NARROW STRAIT", "FJORD COAST")
 
 
 def clamp_field(value, lo, hi):
@@ -127,6 +146,7 @@ def clamp_config(
     pantsir_57e6_ammo: int = CombatConfig.pantsir_57e6_ammo,
     pantsir_gun_ammo: int = CombatConfig.pantsir_gun_ammo,
     pantsir_mag_reload_s: float = CombatConfig.pantsir_mag_reload_s,
+    map_preset: int = CombatConfig.map_preset,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
     legal UI ranges.  Intended for the setup screen: pass raw slider values,
@@ -146,6 +166,7 @@ def clamp_config(
     lo_gun, hi_gun = CLAMP_GUN_AMMO
     lo_arm, hi_arm = CLAMP_ARM_AMMO
     lo_re, hi_re = CLAMP_RELOAD_S
+    lo_mp, hi_mp = CLAMP_MAP_PRESET
 
     return CombatConfig(
         seed=int(seed),
@@ -170,6 +191,7 @@ def clamp_config(
         pantsir_gun_ammo=clamp_field(int(pantsir_gun_ammo), lo_gun, hi_gun),
         pantsir_mag_reload_s=clamp_field(float(pantsir_mag_reload_s),
                                           lo_re, hi_re),
+        map_preset=clamp_field(int(map_preset), lo_mp, hi_mp),
     )
 
 

@@ -29,6 +29,7 @@ from world.combat_config import (
     CLAMP_ENEMY_RADARS,
     CLAMP_PLAYER_RADARS,
     CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_RELOAD_S,
+    CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
 )
 
 DT = 1.0 / 120.0
@@ -65,6 +66,44 @@ def test_defaults_match_locked_schema():
     # M2-T2: Kh-31P player ARM pool DEFAULTS to 0 (OFF) so the out-of-the-box
     # battle stays byte-identical until a setup screen arms it.
     assert c.kh31p_ammo == 0
+    # M3-F4: the map preset DEFAULTS to 0 (OPEN SEA = today's layout) so the
+    # out-of-the-box battle map is byte-identical (make_field(0, .) is the
+    # default field); presets 1-3 add seeded terrain.
+    assert c.map_preset == 0
+
+
+# ---------------------------------------------------------------------------
+# M3-F4: map_preset config field, clamp and names table
+# ---------------------------------------------------------------------------
+
+def test_map_preset_default_is_open_sea():
+    """The locked default is 0 (OPEN SEA) so the default battle map is the
+    byte-identical legacy field."""
+    assert CombatConfig().map_preset == 0
+    assert MAP_PRESET_NAMES[0] == "OPEN SEA"
+
+
+def test_map_preset_names_full_table():
+    assert MAP_PRESET_NAMES == ("OPEN SEA", "ARCHIPELAGO",
+                                "NARROW STRAIT", "FJORD COAST")
+    # Exactly one name per clamp value (0..3).
+    assert len(MAP_PRESET_NAMES) == CLAMP_MAP_PRESET[1] - CLAMP_MAP_PRESET[0] + 1
+
+
+def test_clamp_config_map_preset_round_trip():
+    """clamp_config round-trips map_preset within (0, 3) and the default 0
+    survives the default-through-setup path (every field runs clamp_config)."""
+    assert CLAMP_MAP_PRESET == (0, 3)
+    # Default 0 survives a clamp round-trip.
+    assert clamp_config(map_preset=0).map_preset == 0
+    # In-band values round-trip unchanged.
+    for p in (0, 1, 2, 3):
+        assert clamp_config(map_preset=p).map_preset == p
+    # Below floor clamps up; above ceiling clamps down.
+    assert clamp_config(map_preset=-5).map_preset == CLAMP_MAP_PRESET[0]
+    assert clamp_config(map_preset=99).map_preset == CLAMP_MAP_PRESET[1]
+    # A default-config build keeps OPEN SEA.
+    assert clamp_config().map_preset == 0
 
 
 def test_default_is_frozen():

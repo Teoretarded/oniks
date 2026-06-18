@@ -39,8 +39,8 @@ from game.states import (
 from world.combat_config import (
     CombatConfig,
     CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_DESTROYERS,
-    CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_ONIKS, CLAMP_PANTSIR,
-    CLAMP_RELOAD_S, CLAMP_S300, clamp_config,
+    CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_MAP_PRESET, CLAMP_ONIKS,
+    CLAMP_PANTSIR, CLAMP_RELOAD_S, CLAMP_S300, MAP_PRESET_NAMES, clamp_config,
 )
 
 # --- Layout -------------------------------------------------------------------
@@ -79,6 +79,14 @@ def _clamp(v, lo, hi):
 
 _WORLD_ROWS = [
     {"kind": "seed",    "label": "SEED",          "field": "seed"},
+    # M3-F4 map preset: a cyclic stepper (clamped to CLAMP_MAP_PRESET, no wrap
+    # past the bounds like every other stepper) whose VALUE is the preset
+    # index but whose DISPLAY is MAP_PRESET_NAMES[value] (the ``names`` key
+    # routes the stepper draw to the name). Default 0 (OPEN SEA) keeps the
+    # out-of-the-box battle map byte-identical.
+    {"kind": "stepper", "label": "MAP",           "field": "map_preset",
+     "step": 1, "lo": CLAMP_MAP_PRESET[0], "hi": CLAMP_MAP_PRESET[1],
+     "names": MAP_PRESET_NAMES},
     {"kind": "fixed",   "label": "CARRIER",       "value": "1  (FIXED)"},
     {"kind": "stepper", "label": "DESTROYERS",    "field": "n_destroyers",
      "step": 1, "lo": CLAMP_DESTROYERS[0],    "hi": CLAMP_DESTROYERS[1]},
@@ -161,6 +169,7 @@ class CombatSetupState(GameState):
         defaults = CombatConfig()
         self._fields: dict[str, int | float] = {
             "seed":               defaults.seed,
+            "map_preset":         defaults.map_preset,
             "n_destroyers":       defaults.n_destroyers,
             "n_awacs":            defaults.n_awacs,
             "n_enemy_radars":     defaults.n_enemy_radars,
@@ -373,6 +382,7 @@ class CombatSetupState(GameState):
         f = self._fields
         return clamp_config(
             seed               = int(f["seed"]),
+            map_preset         = int(f["map_preset"]),
             n_destroyers       = int(f["n_destroyers"]),
             n_awacs            = int(f["n_awacs"]),
             n_enemy_radars     = int(f["n_enemy_radars"]),
@@ -484,8 +494,13 @@ class CombatSetupState(GameState):
             text.draw_text(x + PAD, ty, label, label_col)
             field = row["field"]
             v     = self._fields[field]
+            names = row.get("names")
+            if names is not None:
+                # Enum stepper (e.g. MAP): the value indexes a names table.
+                idx = int(v)
+                val_str = names[idx] if 0 <= idx < len(names) else str(idx)
             # Whole-number floats (reload multiples of 5 s): show as int
-            if isinstance(v, float) and v == int(v):
+            elif isinstance(v, float) and v == int(v):
                 val_str = str(int(v))
             elif isinstance(v, float):
                 val_str = f"{v:.1f}"

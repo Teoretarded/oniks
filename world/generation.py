@@ -405,6 +405,131 @@ class HeightField:
 DEFAULT_FIELD = HeightField()
 
 
+# --- Seeded map presets (M3-terrain F4) ---------------------------------------
+#
+# Four selectable battle maps that finally exercise the terrain-masking +
+# radar-horizon physics:
+#
+#   0 OPEN SEA      today's default layout (DEFAULT_FIELD, BYTE-IDENTICAL)
+#   1 ARCHIPELAGO   a dense field of mid-ocean islands
+#   2 NARROW STRAIT two island chains pinching a central transit corridor
+#   3 FJORD COAST   tall, steep islands (raised max_height) channelling fire
+#
+# Determinism + cluster stability (the two hard contracts):
+#   * Every preset field is built ONLY from np.random.default_rng([seed, 12])
+#     — phase tag 12 is fresh for map terrain. Tags in live use today: 3 (fleet
+#     spawn), 4 (recon), 5 (commander), 6 (pantsir), 7 (enemy-radar), 8 (player
+#     ARM / EW). 9/10/11/13 are RESERVED (not yet allocated) for the M5/M6
+#     CBR / decoys / relocate / amphibious streams per ROADMAP risk #4, so 12
+#     avoids them. No wall-clock, no global RNG: make_field(p, s) twice -> identical.
+#   * The HOME-coast / enemy-coast CLUSTER geometry must NOT move (base, SAM,
+#     Pantsir, radar, airfield, enemy-radar pins are LOCKED on-land probes).
+#     The continents + ocean floor are noise of HeightField.seed, so every
+#     preset reuses the DEFAULT seed (SEED) for those — only the ISLAND LIST
+#     (and, for the Fjord, the per-field max_height) varies with [seed, 12].
+#     Islands live in the mid-ocean band (z 70-430 km), well clear of both
+#     coast clusters, so swapping them never perturbs a pin.
+
+MAP_PRESET_COUNT = 4
+
+# Mid-ocean island placement band (m): between the home coast cluster (z < 0)
+# and the enemy coast cluster (z > ~499 km) — the fleet/duel corridor.
+_PRESET_ISLAND_Z = (70_000.0, 430_000.0)
+_PRESET_ISLAND_X = (-260_000.0, 260_000.0)
+
+# Central transit corridor kept CLEAR of islands on every preset (m of X
+# half-width about x = 0): the canonical Oniks-vs-SM-2 deep-water duel runs
+# straight up the middle (x = 0, z 150-330 km), so an island parked on that
+# sight line would mask the duel / soft-lock the AI fire line.  An island whose
+# DISC (centre +- radius) reaches within this half-width of x = 0 is rejected
+# and redrawn — the rest of the band fills densely around it.  WINNABLE +
+# LOSABLE: ships still spawn off-corridor and threats still ingress, but a
+# clean centre lane always exists.
+_PRESET_CORRIDOR_HALF_X = 45_000.0
+
+# Fjord ceiling: steep, tall walls need headroom above the default 430 m so the
+# flyer-skip optimization (field.height < max_height) stays valid for the
+# taller peaks.  600 m comfortably tops the 520 m fjord peaks below.
+_FJORD_MAX_HEIGHT = 600.0
+
+
+def _clears_corridor(cx, radius, half_x=_PRESET_CORRIDOR_HALF_X):
+    """True when an island disc (centre cx, radius) does NOT intrude the central
+    x = 0 transit corridor."""
+    return abs(cx) - radius > half_x
+
+
+def _seeded_islands(rng, n, x_range, z_range, radius_range, peak_range,
+                    keep_corridor=True):
+    """n hand-free islands drawn from ``rng`` (the [seed, 12] stream): uniform
+    centre in the band, uniform radius + peak.  When ``keep_corridor`` an
+    island intruding the central transit corridor is rejected and redrawn (the
+    draw order stays a single stream, so the field is still deterministic per
+    seed).  Returns the ISLANDS-shaped list [(cx, cz, radius, peak), ...]."""
+    islands = []
+    tries = 0
+    max_tries = n * 40
+    while len(islands) < n and tries < max_tries:
+        tries += 1
+        cx = float(rng.uniform(*x_range))
+        cz = float(rng.uniform(*z_range))
+        radius = float(rng.uniform(*radius_range))
+        peak = float(rng.uniform(*peak_range))
+        if keep_corridor and not _clears_corridor(cx, radius):
+            continue
+        islands.append((cx, cz, radius, peak))
+    return islands
+
+
+def make_field(preset: int, seed: int) -> HeightField:
+    """Build the active terrain HeightField for ``preset`` + ``seed``.
+
+    preset 0 returns the DEFAULT field (the byte-identical default map; the
+    seed is IGNORED for terrain so the out-of-the-box battle never shifts).
+    presets 1-3 build a seeded island set (the continents + floor stay the
+    default's, so every LOCKED coast-cluster pin reads identical terrain) from
+    np.random.default_rng([seed, 12]).  Out-of-range presets clamp into
+    [0, MAP_PRESET_COUNT-1] (defensive — the config layer clamps too)."""
+    p = int(preset)
+    if p <= 0:
+        return DEFAULT_FIELD
+    if p >= MAP_PRESET_COUNT:
+        p = MAP_PRESET_COUNT - 1          # clamp overflow to the last preset
+    return _make_preset(p, seed)
+
+
+def _make_preset(p: int, seed: int) -> HeightField:
+    """Presets 1-3: a seeded mid-ocean island set over the default continents."""
+    rng = np.random.default_rng([int(seed), 12])
+    if p == 1:                                   # ARCHIPELAGO: a dense scatter
+        islands = _seeded_islands(
+            rng, 14, _PRESET_ISLAND_X, _PRESET_ISLAND_Z,
+            radius_range=(6_000.0, 16_000.0), peak_range=(150.0, 400.0))
+        return HeightField(islands=islands)
+    if p == 2:                                   # NARROW STRAIT: two chains
+        # Pinch a central N-S transit corridor: a west chain and an east
+        # chain, each a column of islands, leaving a navigable gap around x=0.
+        islands = []
+        zs = np.linspace(_PRESET_ISLAND_Z[0] + 20_000.0,
+                         _PRESET_ISLAND_Z[1] - 20_000.0, 6)
+        for cz in zs:
+            jitter_w = float(rng.uniform(-15_000.0, 15_000.0))
+            jitter_e = float(rng.uniform(-15_000.0, 15_000.0))
+            r_w = float(rng.uniform(9_000.0, 15_000.0))
+            r_e = float(rng.uniform(9_000.0, 15_000.0))
+            pk_w = float(rng.uniform(200.0, 380.0))
+            pk_e = float(rng.uniform(200.0, 380.0))
+            islands.append((-110_000.0 + jitter_w, float(cz), r_w, pk_w))
+            islands.append((110_000.0 + jitter_e, float(cz), r_e, pk_e))
+        return HeightField(islands=islands)
+    # p == 3  FJORD COAST: fewer but TALL, steep islands (raised ceiling) that
+    # channel fire — sea-skimmers must thread between high walls.
+    islands = _seeded_islands(
+        rng, 9, _PRESET_ISLAND_X, _PRESET_ISLAND_Z,
+        radius_range=(8_000.0, 14_000.0), peak_range=(360.0, 520.0))
+    return HeightField(islands=islands, max_height=_FJORD_MAX_HEIGHT)
+
+
 LANES = [  # 4 polylines (x, z) float64 crossing the ocean, dodging ISLANDS by >= 12 km
     # Lane 0: western route, home waters to enemy coast
     [(-220_000.0, 15_000.0), (-190_000.0, 150_000.0), (-210_000.0, 320_000.0), (-180_000.0, 480_000.0)],

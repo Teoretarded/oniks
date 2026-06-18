@@ -282,6 +282,48 @@ def test_build_config_carries_kh31p_ammo(setup):
     assert setup.build_config().kh31p_ammo == 7
 
 
+# ---------------------------------------------------------------- M3-F4 map row
+
+def test_world_page_has_map_row(setup):
+    """The WORLD page exposes a MAP row bound to map_preset within
+    CLAMP_MAP_PRESET (a cyclic LEFT/RIGHT stepper)."""
+    from world.combat_config import CLAMP_MAP_PRESET
+    assert setup._page == _PAGE_WORLD
+    row = next(r for r in setup._rows() if r.get("field") == "map_preset")
+    assert (row["lo"], row["hi"]) == CLAMP_MAP_PRESET
+    assert setup._fields["map_preset"] == 0
+
+
+def test_map_row_cycles_within_clamp(setup):
+    """LEFT/RIGHT cycle map_preset and stay within CLAMP_MAP_PRESET (no wrap
+    past the bounds — the row clamps like the other steppers)."""
+    from world.combat_config import CLAMP_MAP_PRESET
+    lo, hi = CLAMP_MAP_PRESET
+    row_idx = next(i for i, r in enumerate(setup._rows())
+                   if r.get("field") == "map_preset")
+    setup._sel = row_idx
+    # Step up through the whole range.
+    for expect in range(lo + 1, hi + 1):
+        setup.handle_event(key_event(pygame.K_RIGHT))
+        assert setup._fields["map_preset"] == expect
+    # At the ceiling: another RIGHT clamps (stays at hi).
+    setup.handle_event(key_event(pygame.K_RIGHT))
+    assert setup._fields["map_preset"] == hi
+    # Step back down to the floor.
+    for expect in range(hi - 1, lo - 1, -1):
+        setup.handle_event(key_event(pygame.K_LEFT))
+        assert setup._fields["map_preset"] == expect
+    setup.handle_event(key_event(pygame.K_LEFT))
+    assert setup._fields["map_preset"] == lo
+
+
+def test_build_config_carries_map_preset(setup):
+    """START emits a config carrying the selected map_preset."""
+    setup._fields["map_preset"] = 2
+    cfg = setup.build_config()
+    assert cfg.map_preset == 2
+
+
 # ---------------------------------------------------------------- navigation
 
 def test_nav_up_down_wraps(setup):
