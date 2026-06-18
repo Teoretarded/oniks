@@ -138,9 +138,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from sim.arsenal import (BASTION_K, BUK_AGILE, BUK_LONG, BUK_TEL, KH31P, N40N6,
-                         ONIKS, S300, S300_TEL, SWARM, SWARM_POD, TOMAHAWK,
-                         ZIRCON)
+from sim.arsenal import (BASTION_K, BUK_AGILE, BUK_LONG, BUK_TEL, KALIBR_PL,
+                         KH31P, N40N6, ONIKS, S300, S300_TEL, SWARM, SWARM_POD,
+                         TOMAHAWK, ZIRCON)
 from sim.asbm import AsbmMissile
 from sim.bases import (DIMS_TEL as _BUK_STRUCT_DIMS, HP_S300_TEL as _BUK_STRUCT_HP,
                        Structure, apply_missile_hits_structures)
@@ -159,15 +159,17 @@ from sim.enemy_strikes import SALVO_PERIOD_S, SALVO_SIZE, EnemyStrikeController
 from sim.missile import Missile
 from sim.pantsir import Pantsir, PantsirDefenseController
 from sim.radar import Radar, RadarNetwork
-from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
+from sim.recon import (ACOUSTIC_FIX_ACTIONABLE_M, AcousticReceiver, DRONE_GONE,
+                       DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
 from sim.sam import SamMissile
 from sim.strike import PlayerArmMissile, StrikeMissile
+from sim.submarine import Submarine
 from sim.swarm import compute_swarm_speeds
 from world.combat_config import CombatConfig, DEFAULT as _DEFAULT_CONFIG
 from world import generation
 from world.generation import BASE_POS, SEED, terrain_height_scalar
-from world.spawn_zones import sample_fleet
+from world.spawn_zones import sample_fleet, sample_subs
 from world.world import (CANISTER_MOUTH_OFFSET, SAM_MOUTH_OFFSETS, SAM_TEL_POS,
                          WorldState)
 
@@ -451,6 +453,35 @@ ELINT_FRESH_S = 5.0           # s since last heard for a fix to count as
 # deep into its coast-out.
 ELINT_AGE_MAX_S = TRACK_DROP_S - 10.0   # 80 s: error == actionable bound
 #                                         -> nearly-dropped track
+
+# --- M5 submarine warfare + ASW (acoustic domain) -------------------------------
+ACOUSTIC_LISTEN_PERIOD_S = 0.5   # s between buoy listening passes (= ELINT)
+ACOUSTIC_FIX_PERIOD_S = 1.0      # s between acoustic triangulation + injection
+SUB_FRESH_S = 6.0                # s since last heard for a buoy fix to count LIVE
+SUB_SALVO_SIZE = 2               # Kalibr rounds per salvo (a small SSK salvo)
+# Surveyed-coordinate CEP (m): the boat shoots a coarse fixed-installation
+# belief (truth-free, like the GPS/INS Tomahawks).  Tuned so a salvo against a
+# base cluster usually lands inside SEEKER_BASKET_M and can kill a TEL (the hit
+# EMERGES from this CEP vs the basket — physics-not-dice), but is not pinpoint.
+SUB_KALIBR_CEP_M = 250.0
+
+# Launch-transient back-plot (the free, always-on ASW fix when the boat shoots):
+# a coarse subsurface DATUM injected at the surveyed launch point with error that
+# grows with the boat's range from the base.  The fairness backbone — every salvo
+# leaves a trail even with no buoys, but it is COARSE (a cue, not a snipe) and
+# FADES fast (the boat immediately runs).
+BACKPLOT_DATUM_ERR_FRAC = 0.04   # datum 1-sigma error == 4% of launch range
+BACKPLOT_DATUM_FADE_S = 45.0     # s the launch datum lives before it drops
+# Prosecution belief: set HIGH on a datum / buoy localize, decays so the boat's
+# evade lengthens right after it is heard, then it settles again.
+SUB_THREAT_ON_DATUM = 1.0        # belief set when a salvo is back-plotted
+SUB_THREAT_ON_FIX = 0.7          # belief set when buoys localize the boat
+SUB_THREAT_DECAY_PER_S = 0.01    # belief decay (1/s) -> ~100 s to forget a datum
+
+# Acoustic fix error -> subsurface-track age mapping (mirrors the ELINT mapping):
+# a freshly-actionable 6 km fix injects as a nearly-stale track, a razor fix as a
+# fresh one, so the map chevron sharpens as the cross-fix improves.
+SUB_FIX_AGE_MAX_S = BACKPLOT_DATUM_FADE_S
 
 
 class CombatWorld(WorldState):
@@ -832,6 +863,38 @@ class CombatWorld(WorldState):
         # rounds per active commander mission; completion + BDA run here).
         self._cmd_missions: list[dict] = []
 
+        # ---- M5: submarine warfare + ASW acoustic domain ----
+        # BYTE-IDENTICAL DEFAULT: with config.n_subs == 0 self.subs stays empty,
+        # NO acoustic receiver work runs, _step_acoustic_sensors / sub stepping /
+        # launch-datum injection are all no-ops, place_sonobuoy + launch_asw
+        # return None (0 stock), and victorious is unchanged (no subs to require
+        # dead).  FRESH child streams: [seed, 13] sub (state-machine jitter +
+        # spawn), [seed, 14] sonar (buoy bearing noise) — tags 3-8/12 are TAKEN,
+        # 8 is the ARM stream (do NOT reuse).
+        self._sub_rng = np.random.default_rng([rng_seed, 13])
+        self._sonar_rng = np.random.default_rng([rng_seed, 14])
+        self.subs = self._spawn_subs(config, self._sub_rng)
+        # Player sonobuoy field: a finite stock placed during the match.  Each
+        # entry is a (3,) world position (X, depth, Z).  AcousticReceiver hears
+        # every sub via every placed buoy (no horizon/terrain — acoustics).
+        self.sonobuoys: list[np.ndarray] = []
+        self._sonobuoy_stock = int(config.n_sonobuoys)
+        self.acoustic = AcousticReceiver(rng=self._sonar_rng)
+        self._acoustic_next_t = 0.0
+        self._sub_fix_next_t = 0.0
+        # Player ASW prosecution rounds (kill a localized boat).
+        self._asw_ammo = int(config.asw_ammo)
+        self.asw_rounds: list = []
+        # Subsurface track store (the player picture's sub fixes + launch datums)
+        # — kept SEPARATE from contacts.tracks so every existing radar-picture
+        # consumer stays byte-identical.  sub_id|datum_id -> dict(pos, age,
+        # quality, kind, last_heard, t_drop).
+        self.sub_contacts: dict = {}
+        # Per-sub sensor-honest prosecution belief (0..1) the SubCommander reads
+        # to evade: set HIGH when the boat was just datum'd / a buoy localized
+        # it, decays over time.  Keyed by sub_id.  NEVER a truth read.
+        self._sub_threat: dict[str, float] = {}
+
     # --- terrain accessors (M3-terrain F3) --------------------------------
     # Override WorldState's module-shim accessors to read THIS world's active
     # HeightField, so the SAM / missile / strike terrain LOS (which call
@@ -908,6 +971,27 @@ class CombatWorld(WorldState):
             heading_deg=_heading(layout["carrier"])))
 
         return ships
+
+    def _spawn_subs(self, config, sub_rng) -> list:
+        """M5: build the enemy diesel SSK roster (NOT added to self.ships — the
+        sub is invisible to radar by construction).  BYTE-IDENTICAL DEFAULT:
+        n_subs == 0 returns [] WITHOUT drawing from sub_rng or calling
+        sample_subs, so nothing about the default battle changes.  Each boat is
+        anchored in the deep-open-water sub band (80-140 km, closer than the
+        carrier so its scaled Kalibr reaches the base) on the dedicated
+        [seed, 13] stream — it never perturbs the fleet rng."""
+        n = int(getattr(config, "n_subs", 0))
+        if n <= 0:
+            return []
+        bx, bz = float(BASE_POS[0]), float(BASE_POS[2])
+        anchors = sample_subs(sub_rng, n, height_fn=self._height_fn)
+        subs = []
+        for i, xz in enumerate(anchors):
+            subs.append(Submarine(
+                anchor_xz=xz, rng=sub_rng,
+                kalibr_ammo=int(getattr(config, "sub_kalibr_ammo", 0)),
+                base_xz=(bx, bz), sub_id=f"ssk_{i:02d}"))
+        return subs
 
     @staticmethod
     def _pantsir_spawns(n: int, seed: int) -> list[dict]:
@@ -1180,6 +1264,213 @@ class CombatWorld(WorldState):
             self._fix_next_t = now + ELINT_FIX_PERIOD_S
             self._inject_elint_tracks(now)
             self._inject_emitter_contacts(now)   # M2-T1 passive-SIGINT picture
+
+    # ------------------------------------------------------------------
+    # M5: submarine warfare + ASW (acoustic domain)
+    # ------------------------------------------------------------------
+
+    def _step_subs(self, dt: float) -> None:
+        """Advance every living sub's state machine and, on the tick a boat
+        fires, spawn its Kalibr salvo + inject the launch-transient datum.
+
+        BYTE-IDENTICAL DEFAULT: self.subs is empty with n_subs=0, so this whole
+        method is a no-op (the loop never runs).  The boat reads ONLY its own
+        sensor-honest prosecution belief (self._sub_threat) — NEVER truth."""
+        now = self.sim_time
+        for sub in self.subs:
+            # Decay the per-sub prosecution belief (it forgets being heard).
+            tid = sub.sub_id
+            if tid in self._sub_threat:
+                self._sub_threat[tid] = max(
+                    0.0, self._sub_threat[tid] - SUB_THREAT_DECAY_PER_S * dt)
+            if not sub.alive:
+                continue
+            threat = self._sub_threat.get(tid, 0.0)
+            aim = sub.step(dt, threat_level=threat)
+            if aim is not None:
+                self._fire_kalibr_salvo(sub, aim)
+
+    def _fire_kalibr_salvo(self, sub, aim) -> None:
+        """Spawn the sub's Kalibr salvo at the SURVEYED base coords (a coarse
+        known-installation belief + CEP, truth-free — like the GPS/INS
+        Tomahawks), then inject the launch-transient back-plot datum.  The
+        rounds are radar-gated StrikeMissiles (launch_warning=False); terminal
+        acquisition reuses _refine_strike_aim so the base hit EMERGES from the
+        CEP vs SEEKER_BASKET_M (physics-not-dice)."""
+        tx, tz, _ = aim
+        # Surveyed-coordinate CEP (a coarse fixed-installation belief): jitter
+        # the aim with the sub stream so the salvo is deterministic per battle.
+        cep = SUB_KALIBR_CEP_M
+        tx += float(self._sub_rng.normal(0.0, cep))
+        tz += float(self._sub_rng.normal(0.0, cep))
+        ax, az, ay = self._refine_strike_aim(tx, tz)
+        n = min(SUB_SALVO_SIZE, sub.kalibr_ammo)
+        for _ in range(n):
+            breach = sub.pos.copy()
+            breach[1] = 0.0      # the round breaches the surface to fly
+            m = StrikeMissile(
+                KALIBR_PL, breach,
+                np.array([0.0, KALIBR_PL.eject_speed, 0.0]),
+                (ax, az), target_y=ay)
+            m.launch_cinematic = False
+            m.launch_platform = sub   # damage.py: never self-OBB-hit the launcher
+            self.missiles.append(m)
+            sub.kalibr_ammo -= 1
+        # The launch-transient back-plot datum (the free always-on ASW fix).
+        self._inject_launch_datum(sub)
+
+    def _inject_launch_datum(self, sub) -> None:
+        """A coarse subsurface DATUM at the boat's surface launch point ± error
+        (error grows with the boat's range from the base — the back-plot is a
+        cue, not a snipe), fading over BACKPLOT_DATUM_FADE_S.  Also sets the
+        boat's sensor-honest prosecution belief HIGH so the SubCommander knows
+        it was loud and lengthens its evade.  NO TRUTH LEAK: the datum carries
+        error and is the LAUNCH point, never the boat's live post-launch pos."""
+        now = self.sim_time
+        lx, lz = float(sub.pos[0]), float(sub.pos[2])
+        rng_m = float(np.hypot(lx - float(BASE_POS[0]),
+                               lz - float(BASE_POS[2])))
+        err = BACKPLOT_DATUM_ERR_FRAC * rng_m
+        ex = lx + float(self._sub_rng.normal(0.0, err))
+        ez = lz + float(self._sub_rng.normal(0.0, err))
+        did = f"{sub.sub_id}_datum"
+        self.sub_contacts[did] = dict(
+            pos=np.array([ex, 0.0, ez], dtype=np.float64),
+            quality=max(err, 1.0), kind="datum", last_heard=now,
+            age=SUB_FIX_AGE_MAX_S, t_drop=now + BACKPLOT_DATUM_FADE_S,
+            sub_id=sub.sub_id)
+        # Sensor-honest: the boat WAS loud (it shot), so it believes it may be
+        # localized — set HIGH (it lengthens its own evade; never a truth read).
+        self._sub_threat[sub.sub_id] = SUB_THREAT_ON_DATUM
+
+    def _step_acoustic_sensors(self) -> None:
+        """Buoy listening + acoustic triangulation on their cadences (mirror of
+        _step_recon_sensors).  No-op with no buoys / no subs (byte-identical
+        default)."""
+        if not self.subs or not self.sonobuoys:
+            # Still age out stale subsurface contacts so a dropped fix clears.
+            self._age_sub_contacts()
+            return
+        now = self.sim_time
+        if now >= self._acoustic_next_t:
+            self._acoustic_next_t = now + ACOUSTIC_LISTEN_PERIOD_S
+            self.acoustic.update(self.subs, self.sonobuoys, sim_time=now)
+        if now >= self._sub_fix_next_t:
+            self._sub_fix_next_t = now + ACOUSTIC_FIX_PERIOD_S
+            self._inject_sub_track(now)
+        self._age_sub_contacts()
+
+    def _inject_sub_track(self, now: float) -> None:
+        """Actionable acoustic cross-fixes -> subsurface tracks in the player
+        picture (mirror of _inject_elint_tracks, in the acoustic domain).  Gates:
+        the fix must be actionable, the sub heard within SUB_FRESH_S.  The fix
+        carries the TRIANGULATED est_pos (the buoy belief) — NEVER the sub's
+        truth pos.  Localizing the boat also raises its prosecution belief."""
+        for sub in self.subs:
+            if not sub.alive:
+                continue
+            sid = sub.sub_id
+            heard = self.acoustic.last_heard(sid)
+            if heard is None or now - heard > SUB_FRESH_S:
+                continue
+            quality = self.acoustic.fix_quality(sid)
+            if quality >= ACOUSTIC_FIX_ACTIONABLE_M:
+                continue
+            est = self.acoustic.est_pos(sid)
+            if est is None:
+                continue
+            age = SUB_FIX_AGE_MAX_S * quality / ACOUSTIC_FIX_ACTIONABLE_M
+            self.sub_contacts[sid] = dict(
+                pos=est.copy(), quality=quality, kind="sub", last_heard=now,
+                age=age, t_drop=now + SUB_FRESH_S, sub_id=sid)
+            # The boat is being prosecuted (a buoy cross-fixed it): raise its
+            # belief so it evades — but only UP TO the localize level (a datum
+            # is louder/scarier).  Sensor-honest: set because buoys heard it.
+            self._sub_threat[sid] = max(self._sub_threat.get(sid, 0.0),
+                                        SUB_THREAT_ON_FIX)
+
+    def _age_sub_contacts(self) -> None:
+        """Drop subsurface contacts past their fade window (the boat ran)."""
+        now = self.sim_time
+        for cid in [c for c, v in self.sub_contacts.items()
+                    if now >= v.get("t_drop", 0.0)]:
+            del self.sub_contacts[cid]
+
+    def place_sonobuoy(self, xz):
+        """Player tasking verb: drop a passive sonobuoy at world point ``xz``
+        (a map-clicked (x, z) or (x, y, z)).  Consumes one from the finite
+        stock; returns the buoy position, or None when stock is empty (refuses
+        at 0).  BYTE-IDENTICAL DEFAULT: n_sonobuoys=0 -> stock 0 -> always
+        None."""
+        if self._sonobuoy_stock <= 0:
+            return None
+        bx = float(xz[0])
+        bz = float(xz[-1])
+        buoy = np.array([bx, -15.0, bz], dtype=np.float64)
+        self.sonobuoys.append(buoy)
+        self._sonobuoy_stock -= 1
+        return buoy
+
+    @property
+    def sonobuoys_left(self) -> int:
+        return self._sonobuoy_stock
+
+    def launch_asw(self, track_id=None):
+        """Player ASW prosecution: fire a round at a LOCALIZED subsurface track
+        (a buoy cross-fix or a fresh launch datum) — NEVER blind.  Returns the
+        AswRound, or None when there is no subsurface track or no ASW ammo.
+
+        Physics-not-dice: the round flies to the FIX (the believed pos, not
+        truth); whether it kills emerges from the fix quality vs the acoustic
+        seeker basket inside AswRound (sim/asw.py).  is_hostile=False so it can
+        never damage player structures."""
+        if self._asw_ammo <= 0:
+            return None
+        # Resolve the target subsurface track: the named one, else the freshest
+        # (smallest quality / youngest) localized contact.
+        contact = None
+        if track_id is not None:
+            contact = self.sub_contacts.get(track_id)
+        if contact is None:
+            live = [v for v in self.sub_contacts.values()]
+            if live:
+                contact = min(live, key=lambda v: v.get("quality", float("inf")))
+        if contact is None:
+            return None      # no fix -> refuse (can't shoot blind)
+        from sim.asw import AswRound
+        fix_xz = (float(contact["pos"][0]), float(contact["pos"][2]))
+        quality = float(contact.get("quality", float("inf")))
+        target_sub = self._resolve_sub(contact.get("sub_id"))
+        rnd = AswRound(np.array(BASE_POS, dtype=np.float64),
+                       fix_xz, fix_quality=quality, target_sub=target_sub)
+        self.asw_rounds.append(rnd)
+        self._asw_ammo -= 1
+        return rnd
+
+    @property
+    def asw_ammo_left(self) -> int:
+        return self._asw_ammo
+
+    def _resolve_sub(self, sub_id):
+        """Map a subsurface contact's sub_id back to the live Submarine (the ASW
+        round's terminal basket checks the fix vs THIS boat's truth — the kill
+        emerges from fix quality vs basket, the round never reads truth to
+        guide)."""
+        if sub_id is None:
+            return None
+        for sub in self.subs:
+            if sub.sub_id == sub_id and sub.alive:
+                return sub
+        return None
+
+    def _step_asw_rounds(self, dt: float) -> None:
+        """Fly the player ASW rounds; a basket-acquire calls Submarine.kill().
+        No-op when self.asw_rounds is empty (byte-identical default)."""
+        if not self.asw_rounds:
+            return
+        for rnd in self.asw_rounds:
+            rnd.update(dt)
+        self.asw_rounds = [r for r in self.asw_rounds if r.alive]
 
     def _inject_elint_tracks(self, now: float) -> None:
         """Actionable ELINT fixes -> player-picture tracks.
@@ -2035,6 +2326,11 @@ class CombatWorld(WorldState):
         for struct, _r in getattr(self, "enemy_radars", []):
             if struct.alive:
                 return False
+        # M5: ALL enemy subs must also be dead (the second lose-path: the player
+        # MUST find + kill the boat).  BYTE-IDENTICAL DEFAULT: self.subs is empty
+        # with n_subs=0, so this all() is vacuously True and victory is unchanged.
+        if not all(not sub.alive for sub in getattr(self, "subs", [])):
+            return False
         return True
 
     @property
@@ -2774,6 +3070,11 @@ class CombatWorld(WorldState):
         self._step_buk_tubes(dt)          # M5 per-tube Buk reload + mag refills
         self._step_swarm_pod(dt)          # M4-B swarm cell-magazine refill
         self._step_drones(dt)
+        # M5: step the enemy subs BEFORE the strikes/defense layers so a Kalibr
+        # salvo a boat fires THIS tick joins self.missiles and flies on the NEXT
+        # base step (the same reactive convention as the defense/strikes
+        # launches).  No-op with n_subs=0 (self.subs empty) -> byte-identical.
+        self._step_subs(dt)
         self._step_enemy_air(dt)
         self.defense.step(self, dt)
         # M5: detect the flagship CEC-hub alive->dead edge AFTER defense.step
@@ -2823,6 +3124,11 @@ class CombatWorld(WorldState):
         # CAP vs the mast-height station.
         self.contacts.update(self.enemy_air, dt, self.sim_time)
         self._step_recon_sensors()
+        # M5: the player's passive sonobuoy net + acoustic triangulation, then
+        # the in-flight ASW rounds (a basket-acquire kills a boat).  Both no-op
+        # with n_subs=0 (self.subs empty) -> byte-identical default battle.
+        self._step_acoustic_sensors()
+        self._step_asw_rounds(dt)
         self._update_airfield_intel()
         # M3-F5: publish the read-only EW legibility summary LAST, after the
         # jammers + the recon/SIGINT picture are current this step.  Pure read:

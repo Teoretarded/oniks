@@ -34,6 +34,7 @@ from world.combat_config import (
     CLAMP_BUK,
     CLAMP_FLAGSHIP, CLAMP_AAW, CLAMP_GROUND_ATTACK,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
+    CLAMP_SUBS, CLAMP_SONOBUOYS, CLAMP_ASW_AMMO, CLAMP_SUB_KALIBR,
 )
 
 DT = 1.0 / 120.0
@@ -97,6 +98,56 @@ def test_defaults_match_locked_schema():
     assert c.n_flagship == 0
     assert c.n_aaw == 0
     assert c.n_ground_attack == 0
+    # M5 submarine warfare + ASW: ALL DEFAULT 0 (OFF) so the out-of-the-box
+    # battle stays byte-identical (no Submarine built -> self.subs empty ->
+    # no sub stepping / acoustic sensors / launch datum; place_sonobuoy +
+    # launch_asw return None on 0 stock; victorious unchanged).
+    assert c.n_subs == 0
+    assert c.n_sonobuoys == 0
+    assert c.asw_ammo == 0
+    assert c.sub_kalibr_ammo == 4
+
+
+# ---------------------------------------------------------------------------
+# M5: submarine warfare + ASW config fields, clamp (OFF default survivable)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_asw_domain():
+    """M5 submarine/ASW count clamps. EVERY floor is 0 so the byte-identical
+    default survives the default-through-setup path (clamp_config runs every
+    field): clamping any of these from 0 with a (1, ..) range would silently
+    spawn a boat / arm the ASW kit and break the out-of-the-box battle.
+    Two-sided: floor 0 preserved, ceiling honoured, default unchanged."""
+    assert CLAMP_SUBS[0] == 0, "sub count floor must be 0 (OFF survivable)"
+    assert CLAMP_SONOBUOYS[0] == 0, "sonobuoy floor must be 0 (OFF survivable)"
+    assert CLAMP_ASW_AMMO[0] == 0, "ASW ammo floor must be 0 (OFF survivable)"
+    assert CLAMP_SUB_KALIBR[0] == 0, "sub Kalibr floor must be 0"
+    # 0 stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_subs=0).n_subs == 0
+    assert clamp_config(n_sonobuoys=0).n_sonobuoys == 0
+    assert clamp_config(asw_ammo=0).asw_ammo == 0
+    # Negatives clamp up to the 0 floor.
+    assert clamp_config(n_subs=-5).n_subs == CLAMP_SUBS[0]
+    assert clamp_config(n_sonobuoys=-5).n_sonobuoys == CLAMP_SONOBUOYS[0]
+    assert clamp_config(asw_ammo=-5).asw_ammo == CLAMP_ASW_AMMO[0]
+    assert clamp_config(sub_kalibr_ammo=-5).sub_kalibr_ammo == CLAMP_SUB_KALIBR[0]
+    # Ceilings honoured.
+    assert CLAMP_SUBS == (0, 3)
+    assert clamp_config(n_subs=9999).n_subs == CLAMP_SUBS[1]
+    assert clamp_config(n_sonobuoys=9999).n_sonobuoys == CLAMP_SONOBUOYS[1]
+    assert clamp_config(asw_ammo=9999).asw_ammo == CLAMP_ASW_AMMO[1]
+    assert clamp_config(sub_kalibr_ammo=9999).sub_kalibr_ammo == CLAMP_SUB_KALIBR[1]
+    # In-band values round-trip unchanged.
+    assert clamp_config(n_subs=1).n_subs == 1
+    assert clamp_config(n_sonobuoys=12).n_sonobuoys == 12
+    assert clamp_config(asw_ammo=4).asw_ammo == 4
+    assert clamp_config(sub_kalibr_ammo=2).sub_kalibr_ammo == 2
+    # A default-config build (no edits) keeps the whole domain OFF + the
+    # documented per-boat Kalibr default surviving the setup path.
+    assert clamp_config().n_subs == 0
+    assert clamp_config().n_sonobuoys == 0
+    assert clamp_config().asw_ammo == 0
+    assert clamp_config().sub_kalibr_ammo == 4
 
 
 # ---------------------------------------------------------------------------

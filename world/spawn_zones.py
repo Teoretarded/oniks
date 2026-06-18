@@ -214,3 +214,30 @@ def sample_fleet(rng: np.random.Generator, n_destroyers: int,
         # as the general-destroyer placements.
         "destroyers": general,
     }
+
+
+# M5 submarine band: a DEEP OPEN-WATER anchor band CLOSER than the carrier
+# (80-140 km, peaking at 110 km) so the short-legged sub-launched Kalibr (scaled
+# down to ~500 km) can reach the base — and so the boat is FORCED into the short
+# SONOBUOY_RANGE_M buoy band, staying huntable (handoff 03: a map-edge lurker the
+# buoy counter never bites would break the ASW loop).  Drawn from a DEDICATED
+# child stream ([seed, 13]) the world owns, so this sampler NEVER perturbs the
+# fleet rng stream (the byte-identical default has n_subs=0 -> sample_subs is
+# never even called; with subs on, it runs on its own stream after the fleet).
+SUB_RANGE_MIN_M  = 80_000.0
+SUB_RANGE_MODE_M = 110_000.0
+SUB_RANGE_MAX_M  = 140_000.0
+
+
+def sample_subs(rng: np.random.Generator, n: int,
+                height_fn=terrain_height_scalar) -> list[tuple[float, float]]:
+    """Seeded deep-open-water sub anchors in the SUB band (80-140 km).  Returns
+    a list of (x, z) — each verified open water (the 9 km clearance disc) and
+    >= 25 km separated, via the SAME rejection sampler the fleet uses.  ``n``<=0
+    returns [] (byte-identical: with n_subs=0 the world never calls this)."""
+    placed: list[tuple[float, float]] = []
+    out: list[tuple[float, float]] = []
+    for _ in range(max(0, int(n))):
+        out.append(_place(rng, placed, SUB_RANGE_MIN_M, SUB_RANGE_MODE_M,
+                          SUB_RANGE_MAX_M, height_fn=height_fn))
+    return out

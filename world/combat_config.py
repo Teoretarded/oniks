@@ -106,6 +106,22 @@ class CombatConfig:
     # exercising the terrain-masking + radar-horizon physics; the home/enemy
     # coast cluster geometry stays stable across presets. Clamped to (0, 3).
     map_preset: int = 0
+    # M5 submarine warfare + ASW acoustic domain.  ALL DEFAULT 0 (OFF) so the
+    # out-of-the-box battle stays BYTE-IDENTICAL: with n_subs=0 the world builds
+    # NO Submarine, self.subs is empty, _step_acoustic_sensors / sub stepping /
+    # launch-datum injection are no-ops, victorious is unchanged (no subs to
+    # require dead), and place_sonobuoy / launch_asw return None (no stock).
+    #   n_subs            — enemy diesel SSK count (the second lose-path: each boat
+    #                       creeps in, surfaces to fire a Kalibr salvo at the base,
+    #                       runs deep; INVISIBLE to radar, killable only acoustically)
+    #   sub_kalibr_ammo   — sub-launched 3M14 Kalibr-PL rounds PER boat
+    #   n_sonobuoys       — player passive-sonobuoy stock (the primary ASW counter:
+    #                       triangulate the boat via the acoustic solver)
+    #   asw_ammo          — player ASW prosecution rounds (kill a localized boat)
+    n_subs: int = 0
+    sub_kalibr_ammo: int = 4
+    n_sonobuoys: int = 0
+    asw_ammo: int = 0
 
 
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
@@ -179,6 +195,18 @@ CLAMP_RELOAD_S:      tuple = (5, 600)
 # (FJORD COAST) — exactly len(MAP_PRESET_NAMES) - 1.
 CLAMP_MAP_PRESET:    tuple = (0, 3)
 
+# M5 submarine warfare + ASW: every floor is 0 (OFF) so the byte-identical
+# default survives a clamp_config round-trip — the setup-default path runs every
+# field through clamp_config; clamping any of these from 0 with a (1, ..) range
+# would silently spawn a boat / arm the ASW kit and break the out-of-the-box
+# battle.  n_subs ceiling 3 (a small SSK threat, mirroring CLAMP_DRONES);
+# sonobuoy stock + ASW ammo use the missile CLAMP_AMMO ceiling (200); the per-
+# boat Kalibr pool floor is 0 too (a boat with 0 rounds simply never shoots).
+CLAMP_SUBS:          tuple = (0, 3)
+CLAMP_SONOBUOYS:     tuple = (0, 200)
+CLAMP_ASW_AMMO:      tuple = (0, 200)
+CLAMP_SUB_KALIBR:    tuple = (0, 200)
+
 # M3-F4 display names, indexed by map_preset (0..3). One per CLAMP_MAP_PRESET
 # value — the setup MAP row renders MAP_PRESET_NAMES[map_preset].
 MAP_PRESET_NAMES:    tuple = ("OPEN SEA", "ARCHIPELAGO",
@@ -229,6 +257,10 @@ def clamp_config(
     buk_9m338_ammo: int = CombatConfig.buk_9m338_ammo,
     buk_mag_reload_s: float = CombatConfig.buk_mag_reload_s,
     map_preset: int = CombatConfig.map_preset,
+    n_subs: int = CombatConfig.n_subs,
+    sub_kalibr_ammo: int = CombatConfig.sub_kalibr_ammo,
+    n_sonobuoys: int = CombatConfig.n_sonobuoys,
+    asw_ammo: int = CombatConfig.asw_ammo,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
     legal UI ranges.  Intended for the setup screen: pass raw slider values,
@@ -256,6 +288,10 @@ def clamp_config(
     lo_sp, hi_sp = CLAMP_SWARM_PODS
     lo_sc, hi_sc = CLAMP_SWARM_CELLS
     lo_bk, hi_bk = CLAMP_BUK
+    lo_su, hi_su = CLAMP_SUBS
+    lo_sb, hi_sb = CLAMP_SONOBUOYS
+    lo_asw, hi_asw_ammo = CLAMP_ASW_AMMO
+    lo_sk, hi_sk = CLAMP_SUB_KALIBR
 
     return CombatConfig(
         seed=int(seed),
@@ -292,6 +328,10 @@ def clamp_config(
         buk_9m338_ammo=clamp_field(int(buk_9m338_ammo), lo_am, hi_am),
         buk_mag_reload_s=clamp_field(float(buk_mag_reload_s), lo_re, hi_re),
         map_preset=clamp_field(int(map_preset), lo_mp, hi_mp),
+        n_subs=clamp_field(int(n_subs), lo_su, hi_su),
+        sub_kalibr_ammo=clamp_field(int(sub_kalibr_ammo), lo_sk, hi_sk),
+        n_sonobuoys=clamp_field(int(n_sonobuoys), lo_sb, hi_sb),
+        asw_ammo=clamp_field(int(asw_ammo), lo_asw, hi_asw_ammo),
     )
 
 

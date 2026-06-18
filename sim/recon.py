@@ -74,6 +74,10 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from sim.radar import radar_horizon_m, terrain_blocks
+# M5 acoustic domain: the sub's one-tick launch-transient spike level.  Imported
+# at module top (sim.submarine has NO recon import, so this is cycle-free) so the
+# AcousticReceiver hears the loud transient much farther than the steady noise.
+from sim.submarine import SUB_LAUNCH_TRANSIENT
 
 # ---------------------------------------------------------------------------
 # Tuning constants (all SI, named with unit suffix where ambiguous)
@@ -176,6 +180,48 @@ ELINT_MIN_GEOMETRY_RAD: float = 0.25
 # produced transient 'sub-5-km' fixes ~20 km out with consistency under
 # 2 sigma; every one had baseline/range < 0.15).  Physically: minutes of
 # real cross-track flight are what sharpen the fix (spec §4.3).
+
+# --- Acoustic receiver (M5 sonobuoy / ASW) ---
+# The acoustic domain is a DISTINCT sensor domain from radar/ELINT: sound
+# travels UNDER the surface, so a passive sonobuoy hears a submarine with NO
+# radar horizon and NO terrain LOS (a buoy behind a coastal ridge from the boat
+# STILL hears it).  This divergence from ElintReceiver is load-bearing.
+
+SONOBUOY_RANGE_M: float = 35_000.0
+# Short FLAT passive detection range (~35 km), much shorter than ELINT's
+# continental reach: the player must PLACE buoys near where the boat will be
+# (the tasking dilemma).  The actual heard range is further gated by the
+# noise-floor-vs-range check below — a quiet creeping boat is heard much closer
+# than this cap; a loud launch transient much of the way to it.
+
+ACOUSTIC_BEARING_SIGMA_RAD: float = 0.045
+# ~2.6 deg — WIDER than ELINT's 0.02 rad (1.1 deg): a passive hydrophone's
+# bearing is coarser than a SIGINT pod's.  A cross-fix from two+ buoys still
+# converges with baseline + time, just less sharply than ELINT (so a sharp sub
+# fix takes a real buoy line, not one lucky buoy).
+
+ACOUSTIC_DETECT_FLOOR: float = 0.18
+# Detection floor (acoustic units / km).  A buoy hears the boat only when its
+# radiated noise, attenuated by range, clears this floor:
+#     heard  <=>  radiated_noise / (1 + range_km)  >=  ACOUSTIC_DETECT_FLOOR
+# (spherical-spreading-ish 1/r falloff, kept simple + monotone).  Calibrated so
+# a QUIET APPROACH boat (noise ~1.0) is heard only within ~4-5 km, while a LOUD
+# LAUNCH transient (~40) is heard out near the full SONOBUOY_RANGE_M — the
+# speed/quietness tradeoff bites exactly here (probe-measured below).
+
+ACOUSTIC_FIX_ACTIONABLE_M: float = 6_000.0
+# Quality threshold below which an acoustic cross-fix is good enough to cue the
+# ASW weapon.  Slightly looser than ELINT's 5 km (the bearings are coarser); a
+# fix this tight still sits well inside ASW_SEEKER_BASKET_M for a clean kill.
+
+ACOUSTIC_CONSISTENCY_MULT: float = 2.0
+# Same self-consistency multiplier as ELINT, applied to the WIDER acoustic sigma
+# (so the band scales with the coarser bearings — the gate stays meaningful).
+
+ACOUSTIC_MIN_GEOMETRY_RAD: float = 0.20
+# Minimum true-baseline subtended angle (~11 deg) for an acoustic fix to count.
+# Slightly looser than ELINT's 0.25 because buoys are static (a fixed field
+# gives a clean fixed baseline, unlike the drone's swept ELINT arc).
 
 ELINT_RANGE_TEST_SCALES: Tuple[float, float] = (0.5, 2.0)
 # Range-observability (likelihood-ratio) gate: bearing-only least squares
@@ -631,6 +677,15 @@ class ElintReceiver:
         # was heard recently — stale pairs persist for triangulation but a
         # silenced emitter must stop refreshing the player picture).
         self._last_heard: dict[str, float] = {}
+        # Solver tuning, held as INSTANCE attributes so a subclass (the M5
+        # AcousticReceiver) can run the SAME _solve_triangulation with a wider
+        # bearing sigma + its own actionable gate WITHOUT touching the ELINT
+        # path.  Defaulting to the ELINT module constants keeps every existing
+        # ElintReceiver result BYTE-IDENTICAL (same numbers, just read off self).
+        self._bearing_sigma = ELINT_BEARING_SIGMA_RAD
+        self._consistency_mult = ELINT_CONSISTENCY_MULT
+        self._min_geometry_rad = ELINT_MIN_GEOMETRY_RAD
+        self._fix_actionable_m = ELINT_FIX_ACTIONABLE_M
 
     # ------------------------------------------------------------------
     # Update — called every sim step by the integrator
@@ -841,12 +896,12 @@ class ElintReceiver:
             j01 -= ddz * ddx * w
             j11 += ddx * ddx * w
         rms_ang = math.sqrt(ang_sq / n)
-        band = ELINT_CONSISTENCY_MULT * ELINT_BEARING_SIGMA_RAD
+        band = self._consistency_mult * self._bearing_sigma
         if rms_ang > band:
             return est_pos, float("inf")
         # Geometry gate: the true baseline must subtend a real angle.
         baseline = math.hypot(max_x - min_x, max_z - min_z)
-        if baseline < ELINT_MIN_GEOMETRY_RAD * (range_sum / n):
+        if baseline < self._min_geometry_rad * (range_sum / n):
             return est_pos, float("inf")
         # Range-observability gate (ELINT_RANGE_TEST_SCALES doc): each
         # scaled alternative must FAIL the consistency band the estimate
@@ -863,7 +918,7 @@ class ElintReceiver:
                 alt_sq += d * d
             if math.sqrt(alt_sq / n) <= band:
                 return est_pos, float("inf")
-        sigma_eff = max(rms_ang, ELINT_BEARING_SIGMA_RAD)
+        sigma_eff = max(rms_ang, self._bearing_sigma)
         det = j00 * j11 - j01 * j01
         if det <= 1e-30:
             return est_pos, float("inf")       # geometry pins nothing
@@ -887,8 +942,9 @@ class ElintReceiver:
         return pos
 
     def is_actionable(self, emitter_id: str) -> bool:
-        """True when fix quality is below ELINT_FIX_ACTIONABLE_M."""
-        return self.fix_quality(emitter_id) < ELINT_FIX_ACTIONABLE_M
+        """True when fix quality is below the actionable threshold
+        (ELINT_FIX_ACTIONABLE_M for ELINT; the acoustic subclass overrides it)."""
+        return self.fix_quality(emitter_id) < self._fix_actionable_m
 
     def heard_emitters(self) -> List[str]:
         """List of emitter ids for which at least one bearing pair exists."""
@@ -909,6 +965,116 @@ class ElintReceiver:
         if not pairs:
             return None
         return pairs[-1]
+
+
+# ---------------------------------------------------------------------------
+# Acoustic receiver (M5 sonobuoy field / ASW)
+# ---------------------------------------------------------------------------
+
+class AcousticReceiver(ElintReceiver):
+    """Passive acoustic triangulator for a player sonobuoy field.
+
+    REUSES ElintReceiver's least-squares solver (_solve_triangulation: the same
+    A @ [X, Z] = b cross-fix, CRLB quality, consistency/geometry/range-
+    observability gates) VERBATIM, but the acoustic domain DIVERGES from radar/
+    ELINT in two load-bearing ways:
+
+      * NO radar horizon and NO terrain LOS — sound travels under the surface,
+        so a buoy behind a coastal ridge from the boat STILL hears it.  ``update``
+        therefore never calls radar_horizon_m / terrain_blocks (the property a
+        test pins).
+      * Detection is a NOISE-FLOOR-vs-RANGE physics check on the boat's
+        ``radiated_noise()``, scaled by the wider ACOUSTIC_BEARING_SIGMA_RAD: a
+        quiet creeping boat is heard only very close, a loud launch transient
+        most of the way to the short SONOBUOY_RANGE_M cap.
+
+    The observers are MANY STATIC buoys (vs ELINT's ONE moving drone).  Each
+    step rebuilds, per sub, the (buoy_xz, bearing) pair list from the buoys that
+    currently hear it — so the solver sees the live cross-fix geometry of the
+    field.  ONE buoy -> one bearing, no actionable fix (bearing-only); TWO+ with
+    baseline -> an actionable cross-fix that sharpens as more buoys hear it.
+
+    Determinism: bearing noise is drawn from the injected child stream
+    ([seed, 14] sonar) — same seed -> same fix.
+    """
+
+    def __init__(self, rng: Optional[np.random.Generator] = None):
+        # No height_fn needed (acoustics ignore terrain) — pass a trivial one so
+        # the base __init__ does not import the world terrain module.
+        super().__init__(rng=rng, height_fn=lambda x, z: -10_000.0)
+        # Override the solver tuning for the WIDER, looser acoustic domain.
+        self._bearing_sigma = ACOUSTIC_BEARING_SIGMA_RAD
+        self._consistency_mult = ACOUSTIC_CONSISTENCY_MULT
+        self._min_geometry_rad = ACOUSTIC_MIN_GEOMETRY_RAD
+        self._fix_actionable_m = ACOUSTIC_FIX_ACTIONABLE_M
+        # sub_id -> count of buoys currently hearing it (for the bearing-only
+        # vs cross-fix UI / gating).
+        self._hearing_count: dict[str, int] = {}
+
+    @staticmethod
+    def heard(noise: float, range_m: float) -> bool:
+        """Noise-floor-vs-range physics: a buoy hears a source of radiated
+        ``noise`` at ``range_m`` only when the attenuated level clears the floor.
+        Spherical-ish 1/r falloff (kept simple + monotone)."""
+        if range_m > SONOBUOY_RANGE_M or noise <= 0.0:
+            return False
+        range_km = range_m / 1_000.0
+        return (noise / (1.0 + range_km)) >= ACOUSTIC_DETECT_FLOOR
+
+    def update(self, subs: Sequence[object], buoy_positions: Sequence[np.ndarray],
+               sim_time: float = 0.0) -> None:
+        """One acoustic listening pass.
+
+        Parameters
+        ----------
+        subs : iterable of Submarine-compatible objects, each with ``.sub_id``,
+               ``.pos`` (3,), ``.alive`` and ``.radiated_noise() -> float`` plus
+               ``.launch_transient`` (a one-tick spike flag).
+        buoy_positions : iterable of (x, y, z) or (x, z) buoy world positions.
+        sim_time : world clock (s); stamps ``last_heard`` per sub.
+
+        NO horizon / terrain calls (the acoustic divergence).  Rebuilds the
+        per-sub pair list from the buoys hearing it THIS pass so the solver sees
+        the live field geometry."""
+        buoys_xz = [(float(b[0]), float(b[-1])) for b in buoy_positions]
+        for sub in subs:
+            if not getattr(sub, "alive", True):
+                continue
+            sid = getattr(sub, "sub_id", "ssk")
+            sx = float(sub.pos[0])
+            sz = float(sub.pos[2])
+            # The launch transient is a far-louder one-tick spike heard much
+            # farther than the steady radiated noise.
+            noise = float(sub.radiated_noise())
+            if getattr(sub, "launch_transient", False):
+                noise = max(noise, SUB_LAUNCH_TRANSIENT)
+            pairs = []
+            for bx, bz in buoys_xz:
+                rng_m = math.hypot(bx - sx, bz - sz)
+                if not self.heard(noise, rng_m):
+                    continue
+                # True bearing buoy -> sub, plus seeded acoustic noise.
+                true_bearing = math.atan2(sx - bx, sz - bz)
+                noisy = true_bearing + float(
+                    self._rng.normal(0.0, self._bearing_sigma))
+                noisy = (noisy + math.pi) % (2.0 * math.pi) - math.pi
+                pairs.append((np.array([bx, bz], dtype=np.float64), noisy))
+            self._hearing_count[sid] = len(pairs)
+            if pairs:
+                self._last_heard[sid] = float(sim_time)
+                # Fresh list object each pass -> the _triangulate cache key
+                # (id(pairs), len, seq) moves, so the solve recomputes.
+                self._pairs[sid] = pairs
+                self._pair_seq[sid] = self._pair_seq.get(sid, 0) + 1
+            else:
+                # No buoy hears it this pass: drop the stored geometry (the fix
+                # goes stale; the world ages the injected track out separately).
+                self._pairs.pop(sid, None)
+
+    def hearing_count(self, sub_id: str) -> int:
+        """Number of buoys that heard the sub on the last pass (0 = silent,
+        1 = bearing-only, 2+ = a cross-fix is possible)."""
+        return self._hearing_count.get(sub_id, 0)
 
 
 # ---------------------------------------------------------------------------

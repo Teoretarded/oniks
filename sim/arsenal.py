@@ -269,6 +269,50 @@ TOMAHAWK = StrikeDef(
     fuse_radius=5.0,       # m (impact fuze — hits ground; not a proximity weapon)
 )
 
+# --- 3M14 Kalibr-PL (sub-launched land-attack, M5) ---------------------------
+# Reference: 3M14 Kalibr / SS-N-30A (Kilo-class 533 mm torpedo-tube launch),
+# open-source/unclassified (missilethreat.csis.org/missile/ss-n-30a).
+#   Real: length ~8.22 m, diameter 0.533 m, Mach 0.8-0.9 subsonic turbofan
+#     cruise, ~20 m sea-skim altitude, warhead ~450 kg, range 1500-2500 km.
+#   Launch: gas-generator eject from a flooded torpedo tube, breaches the
+#     surface, a solid booster lights to push to turbofan cruise speed, then
+#     the booster is jettisoned — FUNCTIONALLY a vertical VLS sea-skimmer, i.e.
+#     the TOMAHAWK code path (StrikeMissile._is_vls triggers on the vertical
+#     eject + booster).  So this clones the TOMAHAWK turbofan profile VERBATIM
+#     except for the two M5 discriminators:
+#       1. max_range scaled DOWN to 500 km (game-scaled from the real 1500+ km)
+#          so the boat is FORCED close — inside the short SONOBUOY_RANGE_M
+#          buoy band — and stays huntable (handoff 03: a map-edge lurker the
+#          buoy counter never bites would break the whole ASW loop).
+#       2. fuel_mass scaled down to match the 500 km leg (the TLAM's 300 kg
+#          flies ~2000 km; ~80 kg covers 500 km at the same isp/cruise, with
+#          margin) so the round is honestly range-gated, not just a label.
+#   is_hostile / radar_size 'missile' / launch_warning=False are INHERITED from
+#   the StrikeMissile class attrs — the Kalibr stays fog-gated (the player's
+#   fair telegraph is the ACOUSTIC launch transient + datum, NOT a free ping).
+KALIBR_PL = StrikeDef(
+    weapon_id="kalibr", display_name="3M14 Kalibr-PL",
+    length=8.22, diameter=0.533,
+    launch_mass=1_770.0,   # kg with booster (cited torpedo-tube round + booster)
+    fuel_mass=80.0,        # kg turbofan fuel for ~500 km at Mach 0.8 (scaled down)
+    # Torpedo-tube gas-eject + solid booster to cruise speed (= TLAM VLS path).
+    booster_thrust=27_500.0,   # N solid booster (= TLAM: same accel-to-cruise job)
+    booster_time=12.0,         # s booster burn (= TLAM)
+    eject_speed=10.0,          # m/s gas-generator breach speed (= TLAM cold-gas)
+    eject_time=0.5,            # s from breach until booster ignition
+    # Williams-class turbofan in cruise (= TLAM thermodynamics).
+    max_thrust=3_100.0,    # N turbofan cruise thrust (= TLAM)
+    isp=3_600.0,           # s specific impulse (= TLAM turbofan)
+    cruise_mach=0.80,      # Mach subsonic cruise (real Kalibr 0.8-0.9)
+    cruise_alt=20.0,       # m above local surface (real Kalibr ~20 m sea-skim)
+    max_range=500_000.0,   # m — SCALED DOWN (real 1500+ km) to force the boat close
+    ref_area=0.2231,       # m^2 = pi * (0.533/2)^2
+    max_g=4.0,             # g terrain-following cruise (= TLAM)
+    warhead_mass=450.0,    # kg conventional warhead (real Kalibr land-attack)
+    fuse_radius=5.0,       # m impact fuze (= TLAM; not a proximity weapon)
+)
+
+
 # --- AGM-158 JASSM (air-launched standoff land-attack) -----------------------
 # Reference: AGM-158A JASSM, open-source unclassified data.
 #   Length: 4.27 m.  Launch mass: ~1,020 kg.
@@ -793,6 +837,7 @@ WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON, "swarm": SWARM}
 SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6,
         "sm6": SM6, "asbm": BASTION_K,
         "buk_9m317": BUK_LONG, "buk_9m338": BUK_AGILE}
-STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM, "kh31p": KH31P}
+STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM, "kh31p": KH31P,
+           "kalibr": KALIBR_PL}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
              "40n6_tel": N40N6_TEL, "swarm_pod": SWARM_POD, "buk_tel": BUK_TEL}
