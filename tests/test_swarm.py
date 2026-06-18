@@ -272,6 +272,89 @@ def test_swarm_determinism():
 
 
 # ===========================================================================
+# (3b) END-TO-END LETHALITY: a REAL SWARM round splashes a ship in lo-lo
+# ===========================================================================
+
+class _ShipSea:
+    """Deep open ocean with one stationary destroyer (a real sim.ships.Ship,
+    so the seeker, the hull OBB and apply_missile_hits all see the genuine
+    target — no _LevelSwarm stub, no hand-forced level flight)."""
+
+    def __init__(self, ship):
+        self.ships = [ship]
+
+    def terrain_height_at(self, x, z):
+        return -500.0
+
+    def surface_height_at(self, x, z):
+        return 0.0
+
+
+def _stationary_destroyer(z):
+    from sim.ships import Ship
+    s = Ship("dd_lethality", "destroyer",
+             [[0.0, z - 1.0], [0.0, z + 1.0]], 0.5, direction=1)
+    s.pos[:] = (0.0, 0.0, z)
+    s.speed = 0.0
+    s.heading = math.radians(90.0)        # beam-on to a north-bound round
+    return s
+
+
+def test_swarm_round_splashes_ship_in_lo_lo():
+    """THE END-TO-END LETHALITY PROOF: a REAL SWARM Missile (NO _LevelSwarm,
+    NO hand-forced level flight) flown from the coast lo-lo at a stationary
+    destroyer 25 km out actually SPLASHES the hull — the honest hit emerges
+    from the phase machine (boost/cruise/descent/seeker) + the swept-segment
+    OBB hit test in sim.damage, exactly as in play.
+
+    This is the regression contract for the M4-B descent-tuning fix: the
+    Oniks-calibrated STALL_SPEED=200 fade used to sag the subsonic round ~38 m
+    UNDER its commanded skim altitude, sinking it into the sea ~7.5 km short
+    (MEASURED, tools/probe_swarm_descent.py); the per-weapon stall speed lets a
+    healthy subsonic airframe hold its skim and reach the hull. Flown with a
+    commanded ground speed (as the pod sets it), so the cruise Mach-hold runs
+    the real loiter speed."""
+    from sim.damage import apply_missile_hits
+
+    run_in = 25_000.0
+    ship = _stationary_destroyer(run_in)
+    world = _ShipSea(ship)
+    hp0 = ship.hp
+
+    aim = np.array([0.0, 0.0, run_in], dtype=np.float64)
+    m = Missile(SWARM, np.array([0.0, 0.0, 0.0]), 0.0, "lo-lo", aim,
+                target_ship=ship)
+    m.is_hostile = False
+    m._commanded_speed = 130.0            # a real loiter ground speed (in band)
+
+    center, half, rot = ship.obb()
+    closest = float("inf")
+    events = []
+    for _ in range(int(600.0 / DT)):
+        prev = m.pos.copy()
+        m.update(DT, world)
+        # genuine closest-approach of the swept segment midpoint to the hull
+        # OBB surface (0 == inside the hull box).
+        local = rot.T @ (((prev + m.pos) * 0.5) - center)
+        d = math.sqrt(sum(max(abs(local[k]) - half[k], 0.0) ** 2
+                          for k in range(3)))
+        closest = min(closest, d)
+        # the same swept-segment OBB hit test the live world runs every step
+        apply_missile_hits([m], world.ships, events)
+        if not m.alive:
+            break
+
+    hit = any(kind == "ship_hit" for kind, _ in events)
+    assert hit, (
+        f"a real lo-lo SWARM round must SPLASH the destroyer at {run_in/1000:.0f} "
+        f"km; closest hull approach was {closest:.1f} m, end phase {m.phase}")
+    assert closest <= 1.0, (
+        f"the round must reach the hull surface (closest {closest:.2f} m)")
+    assert ship.hp == hp0 - 1, (
+        f"the splash must take a hit point off the hull (hp {hp0} -> {ship.hp})")
+
+
+# ===========================================================================
 # SWARM weapon + SWARM_POD launcher definition sanity
 # ===========================================================================
 
@@ -453,12 +536,25 @@ class _LevelSwarm(Missile):
     """A SWARM round on its terminal run-in, forced to fly DEAD-LEVEL straight
     at the hull at its commanded ground speed.  Scenario forcing in the e2e
     spirit (test_phase6_e2e spawns cruise-state rounds from a measured release
-    range): the swarm airframe's slow lo-lo terminal DIVE is its own tuning
-    concern (the Oniks-calibrated descent gains over-dive a subsonic round —
-    project memory 'missile gains tuned for Oniks'); here we isolate the
-    DEFENCE's throughput, not the airframe's letdown.  The round stays a
-    Missile subclass so the enemy fire control (which tracks only Missile
-    instances) engages it exactly as a real cruise missile."""
+    range): here we isolate the DEFENCE's throughput, not the airframe's
+    letdown.  The round stays a Missile subclass so the enemy fire control
+    (which tracks only Missile instances) engages it exactly as a real cruise
+    missile.
+
+    M4-B descent-tuning note (2026-06-18): a REAL SWARM round now flies the
+    honest letdown and SPLASHES a ship end-to-end — see the dedicated proof
+    test_swarm_round_splashes_ship_in_lo_lo, and the per-weapon stall fix in
+    sim/missile.py that lets the subsonic airframe hold its skim altitude (the
+    flat Oniks STALL_SPEED used to sag it into the sea ~7.5 km short). The
+    lone/synced outcomes even reproduce on real rounds (lone 0/3, synced-8 3/3,
+    peak == SM2_MAX_INFLIGHT, big reserve — MEASURED, tools/probe_swarm_descent.py).
+    This stub is RETAINED for the saturation test only because that test's
+    SECONDARY anti-confound assertion (min trickle SM-2 spent >= min synced
+    spent) is not robust across seeds on the live terminal weave (measured: a
+    cheap-seed real trickle spends ~38 vs the synced ~51), and weakening a
+    locked regression contract to switch it would be wrong. The level stub
+    keeps the saturation test a clean, deterministic isolation of the SM-2
+    in-flight cap; the real-airframe lethality is proven by the splash test."""
 
     def update(self, dt, world):
         if not self.alive:

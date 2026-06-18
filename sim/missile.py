@@ -180,8 +180,24 @@ KP_THRUST = 1.0
 THRUST_SCALE = 4.0e5       # N per Mach of error at KP_THRUST = 1
 
 # Guidance authority fades below this speed (no dynamic pressure -> no lift):
-# scale = min(1, (speed/STALL_SPEED)^2). A fuel-starved missile sinks.
-STALL_SPEED = 200.0        # m/s
+# scale = min(1, (speed/stall_speed)^2). A fuel-starved missile sinks.
+#
+# STALL_SPEED is the Mach-2.5-Oniks-calibrated absolute floor (a fuel-starved
+# Oniks bleeding below ~Mach 0.6 has lost its sustainer and sinks). But a flat
+# 200 m/s mis-classifies a HEALTHY subsonic airframe: the M4-B SWARM cruises at
+# its DESIGN ~85-150 m/s under full power, yet at a flat 200 m/s floor its
+# gravity-compensation lift is faded to (130/200)^2 = 0.42, so the alt-hold
+# sags it ~38 m UNDER every commanded altitude — at skim_alt that sinks it into
+# the sea ~7.5 km short of the target (MEASURED, tools/probe_swarm_descent.py).
+# The per-missile stall speed therefore scales to the weapon's OWN slow-cruise
+# band: a round is "stalling" when it drops below STALL_MACH_FRAC of its lo
+# cruise speed, NOT below the Oniks's absolute number. The ``min(STALL_SPEED,
+# ...)`` keeps the LOCKED fast weapons EXACTLY at 200.0 (Oniks lo cruise ~680,
+# Zircon ~1531 m/s -> the per-weapon term is >200, so the min returns the
+# literal 200.0 float, byte-for-byte) while the subsonic SWARM gets ~51 m/s.
+STALL_SPEED = 200.0        # m/s (Oniks calibration; the LOCKED absolute floor)
+STALL_MACH_FRAC = 0.6      # fraction of lo cruise speed below which lift fades
+STALL_REF_SOUND = 340.3    # m/s, fixed sea-level a (deterministic reference)
 
 # Terminal evasive weave (Task RTG, oniks_reference.md "erratic terminal
 # maneuvers"): lateral S-curve jinks across the last 12 km, full amplitude
@@ -319,6 +335,13 @@ class Missile:
         # before _plan_vertical_profile so the descent-range timing reads it.
         self._descent_scale = max(
             1.0, weapon.cruise_mach_hi / DESCENT_BASELINE_MACH)
+        # Per-weapon stall speed (see STALL_SPEED): the lift-fade floor scales
+        # to the weapon's own slow-cruise band so a HEALTHY subsonic round keeps
+        # full guidance authority and holds its skim altitude. The min() keeps
+        # the LOCKED fast weapons (Oniks/Zircon) at EXACTLY 200.0 m/s, so the
+        # fade arithmetic is byte-for-byte unchanged for them.
+        self._stall_speed = min(
+            STALL_SPEED, STALL_MACH_FRAC * weapon.cruise_mach_lo * STALL_REF_SOUND)
         self._plan_vertical_profile()
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
@@ -586,9 +609,13 @@ class Missile:
                 gx *= r
                 gz *= r
                 gy = (gy - GRAVITY) * r + GRAVITY
-        # No dynamic pressure -> no control authority (fuel-starved missiles sink).
-        if speed < STALL_SPEED:
-            k = (speed / STALL_SPEED) ** 2
+        # No dynamic pressure -> no control authority (fuel-starved missiles
+        # sink). The stall speed is per-weapon (see STALL_SPEED / __init__): an
+        # Oniks/Zircon uses the locked 200.0 m/s floor byte-for-byte; a healthy
+        # subsonic SWARM at its design ~85-150 m/s is NOT treated as stalling.
+        stall = self._stall_speed
+        if speed < stall:
+            k = (speed / stall) ** 2
             gx *= k
             gy *= k
             gz *= k
