@@ -31,6 +31,7 @@ from world.combat_config import (
     CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_ASBM_AMMO,
     CLAMP_RELOAD_S,
     CLAMP_SWARM_PODS, CLAMP_SWARM_CELLS,
+    CLAMP_BUK,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
 )
 
@@ -82,6 +83,43 @@ def test_defaults_match_locked_schema():
     assert c.n_swarm_pods == 0
     assert c.swarm_cells_per_pod == 8
     assert c.swarm_mag_reload_s == 90.0
+    # M5: the Buk mid-SAM count DEFAULTS to 0 (OFF) so the out-of-the-box battle
+    # stays byte-identical (no Buk built -> no 9S36 radar in the net ->
+    # launch_buk returns None) until a setup screen arms it.
+    assert c.n_buk == 0
+    assert c.buk_9m317_ammo == 6
+    assert c.buk_9m338_ammo == 6
+    assert c.buk_mag_reload_s == 45.0
+
+
+# ---------------------------------------------------------------------------
+# M5: n_buk config field, clamp (OFF default survivable)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_buk():
+    """M5 Buk TEL count clamp round-trip. LIKE the swarm/ASBM/ARM gates its
+    floor is 0, so the OFF default survives the default-through-setup path
+    (clamp_config runs every field): clamping n_buk=0 with a (1, ..) range
+    would silently build the Buk and break the byte-identical out-of-the-box
+    battle. Two-sided: floor 0 preserved, ceiling honoured, default unchanged."""
+    assert CLAMP_BUK[0] == 0, "Buk count floor must be 0 (OFF survivable)"
+    # A 0 count stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_buk=0).n_buk == 0
+    # A negative slider clamps up to the 0 floor.
+    assert clamp_config(n_buk=-5).n_buk == CLAMP_BUK[0]
+    # The ceiling is honoured.
+    assert clamp_config(n_buk=9999).n_buk == CLAMP_BUK[1]
+    # An in-band value round-trips unchanged.
+    assert clamp_config(n_buk=1).n_buk == 1
+    # A default-config build (no edits) keeps the Buk OFF.
+    assert clamp_config().n_buk == 0
+    # Both ammo pools + the reload round-trip and the documented defaults
+    # survive the default-through-setup path.
+    assert clamp_config().buk_9m317_ammo == 6
+    assert clamp_config().buk_9m338_ammo == 6
+    assert clamp_config().buk_mag_reload_s == 45.0
+    assert clamp_config(buk_9m317_ammo=9999).buk_9m317_ammo == CLAMP_AMMO[1]
+    assert clamp_config(buk_9m338_ammo=9999).buk_9m338_ammo == CLAMP_AMMO[1]
 
 
 # ---------------------------------------------------------------------------

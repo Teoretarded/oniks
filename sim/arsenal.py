@@ -573,6 +573,107 @@ PANTSIR_57E6 = SamDef(
     max_intercept_alt=15_000.0, # m — published engagement ceiling (spec §4.2)
 )
 
+# --- Buk mid-SAM rounds (player, M5) ------------------------------------------
+# A medium-range player SAM TEL (9A317-class self-propelled launcher) carrying
+# TWO rounds that fill the Pantsir(20 km point defense) <-> S-300(150 km area)
+# gap.  BOTH reuse the SamMissile phase machine VERBATIM (cold-ish rail eject,
+# solid boost, lofted midcourse coast on the gated ContactBoard estimate,
+# terminal PN + proximity fuse on truth) — there is NO new kill roll.  The two
+# rounds fly GENUINELY differently purely from their SamDef fields, MEASURED by
+# tools/probe_buk_rounds.py (physics, not dice):
+#
+#   9M317 (BUK_LONG)  — the LONG-REACH round.  Bigger motor + the baseline
+#     medium loft (default loft params, ~32 km-class arc geometry but capped by
+#     its own energy at the medium-SAM band) reaches ~70 km.  Moderate agility
+#     (24 g) — it is the area round, not the knife-fighter.
+#   9M338 (BUK_AGILE) — the AGILE SPRINT round.  Light airframe + a short fast
+#     sprint motor and a very high 50 g lateral ceiling track a hard-maneuvering
+#     crosser tightly, but the smaller fuel budget gives it the SHORTER reach
+#     (~40 km).  Tight 12 m fuse for the close terminal geometry.
+#
+# CONTRACT (tests/test_buk.py): 9M338.max_g > 9M317.max_g (agile turns harder);
+# 9M317.max_range > 9M338.max_range (long reaches farther); BOTH engage LOW
+# (no 40N6 4 km floor — the gap-filler must catch sea-skimmers / low movers).
+#
+# Motor sizing (derived from the S300/SM2/PANTSIR reference family, isp 240 s
+# solid propellant class):
+#   9M317 long: real 9M317 ~715 kg, ~70 km, ~Mach 4.  To reach 70 km lofted we
+#     need a healthy boost: thrust 120 000 N, burn 9 s, isp 240 s ->
+#     mdot = 120 000/(240*9.81) = 50.9 kg/s; 9 s burns ~458 kg ≈ propellant 460.
+#     Leaves ~255 kg body/seeker/warhead from a 715 kg launch mass.  delta-v ~
+#     thrust*burn/avg_mass = 120 000*9 / 485 ~ 2 227 m/s -> burnout ~Mach 6 at
+#     the loft altitude, coasting ~70 km in thin air.  ref_area pi*(0.4/2)^2.
+#   9M338 agile: real 9M338 ~165 kg light round.  Game models a 350 kg airframe
+#     (the heavier 9M317-chassis canister adapter is included).  Sprint motor:
+#     thrust 95 000 N, burn 4.5 s (short fast boost — the sprint signature),
+#     isp 240 s -> mdot = 40.3 kg/s; 4.5 s burns ~181 kg ≈ propellant 180.
+#     delta-v ~ 95 000*4.5 / 260 ~ 1 644 m/s -> burnout ~Mach 5, then the small
+#     fuel budget is the RANGE GATE (kills to ~40 km, falls short past it).  The
+#     50 g ceiling is the agility discriminator (cf. the 40 g Pantsir sprinter).
+#
+# Loft / terminal:
+#   9M317 uses the default medium loft (loft_gain 0.55 / bias 14 km / fade 25 km
+#     — the 48N6/SM-2 baseline; a medium-SAM does not need the 40N6 high arc).
+#     terminal_range 20 km (same SARH-class handover as the 48N6).
+#   9M338 lofts LESS (a flatter sprint arc keeps energy for the close turn):
+#     loft_bias_max 7 km, fade 12 km just outside its 12 km terminal gate so the
+#     dive is established before PN takes over (the 40N6/ASBM 'fade outside the
+#     gate' lesson — handing over at apogee wallows).  terminal_range 12 km.
+BUK_LONG = SamDef(
+    weapon_id="buk_9m317", display_name="9M317 (Buk-M2)",
+    length=5.55, diameter=0.40, launch_mass=715.0, propellant_mass=460.0,
+    # Rail-eject off the elevated TEL arm: a brief rail-clear kick, motor lights
+    # almost immediately (like the Pantsir's 0.3 s — NOT the S-300's 1.5 s
+    # ballistic catapult hang; the Buk is a hot rail-launch).
+    eject_speed=18.0, eject_time=0.3,
+    motor_thrust=120_000.0, motor_time=9.0, isp=240.0,
+    ref_area=0.1257,    # pi * (0.40/2)^2
+    max_g=24.0, fuse_radius=20.0,
+    terminal_range=20_000.0, max_range=70_000.0,
+    self_destruct_t=120.0, self_destruct_speed=200.0,
+    # Engages LOW: 15 m floor reaches sea-skimmers (NO 40N6 4 km floor); 25 km
+    # ceiling tops the medium-SAM band.
+    min_intercept_alt=15.0, max_intercept_alt=25_000.0,
+    # Default medium loft (the 48N6/SM-2 baseline — a medium-range area round
+    # does not need the 40N6 high arc).
+)
+
+BUK_AGILE = SamDef(
+    weapon_id="buk_9m338", display_name="9M338 (Buk-M3)",
+    length=5.08, diameter=0.36, launch_mass=480.0, propellant_mass=290.0,
+    # Same hot rail-launch as the 9M317 (one TEL family).
+    eject_speed=18.0, eject_time=0.3,
+    # SPRINT motor: high thrust for a SHORT burn (170 kN over ~4 s; the burn is
+    # propellant/mdot = 290/(170000/(240*9.81)) = 4.0 s).  The big propellant
+    # fraction (290/480) drives a HIGHER burnout speed than the 9M317's longer,
+    # gentler burn — the sprint signature — but the small TOTAL impulse means
+    # the round bleeds energy fast and is range-gated to ~40 km (MEASURED).
+    motor_thrust=170_000.0, motor_time=4.0, isp=240.0,
+    ref_area=0.1018,    # pi * (0.36/2)^2
+    # 50 g sprint agility — the discriminator vs the 24 g 9M317 (and above the
+    # 40 g Pantsir): the agile round tracks a hard crosser tightly.
+    max_g=50.0, fuse_radius=12.0,
+    # Sprint handover at 12 km; the smaller fuel budget gates the reach to
+    # ~40 km (falls short beyond — MEASURED by the probe).
+    terminal_range=12_000.0, max_range=40_000.0,
+    self_destruct_t=90.0, self_destruct_speed=200.0,
+    # Engages LOW: 10 m floor (sea-skimmers); 20 km ceiling.
+    min_intercept_alt=10.0, max_intercept_alt=20_000.0,
+    # Flatter sprint loft: keep energy for the terminal turn, and fade the loft
+    # just OUTSIDE the 12 km terminal gate so the dive is established before PN
+    # takes over (handing over at apogee wallows — the 40N6/ASBM lesson).
+    loft_gain=0.45, loft_bias_max=7_000.0, loft_fade_range=12_500.0,
+)
+
+# Buk TEL: the 9A317-class self-propelled launcher carries BOTH rounds.  The
+# 9M338 is smaller, so a real TEL packs more of them; the game models a shared
+# 6-tube block with separate 9M317 / 9M338 pools (mirrors the S-300 5P85's
+# shared 48N6/40N6 tubes).  reload_s = per-tube re-cock (salvo: no firerate
+# gate while tubes are loaded).  ammo here is the nominal in-arsenal block.
+BUK_TEL = LauncherDef("buk_tel", "9A317 TEL", ("buk_9m317", "buk_9m338"), 8.0,
+                      tubes=6, ammo=6)
+
+
 # SM-6 (RIM-174) - enemy ship long-range area-air + anti-surface SAM. Reuses the
 # SamMissile machine; 240 km reach lets the fleet engage the recon drone / high
 # Oniks at distance and counters the Zircon's high profile.
@@ -690,7 +791,8 @@ SWARM = WeaponDef(
 
 WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON, "swarm": SWARM}
 SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6,
-        "sm6": SM6, "asbm": BASTION_K}
+        "sm6": SM6, "asbm": BASTION_K,
+        "buk_9m317": BUK_LONG, "buk_9m338": BUK_AGILE}
 STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM, "kh31p": KH31P}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
-             "40n6_tel": N40N6_TEL, "swarm_pod": SWARM_POD}
+             "40n6_tel": N40N6_TEL, "swarm_pod": SWARM_POD, "buk_tel": BUK_TEL}

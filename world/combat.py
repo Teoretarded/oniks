@@ -138,10 +138,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from sim.arsenal import (BASTION_K, KH31P, N40N6, ONIKS, S300, S300_TEL,
-                         SWARM, SWARM_POD, TOMAHAWK, ZIRCON)
+from sim.arsenal import (BASTION_K, BUK_AGILE, BUK_LONG, BUK_TEL, KH31P, N40N6,
+                         ONIKS, S300, S300_TEL, SWARM, SWARM_POD, TOMAHAWK,
+                         ZIRCON)
 from sim.asbm import AsbmMissile
-from sim.bases import Structure, apply_missile_hits_structures
+from sim.bases import (DIMS_TEL as _BUK_STRUCT_DIMS, HP_S300_TEL as _BUK_STRUCT_HP,
+                       Structure, apply_missile_hits_structures)
 from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
 import sim.ew as ew
@@ -178,6 +180,30 @@ PLAYER_RADAR_RANGES = {         # size class -> max detection range (m)
     "ship": 350_000.0, "fighter": 350_000.0,
     "missile": 120_000.0, "stealth": 35_000.0,
 }
+
+# --- M5 Buk mid-SAM site (config-driven, n_buk default 0) ----------------------
+# A medium-range gap-filler battery on dry land MIDWAY between the home base
+# (x=0) and the S-300 site (x=85 km) — filling the Pantsir(20km)<->S-300(150km)
+# coverage seam.  Terrain ~150 m here (dry land, verified).
+BUK_SITE_XZ = (42_000.0, -5_000.0)
+BUK_LAUNCHER_SPACING_M = 8.0    # side-by-side gap between Buk TELs
+# The 9S36 fire-control radar joins radar_net (like the Pantsir radar): it
+# extends the gated AIR picture over the seam at the medium-SAM band, but its
+# 'ship'/surface range is kept MODEST so it does NOT over-extend the surface
+# picture (the 18 m station + drone SAR already cover the sea).  Antenna 8 m
+# (taller than the Pantsir's 5 m mast, well under the 18 m station tower).
+BUK_RADAR_ANTENNA_M = 8.0
+BUK_RADAR_RANGES = {            # size class -> max detection range (m)
+    "fighter": 90_000.0,        # medium-SAM air search (a touch beyond the
+    "missile": 90_000.0,        #   9M317's ~70 km reach)
+    "stealth": 30_000.0,        # reduced SNR for low-observable targets
+    "ship":    50_000.0,        # MODEST surface range (do not over-extend)
+}
+# Buk struct: same soft-skinned TEL class as the S-300 (sim/bases.py 's300_tel'
+# HP/dims), reused EXPLICITLY (_BUK_STRUCT_DIMS / _BUK_STRUCT_HP, imported at the
+# top) because 'buk_tel' is not in the locked sim/bases.py tables.  ``defeated``
+# checks only bastion_tel, so a Buk death never trips the lose condition (mirror
+# of the Pantsir / swarm-pod wrappers).
 
 COMBAT_SITES = [
     {"id": "radar_player_00", "kind": "radar",
@@ -501,6 +527,33 @@ class CombatWorld(WorldState):
         self._build_swarm_pods(config.n_swarm_pods,
                                config.swarm_cells_per_pod,
                                config.swarm_mag_reload_s)
+        # M5 Buk mid-SAM battery + its 9S36 radar.  DEFAULT n_buk=0 -> NO battery
+        # built, NO 9S36 joins radar_net, the pools stay 0, and launch_buk
+        # returns None: the out-of-the-box battle is byte-identical (no Buk
+        # touches the default battle or the duel path).  _build_buk_battery sets
+        # _buk_launcher_positions / _buk_tubes (used by the structures below +
+        # any renderer), seeds the 9M317 / 9M338 pools, and — when n_buk>0 —
+        # appends the 9S36 Radar to self.radar_net.  Built AFTER _build_contacts
+        # ran in super().__init__ (radar_net exists).  DETERMINISM: launch_buk
+        # constructs each SamMissile with rng=None (no per-launch multipath
+        # draw — identical to the player launch_sam path), so the Buk draws
+        # NOTHING from any child stream and cannot collide with the player-ARM/
+        # EW [seed, 8] stream (self._arm_rng above).  The round's distinct
+        # behaviour EMERGES from the SamDef fields, not from noise — fully
+        # deterministic (tests/test_buk_launch.py::test_buk_launch_determinism).
+        self.n_buk = int(config.n_buk)
+        self._buk_9m317_mag_cap = int(config.buk_9m317_ammo)
+        self._buk_9m338_mag_cap = int(config.buk_9m338_ammo)
+        self._buk_mag_reload_s = float(config.buk_mag_reload_s)
+        self._buk_9m317_mag_reload_left = 0.0
+        self._buk_9m338_mag_reload_left = 0.0
+        self.buk_9m317_ammo = 0
+        self.buk_9m338_ammo = 0
+        self._buk_launcher_positions: list = []
+        self._buk_tubes: list = []
+        self._buk_radars: list = []
+        self._buk_tube_reload_s = float(BUK_TEL.reload_s)
+        self._build_buk_battery(self.n_buk)
 
         destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
         # The enemy side's fire control: CIWS randomness derives from the
@@ -588,6 +641,20 @@ class CombatWorld(WorldState):
             self.structures.append(Structure(
                 f"swarm_pod_{i:02d}", "swarm_pod", ppos.copy(),
                 dims=SWARM_POD_STRUCT_DIMS, hp=SWARM_POD_STRUCT_HP))
+        # M5: one destructible Structure per Buk TEL (kind "buk_tel" is NOT in
+        # sim/bases.py's locked tables, so dims + hp pass explicitly — the
+        # soft-skinned S-300 TEL class).  on_destroyed clears the paired 9S36
+        # Radar's ``alive`` so the net coverage vanishes with the node (mirror of
+        # the radar-station / Pantsir wrapper).  ``defeated`` checks only
+        # bastion_tel, so a Buk death never trips the lose condition.  Empty list
+        # when n_buk=0 (byte-identical default).
+        for i, lpos in enumerate(self._buk_launcher_positions):
+            radar = self._buk_radars[i] if i < len(self._buk_radars) else None
+            self.structures.append(Structure(
+                f"buk_tel_{i:02d}", "buk_tel", lpos.copy(),
+                dims=_BUK_STRUCT_DIMS, hp=_BUK_STRUCT_HP,
+                on_destroyed=lambda _s, _r=radar: (
+                    setattr(_r, "alive", False) if _r is not None else None)))
         # The controller defends EVERY player structure (Bastion/S-300/radar
         # + the Pantsirs themselves): it prioritises the threat closest in
         # time-to-impact to any protected asset.  Stepped in step() AFTER the
@@ -2249,6 +2316,138 @@ class CombatWorld(WorldState):
             if t["reload_left"] > 0.0:
                 t["reload_left"] = max(0.0, t["reload_left"] - dt)
 
+    # ----------------------------------------------------- M5 Buk mid-SAM battery
+    #
+    # The medium-range gap-filler (Pantsir 20 km <-> S-300 150 km).  EXACT mirror
+    # of the S-300 salvo battery: N TELs side by side at BUK_SITE_XZ, each with a
+    # 6-tube block; the 9M317 / 9M338 pools are shared across all tubes; each tube
+    # re-cocks on its own timer (salvo, no firerate gate).  The 9S36 fire-control
+    # radar of each TEL JOINS self.radar_net (like the Pantsir radar) so the
+    # battery honestly extends the gated AIR picture over the seam.  With n_buk=0
+    # NOTHING is built (byte-identical default battle).
+    #
+    # FOG / NO CHEAT: launch_buk reads world.contacts.tracks (is_air) only — never
+    # truth; the SamMissile then guides on the gated ContactBoard dead-reckoned
+    # estimate and uses truth ONLY at the terminal fuse (identical to the S-300).
+
+    def _build_buk_battery(self, n: int) -> None:
+        """Build N Buk TELs side by side at the Buk site (n=0 -> nothing).  Sets
+        _buk_launcher_positions / _buk_tubes / _buk_radars, seeds the shared
+        9M317 / 9M338 pools, and appends each TEL's 9S36 Radar to radar_net."""
+        if n <= 0:
+            return
+        bx, bz = BUK_SITE_XZ
+        by = terrain_height_scalar(bx, bz)
+        mouths = [np.asarray(o, dtype=np.float64) for o in SAM_MOUTH_OFFSETS]
+        for i in range(n):
+            dx = (i - (n - 1) * 0.5) * BUK_LAUNCHER_SPACING_M
+            lpos = np.array([bx + dx, by, bz], dtype=np.float64)
+            self._buk_launcher_positions.append(lpos)
+            # Tube mouths reuse the S-300 canister offsets, clamped to the
+            # 6-tube block (the offset tuple is only a cosmetic muzzle point).
+            for k in range(BUK_TEL.tubes):
+                mouth = mouths[k % len(mouths)]
+                self._buk_tubes.append({"pos": lpos + mouth,
+                                        "reload_left": 0.0})
+            # 9S36 fire-control radar joins the player net (mirror of the
+            # Pantsir radar): coverage is immediate, and the paired Buk
+            # Structure's on_destroyed drops it on death.
+            radar = Radar(
+                radar_id=f"buk_9s36_{i:02d}",
+                pos=(float(lpos[0]), by, float(lpos[2])),
+                antenna_m=BUK_RADAR_ANTENNA_M,
+                ranges=BUK_RADAR_RANGES,
+                height_fn=self._height_fn,
+            )
+            self._buk_radars.append(radar)
+            self.radar_net.radars.append(radar)
+        # Seed the shared pools (the whole configured magazine).
+        self.buk_9m317_ammo = self._buk_9m317_mag_cap
+        self.buk_9m338_ammo = self._buk_9m338_mag_cap
+
+    @property
+    def buk_9m317_launcher_armed(self) -> bool:
+        """9M317 salvo gate: a round in the pool, no magazine refill pending,
+        and at least one Buk tube re-cocked."""
+        if self.buk_9m317_ammo <= 0:
+            return False
+        if self._buk_9m317_mag_reload_left > 0.0:
+            return False
+        return any(t["reload_left"] <= 0.0 for t in self._buk_tubes)
+
+    @property
+    def buk_9m338_launcher_armed(self) -> bool:
+        """9M338 salvo gate: a 9M338 round in the pool, no refill pending, and a
+        tube re-cocked."""
+        if self.buk_9m338_ammo <= 0:
+            return False
+        if self._buk_9m338_mag_reload_left > 0.0:
+            return False
+        return any(t["reload_left"] <= 0.0 for t in self._buk_tubes)
+
+    def launch_buk(self, aircraft_id, round_id: str = "9m317"):
+        """Salvo Buk launch at the AIR contact ``aircraft_id``: fire the
+        selected round (9M317 long / 9M338 agile) from the next READY tube (no
+        firerate gate while tubes are loaded); that tube then reloads on its own
+        timer.  The two rounds draw from their own pools.  Returns the
+        SamMissile, or None (no Buk / cold / empty / refill pending / invalid
+        track / no ready tube).
+
+        FOG / NO CHEAT: reads ONLY world.contacts.tracks (is_air) — never truth.
+        The SamMissile then guides on the gated dead-reckoned estimate and uses
+        truth ONLY at the terminal fuse (identical to launch_sam)."""
+        if round_id == "9m338":
+            if not self.buk_9m338_launcher_armed:
+                return None
+            weapon_def = BUK_AGILE
+        else:
+            if not self.buk_9m317_launcher_armed:
+                return None
+            weapon_def = BUK_LONG
+        track = self.contacts.tracks.get(aircraft_id)
+        if track is None or not track.get("is_air"):
+            return None
+        target = self._find_air_entity(aircraft_id)
+        if target is None:
+            return None
+        tube = next((t for t in self._buk_tubes if t["reload_left"] <= 0.0),
+                    None)
+        if tube is None:
+            return None
+        m = SamMissile(weapon_def, tube["pos"].copy(), target,
+                       contact_estimate_fn=self._contact_estimate(aircraft_id))
+        self.missiles.append(m)
+        tube["reload_left"] = self._buk_tube_reload_s
+        if round_id == "9m338":
+            self.buk_9m338_ammo -= 1
+            if self.buk_9m338_ammo <= 0:
+                self.buk_9m338_ammo = 0
+                self._buk_9m338_mag_reload_left = self._buk_mag_reload_s
+        else:
+            self.buk_9m317_ammo -= 1
+            if self.buk_9m317_ammo <= 0:
+                self.buk_9m317_ammo = 0
+                self._buk_9m317_mag_reload_left = self._buk_mag_reload_s
+        return m
+
+    def _step_buk_tubes(self, dt: float) -> None:
+        """Per-tube Buk reload + the two shared magazine-refill timers (mirror
+        of the S-300 tube reload + the base-step mag timers).  No-op when no Buk
+        is built (empty tube list, the refill timers stay 0)."""
+        for t in self._buk_tubes:
+            if t["reload_left"] > 0.0:
+                t["reload_left"] = max(0.0, t["reload_left"] - dt)
+        if self._buk_9m317_mag_reload_left > 0.0:
+            self._buk_9m317_mag_reload_left = max(
+                0.0, self._buk_9m317_mag_reload_left - dt)
+            if self._buk_9m317_mag_reload_left <= 0.0:
+                self.buk_9m317_ammo = self._buk_9m317_mag_cap
+        if self._buk_9m338_mag_reload_left > 0.0:
+            self._buk_9m338_mag_reload_left = max(
+                0.0, self._buk_9m338_mag_reload_left - dt)
+            if self._buk_9m338_mag_reload_left <= 0.0:
+                self.buk_9m338_ammo = self._buk_9m338_mag_cap
+
     # ----------------------------------------------------- Kh-31P player ARM
     #
     # INTENDED TARGETS / RANGE GAP (M2 GATE Finding 2-geometry, doc-only):
@@ -2462,6 +2661,7 @@ class CombatWorld(WorldState):
         super().step(dt)
         self._step_oniks_tubes(dt)        # per-tube Oniks salvo reload
         self._step_s300_tubes(dt)         # per-tube S-300 salvo reload
+        self._step_buk_tubes(dt)          # M5 per-tube Buk reload + mag refills
         self._step_swarm_pod(dt)          # M4-B swarm cell-magazine refill
         self._step_drones(dt)
         self._step_enemy_air(dt)

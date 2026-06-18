@@ -204,6 +204,12 @@ HINT_ROUND_48N6 = "S-300: 48N6 SELECTED"
 HINT_ROUND_40N6 = "S-300: 40N6 SELECTED (HIGH TARGETS, 380 KM)"
 HINT_40N6_LOW = "40N6: TARGET BELOW 4 KM ENGAGEMENT FLOOR"
 HINT_40N6_EMPTY = "40N6: ROUNDS EXPENDED"
+# M5 Buk mid-SAM round select (V) on the buk platform: 9M317 long reach <->
+# 9M338 agile (sim/arsenal.py BUK_LONG / BUK_AGILE; separate 2-round stocks).
+HINT_BUK_AIR = "BUK: SELECT AIR TARGET"
+HINT_BUK_EMPTY = "BUK: BATTERY EMPTY"
+HINT_ROUND_9M317 = "BUK: 9M317 SELECTED (LONG REACH, 70 KM)"
+HINT_ROUND_9M338 = "BUK: 9M338 SELECTED (AGILE, 40 KM)"
 HINT_ONIKS_SURFACE = "ONIKS HITS SHIPS ONLY - TAB TO S-300 FOR AIR"
 HINT_ZIRCON = "ZIRCON SELECTED - hypersonic"
 HINT_ZIRCON_RANGE = "ZIRCON: TARGET BEYOND FUEL RANGE - WILL FALL SHORT"
@@ -332,6 +338,7 @@ class SandboxState(GameState):
             getattr(self.world, "height_field", None))
         self.active_platform = "bastion"   # TAB toggles bastion <-> s300
         self.sam_round = "48n6"         # V toggles the S-300 round (5b)
+        self.buk_round = "9m317"        # V toggles the Buk round (M5) on buk
         self.oniks_weapon = "oniks"     # B toggles Oniks <-> Zircon (Phase 8)
         self.hint_text = ""             # transient HUD hint line
         self.hint_left = 0.0            # real seconds the hint stays up
@@ -506,10 +513,22 @@ class SandboxState(GameState):
         self.app.audio.ui_click()
 
     def cycle_sam_round(self) -> str:
-        """V (sam_round binding): toggle the round the next S-300 launch
-        uses — 48N6 (default, 4 rounds) <-> 40N6 (very-long-range vs HIGH
-        targets, 2 rounds, ACTIVE terminal seeker; sim/arsenal.py).  The
-        HUD/map S-300 readouts show the selection and both stocks."""
+        """V (sam_round binding): toggle the SAM round for the ACTIVE platform.
+
+        On the buk platform (M5) it cycles the Buk round — 9M317 long reach
+        <-> 9M338 agile (sim/arsenal.py BUK_LONG / BUK_AGILE; separate 2-round
+        stocks) — and returns ``self.buk_round``.
+
+        On the S-300 platform (the default for V) it toggles 48N6 (4 rounds)
+        <-> 40N6 (very-long-range vs HIGH targets, 2 rounds, ACTIVE terminal
+        seeker) and returns ``self.sam_round``.  The HUD/map readouts show the
+        selection and both stocks."""
+        if self.active_platform == "buk":
+            self.buk_round = "9m338" if self.buk_round == "9m317" else "9m317"
+            self.show_hint(HINT_ROUND_9M338 if self.buk_round == "9m338"
+                           else HINT_ROUND_9M317)
+            self.app.audio.ui_click()
+            return self.buk_round
         self.sam_round = "40n6" if self.sam_round == "48n6" else "48n6"
         self.show_hint(HINT_ROUND_40N6 if self.sam_round == "40n6"
                        else HINT_ROUND_48N6)
@@ -623,6 +642,8 @@ class SandboxState(GameState):
             return None
         if self.active_platform == "swarm":
             return self._request_swarm_launch()
+        if self.active_platform == "buk":
+            return self._request_buk_launch()
         if self.active_platform == "s300":
             return self._request_sam_launch()
         if self.oniks_weapon == "kh31p":
@@ -764,6 +785,36 @@ class SandboxState(GameState):
             self.rig.retarget()             # smooth swing onto the new round
             # True cold launch t = 0: tube cover shot off + a grey-white gas
             # puff — NO flame until the hang-apex ignition.
+            self._launch_puff(m.pos)
+            self._spawn_cover_debris(m.pos)
+            self.app.audio.play("launch", pos=m.pos)
+        return m
+
+    def _request_buk_launch(self):
+        """SPACE with the buk platform active (M5): fire the selected Buk round
+        (9M317 long / 9M338 agile) at the air contact selected on the tactical
+        map.  Mirror of _request_sam_launch: needs an AIR track; surfaces the
+        empty-pool gate as a hint BEFORE the launch call (world.launch_buk
+        returns a bare None for every refusal); fires the SAME hot rail-launch
+        puff effects.  SANDBOX worlds have no launch_buk -> graceful no-op."""
+        track = self._selected_air_track()
+        if track is None:
+            self.show_hint(HINT_BUK_AIR)
+            return None
+        launch_buk = getattr(self.world, "launch_buk", None)
+        if launch_buk is None:
+            return None
+        armed = (self.world.buk_9m338_launcher_armed
+                 if self.buk_round == "9m338"
+                 else self.world.buk_9m317_launcher_armed)
+        if not armed:
+            self.show_hint(HINT_BUK_EMPTY)
+            return None
+        m = launch_buk(self.tactical_map.selected_contact,
+                       round_id=self.buk_round)
+        if m is not None:                   # None while the tube reloads
+            self.followed = m
+            self.rig.retarget()
             self._launch_puff(m.pos)
             self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)

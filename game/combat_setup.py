@@ -38,7 +38,7 @@ from game.states import (
 )
 from world.combat_config import (
     CombatConfig,
-    CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_DESTROYERS,
+    CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_BUK, CLAMP_DESTROYERS,
     CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_MAP_PRESET, CLAMP_ONIKS,
     CLAMP_PANTSIR, CLAMP_RELOAD_S, CLAMP_S300, MAP_PRESET_NAMES, clamp_config,
 )
@@ -108,6 +108,11 @@ _WORLD_ROWS = [
      "step": 1, "lo": CLAMP_ONIKS[0],         "hi": CLAMP_ONIKS[1]},
     {"kind": "stepper", "label": "S-300 TELs",    "field": "n_s300",
      "step": 1, "lo": CLAMP_S300[0],          "hi": CLAMP_S300[1]},
+    # M5 Buk mid-SAM: floor 0 (CLAMP_BUK) so leaving it at 0 keeps the Buk OFF
+    # and the default battle byte-identical; a non-zero count builds the
+    # gap-filler battery + its 9S36 radar and unlocks the buk TAB platform.
+    {"kind": "stepper", "label": "BUK TELs",      "field": "n_buk",
+     "step": 1, "lo": CLAMP_BUK[0],           "hi": CLAMP_BUK[1]},
     {"kind": "action",  "label": _START},
 ]
 
@@ -142,6 +147,17 @@ _ARMORY_ROWS = [
      "step": 10, "lo": CLAMP_GUN_AMMO[0], "hi": CLAMP_GUN_AMMO[1]},
     {"kind": "stepper", "label": "PANTSIR  RELOAD (s)",
      "field": "pantsir_mag_reload_s",
+     "step": 5,  "lo": CLAMP_RELOAD_S[0], "hi": CLAMP_RELOAD_S[1]},
+    # M5 Buk pools + reload (only effective when n_buk > 0; the pools use the
+    # shared missile CLAMP_AMMO, the reload the shared CLAMP_RELOAD_S).
+    {"kind": "stepper", "label": "BUK  9M317 AMMO",
+     "field": "buk_9m317_ammo",
+     "step": 1,  "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
+    {"kind": "stepper", "label": "BUK  9M338 AMMO",
+     "field": "buk_9m338_ammo",
+     "step": 1,  "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
+    {"kind": "stepper", "label": "BUK  RELOAD (s)",
+     "field": "buk_mag_reload_s",
      "step": 5,  "lo": CLAMP_RELOAD_S[0], "hi": CLAMP_RELOAD_S[1]},
     {"kind": "action",  "label": _START},
 ]
@@ -178,6 +194,10 @@ class CombatSetupState(GameState):
             "n_drones":           defaults.n_drones,
             "n_oniks":            defaults.n_oniks,
             "n_s300":             defaults.n_s300,
+            "n_buk":              defaults.n_buk,
+            "buk_9m317_ammo":     defaults.buk_9m317_ammo,
+            "buk_9m338_ammo":     defaults.buk_9m338_ammo,
+            "buk_mag_reload_s":   defaults.buk_mag_reload_s,
             "oniks_ammo":         defaults.oniks_ammo,
             "oniks_mag_reload_s": defaults.oniks_mag_reload_s,
             "kh31p_ammo":         defaults.kh31p_ammo,
@@ -391,6 +411,10 @@ class CombatSetupState(GameState):
             n_drones           = int(f["n_drones"]),
             n_oniks            = int(f["n_oniks"]),
             n_s300             = int(f["n_s300"]),
+            n_buk              = int(f["n_buk"]),
+            buk_9m317_ammo     = int(f["buk_9m317_ammo"]),
+            buk_9m338_ammo     = int(f["buk_9m338_ammo"]),
+            buk_mag_reload_s   = float(f["buk_mag_reload_s"]),
             oniks_ammo         = int(f["oniks_ammo"]),
             oniks_mag_reload_s = float(f["oniks_mag_reload_s"]),
             kh31p_ammo         = int(f["kh31p_ammo"]),

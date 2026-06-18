@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from engine.mesh import Mesh
 from game.combat_end import CombatEndOverlay
-from game.controls import PLATFORMS_COMBAT
+from game.controls import PLATFORMS_COMBAT, combat_platforms
 from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
 from models.airfield import build_airfield
 from models.awacs import build_awacs
@@ -75,12 +75,29 @@ class CombatState(SandboxState):
         # __init__).  None is the legacy default-config path.
         self._config = config
         super().__init__(app)
+        # The TAB cycle is built from the world: the base three-platform cycle,
+        # plus the Buk mid-SAM (M5, when n_buk>0) and the loitering-swarm pod
+        # (M4-B, when a pod is armed).  The default battle (n_buk=0, no pod)
+        # returns EXACTLY PLATFORMS_COMBAT, so the cycle is byte-identical.
+        self.PLATFORMS = combat_platforms(self.world)
         # Phase 8: draw one Bastion TEL per Oniks launcher + one S-300 TEL per
         # S-300 launcher (salvo batteries).
         self._tel_positions = [p.copy()
                                for p in self.world._oniks_launcher_positions]
         self._sam_tel_positions = [p.copy()
                                    for p in self.world._s300_launcher_positions]
+        # M5 Buk mid-SAM TEL positions (empty list when n_buk=0).  The buk
+        # platform anchors / subjects at the first TEL; the rounds render with
+        # the existing default missile mesh (DEDICATED meshes deferred to a
+        # later batched model pass — NOT yet in DEDICATED_MISSILE_IDS).
+        self._buk_tel_positions = [p.copy()
+                                   for p in self.world._buk_launcher_positions]
+        if self._buk_tel_positions:
+            from game.sandbox import StaticSubject, _UP, LAUNCHER_LOOK_UP
+            buk0 = self._buk_tel_positions[0]
+            self._buk_tel_pos = buk0.copy()
+            self._tel_subjects["buk"] = StaticSubject(
+                buk0 + _UP * LAUNCHER_LOOK_UP, "BUK TEL")
         # HUD 'ENGAGING' flash: a real-time countdown refreshed whenever a
         # Pantsir launches a 57E6 (detected as a drop in pooled missile ammo
         # across the units — a launch is exactly one round consumed).  Read
@@ -224,6 +241,15 @@ class CombatState(SandboxState):
         super().dispose()
 
     # ------------------------------------------------------------- platform
+
+    def _platform_anchor(self):
+        """Launcher-cam ground anchor for the active platform.  The M5 buk
+        platform anchors at the Buk site; everything else defers to the base
+        (s300 -> SAM site, else the Bastion base)."""
+        if self.active_platform == "buk" and getattr(self, "_buk_tel_pos", None) \
+                is not None:
+            return self._buk_tel_pos
+        return super()._platform_anchor()
 
     def _platform_subject(self):
         """[ / ] cycle entry for the active platform: the flying drone

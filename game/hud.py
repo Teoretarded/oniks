@@ -32,7 +32,8 @@ from game.states import (ACCENT, ACCENT_DIM, BG0, DANGER, MUTED, OK_COL,
                          draw_panel)
 from game.states import gauge_bar as _gauge_bar
 from game.states import mini_compass as _mini_compass
-from sim.arsenal import BASTION, N40N6, N40N6_AMMO, ONIKS, S300, S300_TEL
+from sim.arsenal import (BASTION, BUK_AGILE, BUK_LONG, BUK_TEL, N40N6,
+                         N40N6_AMMO, ONIKS, S300, S300_TEL)
 from sim.physics import mach
 from sim.recon import RWR_LOCK
 from world.generation import BASE_POS, SAM_SITE_POS
@@ -217,6 +218,26 @@ def tube_cells(world, platform):
         # with stock in either magazine is loadable.
         have_round = (getattr(world, "sam_ammo", 0)
                       + getattr(world, "sam_ammo_40n6", 0)) > 0
+        cells = []
+        for i, t in enumerate(tubes):
+            left = float(t.get("reload_left", 0.0))
+            if left > 0.0:
+                frac = _clamp01(1.0 - left / total) if total > 0.0 else 0.0
+                cells.append((str(i + 1), "RELOADING", frac))
+            elif have_round:
+                cells.append((str(i + 1), "READY", 1.0))
+            else:
+                cells.append((str(i + 1), "EMPTY", 0.0))
+        return cells
+    if platform == "buk":
+        tubes = getattr(world, "_buk_tubes", None)
+        if not tubes:
+            return []                       # n_buk=0 / SANDBOX -> unchanged
+        total = float(getattr(world, "_buk_tube_reload_s", 0.0))
+        # READY when EITHER Buk round pool can chamber (9M317 + 9M338 share the
+        # 9A317 tubes, like the S-300's 48N6/40N6).
+        have_round = (getattr(world, "buk_9m317_ammo", 0)
+                      + getattr(world, "buk_9m338_ammo", 0)) > 0
         cells = []
         for i, t in enumerate(tubes):
             left = float(t.get("reload_left", 0.0))
@@ -651,6 +672,34 @@ def s300_round_panel(world, sam_round: str):
     return status, col, name, ammo_text
 
 
+def buk_round_panel(world, buk_round: str):
+    """M5 Buk readout with the round select (mirror of s300_round_panel) —
+    pure, unit-testable (shared by the HUD panel and the tactical-map strip).
+
+    Returns ``(status, color, weapon_name, ammo_text)``: status reflects the
+    SELECTED round's readiness (its own pool + the shared tube reload), and
+    ammo_text always shows BOTH pools so the player sees the whole magazine at
+    a glance.  Reads the CombatWorld Buk state (buk_9m317_ammo / buk_9m338_ammo
+    + the per-round launcher-armed gates)."""
+    if buk_round == "9m338":
+        ammo = world.buk_9m338_ammo
+        armed = world.buk_9m338_launcher_armed
+        name = BUK_AGILE.display_name.upper()
+    else:
+        ammo = world.buk_9m317_ammo
+        armed = world.buk_9m317_launcher_armed
+        name = BUK_LONG.display_name.upper()
+    if ammo <= 0:
+        status, col = "EMPTY", RELOAD_COL
+    elif armed:
+        status, col = "ARMED", ARMED_COL
+    else:
+        status, col = "RELOADING", RELOAD_COL
+    ammo_text = (f"9M317 {world.buk_9m317_ammo}/{BUK_TEL.ammo} "
+                 f"9M338 {world.buk_9m338_ammo}/{BUK_TEL.ammo}")
+    return status, col, name, ammo_text
+
+
 def overlay_rows(keybinds) -> list[tuple]:
     """F1 overlay rows from the LIVE binding table: ("header", group) and
     ("row", label, key_name) in registry order — pure, unit-testable."""
@@ -908,6 +957,8 @@ class HUD:
             self._drone_block(sandbox)
         elif sandbox.active_platform == "s300":
             self._s300_block(sandbox)
+        elif sandbox.active_platform == "buk":
+            self._buk_block(sandbox)
         else:
             self._bastion_block(sandbox)
 
@@ -1017,6 +1068,39 @@ class HUD:
         # M3-F5: the own-emissions gauge (how loud the player is on the
         # back-plot) anchored below the data-driven block bottom; None when
         # silent -> nothing drawn.
+        self._emissions_gauge(world, MARGIN + height)
+
+    def _buk_block(self, sandbox) -> None:
+        """M5 Buk mid-SAM platform panel (mirror of _s300_block): the selected
+        round's readiness + both pools from buk_round_panel, the target summary
+        around the Buk site, and the per-tube battery row."""
+        world = sandbox.world
+        from world.combat import BUK_SITE_XZ
+        origin = (BUK_SITE_XZ[0], 0.0, BUK_SITE_XZ[1])
+        buk_round = getattr(sandbox, "buk_round", "9m317")
+        status, col, name, ammo_text = buk_round_panel(world, buk_round)
+        rows = [
+            ("STATUS", status, col),
+            ("WEAPON", name, VALUE_COL),
+            ("AMMO", ammo_text, VALUE_COL),
+            ("TARGET", self._target_summary(sandbox, origin), VALUE_COL),
+        ]
+        radar = radar_status_row(world)
+        if radar is not None:
+            rows.append(radar)
+        jam = radar_jam_row(world)
+        if jam is not None:
+            rows.append(jam)
+        pantsir = pantsir_status_row(
+            world, engaging=getattr(sandbox, "pantsir_engaging", False))
+        if pantsir is not None:
+            rows.append(pantsir)
+        rows += [
+            ("TIME", self._scale_text(sandbox), VALUE_COL),
+            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
+        ]
+        height = self._block(BUK_TEL.display_name.upper(), rows,
+                             cells=tube_cells(world, "buk"))
         self._emissions_gauge(world, MARGIN + height)
 
     @staticmethod

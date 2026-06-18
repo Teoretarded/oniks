@@ -38,22 +38,33 @@ TIME_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0)
 # (bastion -> s300 -> drone -> ...). Pure data + helper so the cycle is
 # unit-testable headless (game/sandbox.py is GL-touching).
 PLATFORMS_SANDBOX = ("bastion", "s300")
-# COMBAT TAB cycle: M4-B adds the loitering-swarm pod as a fourth tasking
-# platform (bastion -> s300 -> drone -> swarm -> ...) ONLY when a pod is armed
-# (n_swarm_pods > 0); the default battle keeps the three-platform cycle so it
-# is byte-identical.  combat_platforms() builds the right tuple from the world.
+# COMBAT TAB cycle: M4-B adds the loitering-swarm pod as a tasking platform
+# (... -> swarm) ONLY when a pod is armed (n_swarm_pods > 0); M5 inserts the
+# Buk mid-SAM (bastion -> s300 -> buk -> ...) ONLY when a Buk is built
+# (n_buk > 0).  The default battle keeps the three-platform cycle so it is
+# byte-identical.  combat_platforms() builds the right tuple from the world.
 PLATFORMS_COMBAT = ("bastion", "s300", "drone")
 PLATFORMS_COMBAT_SWARM = ("bastion", "s300", "drone", "swarm")
 
 
 def combat_platforms(world) -> tuple:
-    """The COMBAT TAB cycle for ``world``: the four-platform cycle (with the
-    swarm pod) when a swarm pod is armed (``_swarm_mag_cap`` > 0), else the
-    default three-platform cycle.  Pure + headless: reads only a magazine
-    attribute, so the byte-identical default battle never grows the swarm tab."""
-    if getattr(world, "_swarm_mag_cap", 0) > 0:
-        return PLATFORMS_COMBAT_SWARM
-    return PLATFORMS_COMBAT
+    """The COMBAT TAB cycle for ``world``: the base three-platform cycle, with
+    the Buk mid-SAM inserted after the S-300 when a Buk is built
+    (``n_buk`` > 0), and the loitering-swarm pod appended last when a pod is
+    armed (``_swarm_mag_cap`` > 0).  Pure + headless: reads only count/magazine
+    attributes, so the byte-identical default battle (n_buk == 0, no pod)
+    returns EXACTLY ``PLATFORMS_COMBAT`` and never grows a tab."""
+    has_buk = getattr(world, "n_buk", 0) > 0
+    has_swarm = getattr(world, "_swarm_mag_cap", 0) > 0
+    if not has_buk and not has_swarm:
+        return PLATFORMS_COMBAT          # byte-identical default cycle
+    platforms = ["bastion", "s300"]
+    if has_buk:
+        platforms.append("buk")          # the mid-SAM, after the S-300
+    platforms.append("drone")
+    if has_swarm:
+        platforms.append("swarm")
+    return tuple(platforms)
 
 
 def next_platform(current: str, platforms) -> str:

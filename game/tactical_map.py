@@ -885,25 +885,34 @@ class TacticalMap:
                                     RING_TEXT_COL)
 
     def _sam_ring(self) -> None:
-        """The SELECTED round's guided envelope around the SAM site, shown
-        while the platform is active (Task S4: it teaches what's in range;
-        Phase 5b: the V round select swaps the ring — 48N6 150 km vs the
-        40N6's 380 km high-target reach)."""
-        if self.sandbox.active_platform != "s300":
+        """The SELECTED round's guided envelope around the active SAM site,
+        shown while a SAM platform is active (Task S4: it teaches what's in
+        range; Phase 5b: the V round select swaps the ring — 48N6 150 km vs the
+        40N6's 380 km high-target reach; M5: the Buk site swaps to 9M317 70 km
+        vs 9M338 40 km when the buk platform is active)."""
+        platform = self.sandbox.active_platform
+        if platform == "buk":
+            from sim.arsenal import BUK_AGILE, BUK_LONG
+            from world.combat import BUK_SITE_XZ
+            buk_round = getattr(self.sandbox, "buk_round", "9m317")
+            weapon = BUK_AGILE if buk_round == "9m338" else BUK_LONG
+            cx, cz = BUK_SITE_XZ[0], BUK_SITE_XZ[1]
+            label = f"{buk_round.upper()} {weapon.max_range / 1e3:.0f} km"
+        elif platform == "s300":
+            from sim.arsenal import N40N6
+            sam_round = getattr(self.sandbox, "sam_round", "48n6")
+            weapon = N40N6 if sam_round == "40n6" else S300
+            cx, cz = SAM_SITE_POS[0], SAM_SITE_POS[2]
+            label = f"{sam_round.upper()} {weapon.max_range / 1e3:.0f} km"
+        else:
             return
-        from sim.arsenal import N40N6
-        sam_round = getattr(self.sandbox, "sam_round", "48n6")
-        weapon = N40N6 if sam_round == "40n6" else S300
-        cx, cz = SAM_SITE_POS[0], SAM_SITE_POS[2]
         ang = np.linspace(0.0, 2.0 * np.pi, RING_SEGMENTS + 1)
         r = weapon.max_range
         self._poly_world(zip(cx + r * np.sin(ang), cz + r * np.cos(ang)),
                          SAM_RING_COL, 1.5)
         lx, ly = self.view.world_to_screen((cx, cz + r))
         if self._on_screen(lx, ly):
-            self.text.draw_text(lx + 4, ly - 18,
-                                f"{sam_round.upper()} {r / 1e3:.0f} km",
-                                SAM_RING_COL)
+            self.text.draw_text(lx + 4, ly - 18, label, SAM_RING_COL)
 
     def _lanes(self) -> None:
         for lane in LANES:
