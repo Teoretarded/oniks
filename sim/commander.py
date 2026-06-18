@@ -657,6 +657,13 @@ class EnemyCommander:
         # Active missions: prevent duplicate packages
         self._active_missions: list[MissionState] = []
 
+        # M5 #1 amphibious release: latched True once the commander has ordered
+        # TRANSPORT_RUN, so the order is emitted EXACTLY ONCE (the world applies
+        # it idempotently, but a once-flag keeps pending_orders clean and the
+        # decision deterministic).  The release reads ONLY self.picture (a
+        # sensor belief that the player base is LOCALIZED) — never truth.
+        self._amphibious_released: bool = False
+
         # AWACS flee state (tracks whether a flee order is currently in effect)
         self._awacs_fleeing: bool = False
         self._awacs_silent_until: float = 0.0   # EMCON dwell clock (see _defend_awacs)
@@ -706,6 +713,7 @@ class EnemyCommander:
         self._doctrine_defend(sim_time)
         self._doctrine_blind(sim_time)
         self._doctrine_kill(sim_time)
+        self._doctrine_amphibious(sim_time)
 
         return list(self.pending_orders)
 
@@ -1232,6 +1240,32 @@ class EnemyCommander:
                     "target_pos": target_3d.copy(),
                     "target_id": cid,
                 })
+
+    # ----------------------------------------------------------- amphibious
+
+    def _base_is_localized(self) -> bool:
+        """Sensor-only belief that the player BASE is localized enough to commit
+        an amphibious landing: the picture holds either a CONFIRMED launch
+        cluster (a back-plotted Bastion site — ``targetable_clusters``) OR a
+        LOCATED player radar-station emitter fix.  Both are derived purely from
+        sensor events fed into self.picture (ESM fixes / missile back-plots) —
+        NEVER a live player-TEL/missile truth read.  This is the SAME belief the
+        KILL/BLIND doctrines already act on, reused as the landing trigger."""
+        if self.picture.targetable_clusters():
+            return True
+        return self._believed_radar_station() is not None
+
+    def _doctrine_amphibious(self, sim_time: float) -> None:
+        """AMPHIBIOUS: release the transports (TRANSPORT_RUN) ONCE the sensor
+        picture localizes the player base.  Sensor belief in, a single
+        TRANSPORT_RUN order out — deterministic, no truth read.  Latched so the
+        order fires exactly once; the integrator applies it idempotently to
+        every loitering transport (a no-op when none are built)."""
+        if self._amphibious_released:
+            return
+        if self._base_is_localized():
+            self._amphibious_released = True
+            self.pending_orders.append({"type": "transport_run"})
 
     # --------------------------------------------------------- helpers
 

@@ -35,6 +35,7 @@ from world.combat_config import (
     CLAMP_FLAGSHIP, CLAMP_AAW, CLAMP_GROUND_ATTACK,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
     CLAMP_SUBS, CLAMP_SONOBUOYS, CLAMP_ASW_AMMO, CLAMP_SUB_KALIBR,
+    CLAMP_TRANSPORTS, CLAMP_BEACHHEAD_GRACE,
 )
 
 DT = 1.0 / 120.0
@@ -106,6 +107,47 @@ def test_defaults_match_locked_schema():
     assert c.n_sonobuoys == 0
     assert c.asw_ammo == 0
     assert c.sub_kalibr_ammo == 4
+    # M5 #1 amphibious: the transport count DEFAULTS to 0 (OFF) so the out-of-the-
+    # box battle stays byte-identical (no Transport/LCAC built -> _step_amphibious
+    # is a no-op -> defeated trips only on the bastion clause); the grace default
+    # is a positive 180 s (the timer only ever starts when an LCAC reaches the
+    # box, which cannot happen at n_transports=0).
+    assert c.n_transports == 0
+    assert c.beachhead_grace_s == 180.0
+
+
+# ---------------------------------------------------------------------------
+# M5 #1: amphibious config fields, clamp (OFF default survivable)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_amphibious():
+    """M5 #1 transport count + beachhead grace clamps.  The transport floor is 0
+    so the byte-identical default survives the default-through-setup path
+    (clamp_config runs every field): clamping n_transports=0 with a (1, ..) range
+    would silently build the landing force and break the out-of-the-box battle.
+    The grace floor is 0 (a positive default survives a round-trip and never
+    breaks the n_transports=0 gate, which is geometric).  Two-sided: floors
+    preserved, ceilings honoured, defaults unchanged."""
+    assert CLAMP_TRANSPORTS[0] == 0, "transport count floor must be 0 (OFF survivable)"
+    assert CLAMP_BEACHHEAD_GRACE[0] == 0.0, "grace floor must be 0"
+    # 0 stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_transports=0).n_transports == 0
+    # A negative slider clamps up to the 0 floor.
+    assert clamp_config(n_transports=-5).n_transports == CLAMP_TRANSPORTS[0]
+    assert clamp_config(beachhead_grace_s=-9.0).beachhead_grace_s == \
+        CLAMP_BEACHHEAD_GRACE[0]
+    # Ceilings honoured (a small amphibious group, mirroring CLAMP_SUBS).
+    assert CLAMP_TRANSPORTS == (0, 3)
+    assert clamp_config(n_transports=9999).n_transports == CLAMP_TRANSPORTS[1]
+    assert clamp_config(beachhead_grace_s=9999.0).beachhead_grace_s == \
+        CLAMP_BEACHHEAD_GRACE[1]
+    # In-band values round-trip unchanged.
+    assert clamp_config(n_transports=2).n_transports == 2
+    assert clamp_config(beachhead_grace_s=120.0).beachhead_grace_s == 120.0
+    # A default-config build (no edits) keeps the landing force OFF + the
+    # documented grace default surviving the setup-default clamp path.
+    assert clamp_config().n_transports == 0
+    assert clamp_config().beachhead_grace_s == 180.0
 
 
 # ---------------------------------------------------------------------------

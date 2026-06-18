@@ -132,6 +132,13 @@ PANTSIR_RADAR_RANGES: dict = {
     "fighter":  30_000.0,   # m — all air threats at the same horizon-limited range
     "stealth":  12_000.0,   # m — reduced SNR for low-observable targets
     "ship":     30_000.0,   # m — surface search (same aperture)
+    # M5 #1 amphibious: a tiny LCAC air-cushion craft has a far smaller surface
+    # RCS than a 200 m transport — the Pantsir's close-in surface search holds it
+    # only at the reduced (low-observable) range, so the LCAC is "hard to catch
+    # close in" (the threat EMERGES from this shorter ring vs a 'ship', NOT a
+    # probability flag).  Adding this key is byte-identical at n_transports=0
+    # (nothing rates 'lcac' until a splash) and never touches the other rings.
+    "lcac":     12_000.0,   # m — same reduced ring as a low-observable contact
 }
 PANTSIR_ANTENNA_M: float = 5.0  # m above the vehicle chassis (radar mast height)
 

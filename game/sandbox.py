@@ -1209,8 +1209,18 @@ class SandboxState(GameState):
             if ship.state == ST_GONE:
                 continue
             rot = rot_y(ship.heading) @ rot_z(ship.list_angle)
-            self.renderer.draw_mesh(self._ship_meshes[ship.ship_type],
-                                    ship.pos, rot)
+            # M5 #1: a Transport / LCAC has no dedicated mesh yet (DEFERRED) —
+            # fall back to the existing destroyer hull so an amphibious force
+            # renders without a dedicated model.  Existing ship_types are in the
+            # dict, so the fallback only ever fires for transport/lcac (and never
+            # at n_transports=0, where neither exists).
+            mesh = self._ship_meshes.get(ship.ship_type)
+            if mesh is None:
+                mesh = self._ship_meshes.get("destroyer") \
+                    or next(iter(self._ship_meshes.values()), None)
+                if mesh is None:
+                    continue
+            self.renderer.draw_mesh(mesh, ship.pos, rot)
 
     def _draw_aircraft(self) -> None:
         """Aircraft within visual range: yaw + the falling spiral's

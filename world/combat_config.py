@@ -122,6 +122,24 @@ class CombatConfig:
     sub_kalibr_ammo: int = 4
     n_sonobuoys: int = 0
     asw_ammo: int = 0
+    # M5 #1 amphibious landing force + a TIMED beachhead lose-path.  DEFAULT 0
+    # (OFF) so the out-of-the-box battle stays BYTE-IDENTICAL: with n_transports=0
+    # NO Transport/LCAC is built, self.transports + self.lcacs are empty,
+    # _step_amphibious is a pure no-op, and defeated trips ONLY on the bastion_tel
+    # clause (the regression).  A non-zero count adds the SECOND lose-path: slow
+    # Transport hulls (in self.ships -> count for victory) RUN to an offshore
+    # launch line on the commander's sensor-only release, SPLASH fast LCAC craft,
+    # and the LCACs sprint a coast LANDING_BOX; the FIRST LCAC to reach the box
+    # starts the beachhead_grace_s clock — clear ALL committed craft before it
+    # expires or defeated trips with cause 'beachhead'.
+    #   n_transports      — enemy amphibious transport count (each splashes
+    #                       LCAC_PER_TRANSPORT landing craft at its launch line)
+    #   beachhead_grace_s — seconds to clear every committed craft once an LCAC
+    #                       reaches the box (a POSITIVE default is safe at
+    #                       n_transports=0: the timer only STARTS on a landing,
+    #                       which cannot happen with no transports built)
+    n_transports: int = 0
+    beachhead_grace_s: float = 180.0
 
 
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
@@ -207,6 +225,18 @@ CLAMP_SONOBUOYS:     tuple = (0, 200)
 CLAMP_ASW_AMMO:      tuple = (0, 200)
 CLAMP_SUB_KALIBR:    tuple = (0, 200)
 
+# M5 #1 amphibious landing: the transport count floor is 0 (OFF) so the byte-
+# identical default survives a clamp_config round-trip — the setup-default path
+# runs every field through clamp_config; clamping n_transports=0 with a (1, ..)
+# range would silently build the landing force and break the out-of-the-box
+# battle.  Ceiling 3 (a small amphibious group, mirroring CLAMP_SUBS).  The
+# beachhead grace clamps with floor 0 (a positive default survives a round-trip;
+# floor 0 keeps the schema default intact and never breaks the n_transports=0
+# gate, which is geometric — the timer only starts on a landing) and a generous
+# ceiling so a long grace is selectable.
+CLAMP_TRANSPORTS:        tuple = (0, 3)
+CLAMP_BEACHHEAD_GRACE:   tuple = (0.0, 600.0)
+
 # M3-F4 display names, indexed by map_preset (0..3). One per CLAMP_MAP_PRESET
 # value — the setup MAP row renders MAP_PRESET_NAMES[map_preset].
 MAP_PRESET_NAMES:    tuple = ("OPEN SEA", "ARCHIPELAGO",
@@ -261,6 +291,8 @@ def clamp_config(
     sub_kalibr_ammo: int = CombatConfig.sub_kalibr_ammo,
     n_sonobuoys: int = CombatConfig.n_sonobuoys,
     asw_ammo: int = CombatConfig.asw_ammo,
+    n_transports: int = CombatConfig.n_transports,
+    beachhead_grace_s: float = CombatConfig.beachhead_grace_s,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
     legal UI ranges.  Intended for the setup screen: pass raw slider values,
@@ -292,6 +324,8 @@ def clamp_config(
     lo_sb, hi_sb = CLAMP_SONOBUOYS
     lo_asw, hi_asw_ammo = CLAMP_ASW_AMMO
     lo_sk, hi_sk = CLAMP_SUB_KALIBR
+    lo_tr, hi_tr = CLAMP_TRANSPORTS
+    lo_bg, hi_bg = CLAMP_BEACHHEAD_GRACE
 
     return CombatConfig(
         seed=int(seed),
@@ -332,6 +366,8 @@ def clamp_config(
         sub_kalibr_ammo=clamp_field(int(sub_kalibr_ammo), lo_sk, hi_sk),
         n_sonobuoys=clamp_field(int(n_sonobuoys), lo_sb, hi_sb),
         asw_ammo=clamp_field(int(asw_ammo), lo_asw, hi_asw_ammo),
+        n_transports=clamp_field(int(n_transports), lo_tr, hi_tr),
+        beachhead_grace_s=clamp_field(float(beachhead_grace_s), lo_bg, hi_bg),
     )
 
 

@@ -152,6 +152,8 @@ from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            AirBase, Awacs, Carrier, Fighter, JammerAircraft)
 from sim.enemy_defense import (DRONE_ENGAGE_RANGE_M, TRACK_FORM_S, VLS_DECK_M,
                                EnemyDefenseController)
+from sim.amphibious import (BEACHHEAD_GRACE_S, LCAC_PER_TRANSPORT, Lcac,
+                            Transport, landing_box_xz)
 from sim.enemy_ships import Destroyer
 from sim.enemy_ship_classes import (AirDefenseShip, Flagship, GeneralDestroyer,
                                     GroundAttackShip)
@@ -183,6 +185,13 @@ S300_LAUNCHER_SPACING_M = 8.0   # side-by-side gap between S-300 TELs (~3.05 m w
 PLAYER_RADAR_RANGES = {         # size class -> max detection range (m)
     "ship": 350_000.0, "fighter": 350_000.0,
     "missile": 120_000.0, "stealth": 35_000.0,
+    # M5 #1 amphibious: the LCAC is a tiny air-cushion craft with a small RCS —
+    # the player radar holds it at a MUCH shorter range than a full 'ship'
+    # contact, so it is "hard to catch close in" (the threat EMERGES from this
+    # shorter ring + the radar horizon, NOT a probability flag).  Adding this key
+    # is byte-identical at n_transports=0 (nothing rates 'lcac' until an LCAC
+    # splashes) and never alters the 'ship'/'fighter'/'missile'/'stealth' rings.
+    "lcac": 60_000.0,
 }
 
 # --- M5 Buk mid-SAM site (config-driven, n_buk default 0) ----------------------
@@ -202,6 +211,10 @@ BUK_RADAR_RANGES = {            # size class -> max detection range (m)
     "missile": 90_000.0,        #   9M317's ~70 km reach)
     "stealth": 30_000.0,        # reduced SNR for low-observable targets
     "ship":    50_000.0,        # MODEST surface range (do not over-extend)
+    # M5 #1 amphibious: a tiny LCAC is held only at the reduced low-observable
+    # ring (vs a 'ship' 50 km) — byte-identical at n_transports=0 (nothing rates
+    # 'lcac' until a splash).
+    "lcac":    30_000.0,
 }
 # Buk struct: same soft-skinned TEL class as the S-300 (sim/bases.py 's300_tel'
 # HP/dims), reused EXPLICITLY (_BUK_STRUCT_DIMS / _BUK_STRUCT_HP, imported at the
@@ -598,7 +611,16 @@ class CombatWorld(WorldState):
         self._buk_tube_reload_s = float(BUK_TEL.reload_s)
         self._build_buk_battery(self.n_buk)
 
-        destroyers = [s for s in self.ships if isinstance(s, Destroyer)]
+        # M5 #1: a Transport subclasses Destroyer for the hull/damage/racetrack,
+        # but it is NOT a combatant — it carries no radar (radar is None) and no
+        # weapons, so it must be EXCLUDED from the fire-control / strike /
+        # commander destroyer rosters (an included transport would crash the
+        # defense controller's self.ship.radar.detects call and is doctrinally
+        # wrong).  At n_transports=0 there are no Transports, so this filter
+        # removes nothing -> byte-identical.
+        destroyers = [s for s in self.ships
+                      if isinstance(s, Destroyer)
+                      and not isinstance(s, Transport)]
         # The enemy side's fire control: CIWS randomness derives from the
         # world seed so a battle replays exactly (determinism contract).
         # The carrier (a Destroyer subclass) is covered too — zero SM-2/
@@ -895,6 +917,36 @@ class CombatWorld(WorldState):
         # it, decays over time.  Keyed by sub_id.  NEVER a truth read.
         self._sub_threat: dict[str, float] = {}
 
+        # ---- M5 #1: amphibious landing force + the TIMED beachhead lose-path ----
+        # BYTE-IDENTICAL DEFAULT: with config.n_transports == 0 NO Transport/LCAC
+        # is built (self.transports + self.lcacs are empty -> the lists below
+        # gather the few transports already placed in self.ships at 0 count, i.e.
+        # none), _step_amphibious is a pure no-op, the beachhead clock never
+        # starts (it only starts when an LCAC reaches the box, impossible with no
+        # transports), and defeated trips ONLY on the bastion_tel clause.  FRESH
+        # child stream [seed, 15] for the LCAC splash scatter (tags 3-8/12/13/14
+        # are TAKEN, 9/10/11 RESERVED — 15 is the world-owned amphibious stream).
+        self._amphib_rng = np.random.default_rng([rng_seed, 15])
+        self._beachhead_grace_s = float(
+            getattr(config, "beachhead_grace_s", BEACHHEAD_GRACE_S))
+        # The coast LANDING_BOX (a short hop seaward of the base).
+        self._landing_box_xz = landing_box_xz(
+            (float(BASE_POS[0]), float(BASE_POS[2])))
+        # The landing force lives in self.ships (visible + counts for victory);
+        # these are convenience views, gathered from self.ships so they always
+        # reflect the live roster (LCACs splashed mid-match are appended to
+        # self.ships and picked up here on the next gather).  self.lcacs starts
+        # empty (LCACs only exist after a splash).
+        self.transports: list = [s for s in self.ships
+                                 if isinstance(s, Transport)]
+        self.lcacs: list = []
+        self._lcac_seq = 0            # monotonic id counter for splashed LCACs
+        # Beachhead clock: None until the FIRST LCAC reaches the box, then counts
+        # down from _beachhead_grace_s.  defeat trips when it hits 0 AND any
+        # committed craft is still alive; clearing them all CANCELS the loss.
+        self._beachhead_left: float | None = None
+        self._beachhead_lost = False  # latched True only on an honest expiry
+
     # --- terrain accessors (M3-terrain F3) --------------------------------
     # Override WorldState's module-shim accessors to read THIS world's active
     # HeightField, so the SAM / missile / strike terrain LOS (which call
@@ -931,6 +983,10 @@ class CombatWorld(WorldState):
         n_flagship = int(getattr(config, "n_flagship", 0))
         n_aaw = int(getattr(config, "n_aaw", 0))
         n_ground_attack = int(getattr(config, "n_ground_attack", 0))
+        # M5 #1 amphibious transports: the REAR band of sample_fleet, drawn
+        # AFTER every legacy + M5 placement (the LOCKED draw order in
+        # tests/test_spawn_zones.py), so n_transports=0 is byte-identical.
+        n_transports = int(getattr(config, "n_transports", 0))
         # M3-F4: dodge the ACTIVE preset field's islands (preset 0 == the
         # module default, so the rng draw order + result are byte-identical to
         # the legacy fleet on the default map). _height_fn is bound before
@@ -938,7 +994,7 @@ class CombatWorld(WorldState):
         layout = sample_fleet(
             fleet_rng, config.n_destroyers, height_fn=self._height_fn,
             n_flagship=n_flagship, n_aaw=n_aaw,
-            n_ground_attack=n_ground_attack)
+            n_ground_attack=n_ground_attack, n_transports=n_transports)
 
         bx, bz = float(BASE_POS[0]), float(BASE_POS[2])
 
@@ -969,6 +1025,21 @@ class CombatWorld(WorldState):
         ships.append(Carrier(
             "carrier_00", layout["carrier"],
             heading_deg=_heading(layout["carrier"])))
+
+        # M5 #1 amphibious transports (no-op at count 0 -> byte-identical: the
+        # 'transports' list is empty so nothing appends and the default fleet is
+        # exactly ["destroyer"*n, "carrier"]).  Each Transport is a soft-skinned
+        # LHD hull in self.ships -> it COUNTS toward victory (ships-count-for-win)
+        # and is OBB-damaged by the same sweep as a destroyer.  It carries NO
+        # radar (Transport.radar is None) so it never enters the ELINT/_emitters
+        # path (the world guards every self.ships radar walk).  Heading toward
+        # BASE_POS so it is already aimed at its launch line.
+        bx_, bz_ = float(BASE_POS[0]), float(BASE_POS[2])
+        for i, xz in enumerate(layout.get("transports", [])):
+            ships.append(Transport(
+                f"transport_{i:02d}", xz, base_xz=(bx_, bz_),
+                heading_deg=_heading(xz),
+                embarked_lcac=LCAC_PER_TRANSPORT))
 
         return ships
 
@@ -1159,8 +1230,11 @@ class CombatWorld(WorldState):
         if self.radar_net.visible(pos, size_class,
                                   jammers=self._active_enemy_jammers()):
             return True
+        # SAR images any SURFACE contact the drone overflies — a 'ship' OR (M5 #1)
+        # an 'lcac' landing craft (both are surface hulls; SAR never images air).
+        # At n_transports=0 nothing rates 'lcac', so adding it is byte-identical.
         drone = getattr(self, "drone", None)
-        return (size_class == "ship" and drone is not None
+        return (size_class in ("ship", "lcac") and drone is not None
                 and drone.alive and self.sar.detects(drone.pos, pos))
 
     # ---------------------------------------------------------------- phase 4
@@ -1215,7 +1289,12 @@ class CombatWorld(WorldState):
         (``alive`` is the airborne flag: parked/rearming/dead airframes
         radiate nothing).  Phase 7: live enemy ground radars also emit
         (always-on coastal installations)."""
-        ems = [(s.radar.radar_id, s.radar) for s in self.ships]
+        # M5 #1: a Transport / LCAC carries NO radar mount (radar is None) — the
+        # fog contract is that they NEVER emit, so they are skipped here and can
+        # never join the ELINT picture (found by radar/SAR geometry only).  At
+        # n_transports=0 there are none, so this filter is a no-op (byte-id).
+        ems = [(s.radar.radar_id, s.radar) for s in self.ships
+               if getattr(s, "radar", None) is not None]
         ems.extend((e.radar.radar_id, e.radar)
                    for e in self.enemy_air if e.alive)
         # Enemy ground radars: always emitting while alive.
@@ -1255,7 +1334,8 @@ class CombatWorld(WorldState):
             # Threat emitters = ship mounts + airborne enemy air radars
             # (same airborne gate as _emitters): a fighter nose radar
             # sweeping the drone SPIKEs the RWR like any other radar.
-            radars = [s.radar for s in self.ships]
+            radars = [s.radar for s in self.ships
+                      if getattr(s, "radar", None) is not None]
             radars.extend(e.radar for e in self.enemy_air if e.alive)
             self.rwr.update(drone.pos, radars,
                             [m for m in self.missiles
@@ -1289,6 +1369,87 @@ class CombatWorld(WorldState):
             aim = sub.step(dt, threat_level=threat)
             if aim is not None:
                 self._fire_kalibr_salvo(sub, aim)
+
+    # ---------------------------------------------------- M5 #1 amphibious
+    def _committed_craft(self) -> list:
+        """Every craft of the landing force the player must clear: ALL alive
+        transports (committed once built — sink them or they splash) + ALL alive
+        LCACs.  A WORLD-OUTCOME tally (it may read sim truth, exactly like the
+        defeated/victorious properties) — NOT an AI-brain read."""
+        out = [t for t in self.transports if t.alive]
+        out.extend(lc for lc in self.lcacs if lc.alive)
+        return out
+
+    def _step_amphibious(self, dt: float) -> None:
+        """Step the amphibious layer + beachhead bookkeeping.
+
+        BYTE-IDENTICAL DEFAULT: self.transports is empty with n_transports=0, so
+        the transport loop never runs, no LCAC is ever splashed, the beachhead
+        clock never starts (it only starts when an LCAC reaches the box), and
+        _beachhead_lost stays False -> defeated is unchanged (bastion clause
+        only).  The transports/LCACs themselves are stepped by the BASE step
+        (they are in self.ships); this method owns ONLY the SPLASH event (a
+        reached-launch-line transport disgorges its LCACs) and the beachhead
+        countdown.  An LCAC splashed THIS tick joins self.ships + self.lcacs and
+        is stepped on the NEXT base step (the established reactive convention)."""
+        if not self.transports and not self.lcacs:
+            return
+        # SPLASH: any RUNning transport that crossed its launch line this tick
+        # disgorges exactly LCAC_PER_TRANSPORT craft at its pos (a small seeded
+        # fan-out from the [seed, 15] stream), then drifts dead.  Sinking a
+        # transport BEFORE the line removes its embarked LCACs (they never spawn).
+        for tr in self.transports:
+            if not tr.alive:
+                continue
+            if tr.reached_launch_line():
+                self._splash_lcacs(tr)
+        # Beachhead clock: start it the instant the FIRST LCAC enters the box.
+        if self._beachhead_left is None:
+            if any(getattr(lc, "landed", False) and lc.alive
+                   for lc in self.lcacs):
+                self._beachhead_left = self._beachhead_grace_s
+        else:
+            # A landing is in progress.  If the player has cleared EVERY
+            # committed craft the loss is CANCELLED (a real save): the clock
+            # resets and the lose-flag can never trip.
+            if not self._committed_craft():
+                self._beachhead_left = None
+            else:
+                self._beachhead_left = max(0.0, self._beachhead_left - dt)
+                if self._beachhead_left <= 0.0:
+                    self._beachhead_lost = True
+
+    def _splash_lcacs(self, tr) -> None:
+        """Spawn the transport's embarked LCACs at its pos (with a small seeded
+        scatter on the [seed, 15] stream) aimed at the LANDING_BOX, append them
+        to self.ships (so they are visible + OBB-damaged + count for victory)
+        and self.lcacs, then latch the transport SPLASHed (it never splashes
+        twice and drifts dead)."""
+        n = int(getattr(tr, "embarked_lcac", LCAC_PER_TRANSPORT))
+        tx, tz = float(tr.pos[0]), float(tr.pos[2])
+        for _ in range(n):
+            # Seeded splash scatter (a few hundred m fan-out so the craft do not
+            # stack on one pixel) — drawn from the world-owned [seed, 15] stream.
+            sx = tx + float(self._amphib_rng.normal(0.0, 300.0))
+            sz = tz + float(self._amphib_rng.normal(0.0, 300.0))
+            lc = Lcac(f"lcac_{self._lcac_seq:03d}", (sx, sz),
+                      self._landing_box_xz)
+            self._lcac_seq += 1
+            self.ships.append(lc)
+            self.lcacs.append(lc)
+        tr.mark_splashed()
+
+    @property
+    def beachhead_active(self) -> bool:
+        """True while a beachhead grace clock is running (an LCAC has landed and
+        not all committed craft are cleared yet).  False at n_transports=0."""
+        return self._beachhead_left is not None
+
+    @property
+    def beachhead_left(self) -> float | None:
+        """Seconds left on the beachhead grace clock, or None if no landing is
+        in progress (the HUD reads this for the countdown — DEFERRED)."""
+        return self._beachhead_left
 
     def _fire_kalibr_salvo(self, sub, aim) -> None:
         """Spawn the sub's Kalibr salvo at the SURVEYED base coords (a coarse
@@ -1484,7 +1645,8 @@ class CombatWorld(WorldState):
         ELINT_FRESH_S (silence = the track coasts out and drops — intel
         aging), and a FRESHER existing fix (younger age, e.g. live SAR
         imaging) is never overwritten with a worse one."""
-        by_emitter = {s.radar.radar_id: s for s in self.ships}
+        by_emitter = {s.radar.radar_id: s for s in self.ships
+                      if getattr(s, "radar", None) is not None}
         for eid in self.elint.heard_emitters():
             ship = by_emitter.get(eid)
             if ship is None or not ship.alive:
@@ -1524,6 +1686,10 @@ class CombatWorld(WorldState):
         tgt: dict = {}
         for s in self.ships:
             if not s.alive:
+                continue
+            # M5 #1: a radar-less Transport/LCAC is not an emitter — it can never
+            # be ARM-targeted (no mount to home on).  Skip it (no-op at count 0).
+            if getattr(s, "radar", None) is None:
                 continue
             tgt[s.radar.radar_id] = ("SPY-1", s.radar, s)
         for e in self.enemy_air:
@@ -1876,8 +2042,11 @@ class CombatWorld(WorldState):
         destroyer SPY-1s (the carrier's mount stays silent — doctrine),
         the AWACS, and every AIRBORNE fighter nose radar (FighterRadar
         applies its own emit + forward-cone gates inside detects)."""
+        # M5 #1: a radar-less Transport/LCAC is not a sensor (radar is None) —
+        # skip it (no-op at n_transports=0 -> byte-identical).
         radars = [s.radar for s in self.ships
-                  if s.alive and not isinstance(s, Carrier)]
+                  if s.alive and not isinstance(s, Carrier)
+                  and getattr(s, "radar", None) is not None]
         if self.awacs.alive:
             radars.append(self.awacs.radar)
         radars.extend(f.radar for f in self._fighter_list if f.alive)
@@ -2020,6 +2189,10 @@ class CombatWorld(WorldState):
         for ship in self.ships:
             if not ship.alive or isinstance(ship, Carrier):
                 continue                    # carrier doctrine: always dark
+            # M5 #1: a radar-less Transport/LCAC has no mount to un-silence; skip
+            # it (no-op at n_transports=0).
+            if getattr(ship, "radar", None) is None:
+                continue
             if (not ship.radar.emitting
                     and self._drone_track_in_sector(ship, now)):
                 ship.radar.emitting = True
@@ -2030,7 +2203,14 @@ class CombatWorld(WorldState):
         """Route one commander order dict (schema: sim/commander.py) onto
         the owning entity/system."""
         kind = order["type"]
-        if kind == "vector_to_drone":
+        if kind == "transport_run":
+            # M5 #1: release every loitering transport into its beeline RUN.
+            # Idempotent (a running/splashed transport is unaffected); a no-op
+            # when none are built.  The commander decided this from its SENSOR
+            # picture only (sim/commander._doctrine_amphibious) — no truth read.
+            for tr in self.transports:
+                tr.begin_run()
+        elif kind == "vector_to_drone":
             self._vector_fighter_to_drone(order)
         elif kind == "awacs_flee":
             if self.awacs.alive:
@@ -2302,12 +2482,35 @@ class CombatWorld(WorldState):
     # ---------------------------------------------------------------- phase 3
 
     @property
-    def defeated(self) -> bool:
-        """Spec 2.2 lose condition: every Bastion TEL structure is dead
-        (no Oniks = no offense). The sim keeps running so the player can
-        watch; full end-screens come in Phase 7."""
+    def _bastion_lost(self) -> bool:
+        """The legacy lose clause: every Bastion TEL structure is dead (no Oniks
+        = no offense)."""
         return all(not s.alive for s in self.structures
                    if s.kind == "bastion_tel")
+
+    @property
+    def defeated(self) -> bool:
+        """Spec 2.2 lose condition, NOW two orthogonal clauses ORed:
+          (a) every Bastion TEL structure is dead (no Oniks = no offense); OR
+          (b) M5 #1 BEACHHEAD: an LCAC reached the LANDING_BOX and the player
+              did NOT clear ALL committed craft before the grace clock expired.
+        BYTE-IDENTICAL DEFAULT: with n_transports=0 the beachhead clock never
+        starts (no LCAC can reach the box), so _beachhead_lost is always False
+        and defeated reduces to the bastion clause exactly (the regression).
+        The sim keeps running so the player can watch; full end-screens come in
+        the later UI pass."""
+        return self._bastion_lost or self._beachhead_lost
+
+    @property
+    def defeat_cause(self):
+        """Which lose clause tripped, for the HUD banner (DEFERRED wiring):
+        'bastion' | 'beachhead' | None.  The bastion clause takes precedence if
+        both happen to hold (losing the battery is the terminal state)."""
+        if self._bastion_lost:
+            return "bastion"
+        if self._beachhead_lost:
+            return "beachhead"
+        return None
 
     @property
     def victorious(self) -> bool:
@@ -3075,6 +3278,13 @@ class CombatWorld(WorldState):
         # base step (the same reactive convention as the defense/strikes
         # launches).  No-op with n_subs=0 (self.subs empty) -> byte-identical.
         self._step_subs(dt)
+        # M5 #1: step the amphibious layer alongside the subs (after the base
+        # step ran the transports/LCACs' own update() + the OBB sweep): SPLASH a
+        # transport that reached its launch line (its LCACs join self.ships and
+        # fly on the NEXT base step — the established reactive convention) and
+        # tick the beachhead clock.  No-op with n_transports=0 (no transports/
+        # LCACs) -> byte-identical default battle.
+        self._step_amphibious(dt)
         self._step_enemy_air(dt)
         self.defense.step(self, dt)
         # M5: detect the flagship CEC-hub alive->dead edge AFTER defense.step
