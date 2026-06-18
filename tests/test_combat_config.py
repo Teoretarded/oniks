@@ -32,6 +32,7 @@ from world.combat_config import (
     CLAMP_RELOAD_S,
     CLAMP_SWARM_PODS, CLAMP_SWARM_CELLS,
     CLAMP_BUK,
+    CLAMP_FLAGSHIP, CLAMP_AAW, CLAMP_GROUND_ATTACK,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
 )
 
@@ -90,6 +91,50 @@ def test_defaults_match_locked_schema():
     assert c.buk_9m317_ammo == 6
     assert c.buk_9m338_ammo == 6
     assert c.buk_mag_reload_s == 45.0
+    # M5 enemy ship classes: ALL DEFAULT 0 so the out-of-the-box fleet stays
+    # byte-identical (the typed mixer draws today's 1 carrier + n_destroyers
+    # general layout; _spawn_ships builds GeneralDestroyer == legacy Destroyer).
+    assert c.n_flagship == 0
+    assert c.n_aaw == 0
+    assert c.n_ground_attack == 0
+
+
+# ---------------------------------------------------------------------------
+# M5: enemy ship-class counts, clamp (OFF default survivable -> byte-identical)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_ship_classes():
+    """M5 ship-class count clamps. EVERY floor is 0 so the byte-identical
+    default survives the default-through-setup path (clamp_config runs every
+    field): clamping any of these from 0 with a (1, ..) range would silently
+    spawn the class and break the out-of-the-box battle. Two-sided: floor 0
+    preserved, ceiling honoured, default unchanged."""
+    assert CLAMP_FLAGSHIP[0] == 0, "flagship floor must be 0 (OFF survivable)"
+    assert CLAMP_AAW[0] == 0, "aaw floor must be 0 (OFF survivable)"
+    assert CLAMP_GROUND_ATTACK[0] == 0, "ground_attack floor must be 0"
+    # 0 stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_flagship=0).n_flagship == 0
+    assert clamp_config(n_aaw=0).n_aaw == 0
+    assert clamp_config(n_ground_attack=0).n_ground_attack == 0
+    # Negatives clamp up to the 0 floor.
+    assert clamp_config(n_flagship=-5).n_flagship == CLAMP_FLAGSHIP[0]
+    assert clamp_config(n_aaw=-5).n_aaw == CLAMP_AAW[0]
+    assert clamp_config(n_ground_attack=-5).n_ground_attack == \
+        CLAMP_GROUND_ATTACK[0]
+    # Ceilings honoured (flagship is a 0/1 hull).
+    assert CLAMP_FLAGSHIP == (0, 1)
+    assert clamp_config(n_flagship=9).n_flagship == CLAMP_FLAGSHIP[1]
+    assert clamp_config(n_aaw=9999).n_aaw == CLAMP_AAW[1]
+    assert clamp_config(n_ground_attack=9999).n_ground_attack == \
+        CLAMP_GROUND_ATTACK[1]
+    # In-band values round-trip unchanged.
+    assert clamp_config(n_flagship=1).n_flagship == 1
+    assert clamp_config(n_aaw=3).n_aaw == 3
+    assert clamp_config(n_ground_attack=2).n_ground_attack == 2
+    # A default-config build (no edits) keeps every new class OFF.
+    assert clamp_config().n_flagship == 0
+    assert clamp_config().n_aaw == 0
+    assert clamp_config().n_ground_attack == 0
 
 
 # ---------------------------------------------------------------------------

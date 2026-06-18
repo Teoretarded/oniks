@@ -354,7 +354,13 @@ class ShipDefense:
             del self._drone_tracks[key]         # shot down / despawned
 
     def _tracked(self, st, now):
-        return st["since"] is not None and now - st["since"] >= TRACK_FORM_S
+        # M5: a per-unit continuous-visibility delay before a fire-control
+        # track forms.  Default = TRACK_FORM_S (getattr fallback keeps a plain
+        # Destroyer on the LOCKED const).  The world RAISES this on the
+        # surviving escorts when the flagship CEC hub dies (cohesion loss), so
+        # the fleet reacts slower with the datalink down — a SENSOR-honest nerf.
+        track_form_s = getattr(self.ship, "_track_form_s", TRACK_FORM_S)
+        return st["since"] is not None and now - st["since"] >= track_form_s
 
     def _estimate(self, key, tracks=None):
         """() -> (pos, vel) dead-reckoning closure over this track, frozen
@@ -402,8 +408,13 @@ class ShipDefense:
 
     def _try_sm2_launch(self, world, now):
         ship = self.ship
+        # M5: a per-unit simultaneous-SM-2 cap (an AirDefenseShip sustains more
+        # concurrent rounds than a general destroyer).  getattr fallback keeps
+        # a plain Destroyer on the LOCKED SM2_MAX_INFLIGHT const (existing
+        # enemy_defense tests unchanged).
+        max_inflight = getattr(ship, "sm2_max_inflight", SM2_MAX_INFLIGHT)
         if (ship.sm2_ammo <= 0 or ship.sm2_reload_timer > 0.0
-                or len(self._inflight) >= SM2_MAX_INFLIGHT):
+                or len(self._inflight) >= max_inflight):
             return
         sx, sz = float(ship.pos[0]), float(ship.pos[2])
         best_key = None

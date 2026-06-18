@@ -23,6 +23,20 @@ from dataclasses import dataclass
 class CombatConfig:
     seed: int = 1337
     n_destroyers: int = 3        # carrier is ALWAYS 1, not configurable
+    # M5 enemy ship classes — the doctrinally varied task group.  ALL DEFAULT 0
+    # so the out-of-the-box fleet stays BYTE-IDENTICAL: with these 0 the typed
+    # mixer (world/spawn_zones.sample_fleet) draws EXACTLY today's layout (1
+    # carrier + n_destroyers GENERAL destroyers) and _spawn_ships builds
+    # GeneralDestroyer hulls (numerically == the legacy Destroyer), so
+    # sample_fleet's LOCKED tests, the duel, the smoke determinism check and the
+    # default battle all replay bit-for-bit.  A non-zero count adds that class:
+    #   n_flagship (0/1)   — the CEC datalink-hub command ship (cues the
+    #                        escorts; its DEATH degrades the fleet, sensor-honest)
+    #   n_aaw              — dedicated air-defense escorts (deep SM-2 + higher cap)
+    #   n_ground_attack    — land-attack escorts (heavy TLAM bank, drains first)
+    n_flagship: int = 0
+    n_aaw: int = 0
+    n_ground_attack: int = 0
     n_awacs: int = 1
     # M3-F2 EA-18G-class escort jammers. DEFAULT 0 so the out-of-the-box battle
     # stays BYTE-IDENTICAL (no jammer built -> _player_visible passes jammers=()
@@ -97,6 +111,14 @@ class CombatConfig:
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
 #     (min, max) inclusive
 CLAMP_DESTROYERS:    tuple = (0, 12)
+# M5 enemy ship classes: every floor is 0 (OFF) so the byte-identical default
+# survives a clamp_config round-trip — the setup-default path runs every field
+# through clamp_config; clamping any of these from 0 with a (1, ..) range would
+# silently spawn the class and break the out-of-the-box battle.  The flagship is
+# a 0/1 hull (one command ship); the escort classes scale like the destroyers.
+CLAMP_FLAGSHIP:      tuple = (0, 1)
+CLAMP_AAW:           tuple = (0, 12)
+CLAMP_GROUND_ATTACK: tuple = (0, 12)
 CLAMP_AWACS:         tuple = (0, 3)
 # M3-F2 escort jammers: floor 0 (OFF default survives a clamp_config round-trip
 # — like CLAMP_AWACS the setup-default path runs every field through clamp_config;
@@ -176,6 +198,9 @@ def clamp_config(
     *,
     seed: int = CombatConfig.seed,
     n_destroyers: int = CombatConfig.n_destroyers,
+    n_flagship: int = CombatConfig.n_flagship,
+    n_aaw: int = CombatConfig.n_aaw,
+    n_ground_attack: int = CombatConfig.n_ground_attack,
     n_awacs: int = CombatConfig.n_awacs,
     n_jammers: int = CombatConfig.n_jammers,
     player_jammer: int = CombatConfig.player_jammer,
@@ -210,6 +235,9 @@ def clamp_config(
     get back a clean frozen config.  The seed is unclamped (any int is valid).
     """
     lo_d, hi_d = CLAMP_DESTROYERS
+    lo_fs, hi_fs = CLAMP_FLAGSHIP
+    lo_aaw, hi_aaw = CLAMP_AAW
+    lo_ga, hi_ga = CLAMP_GROUND_ATTACK
     lo_aw, hi_aw = CLAMP_AWACS
     lo_jm, hi_jm = CLAMP_JAMMERS
     lo_pj, hi_pj = CLAMP_PLAYER_JAMMER
@@ -232,6 +260,9 @@ def clamp_config(
     return CombatConfig(
         seed=int(seed),
         n_destroyers=clamp_field(int(n_destroyers), lo_d, hi_d),
+        n_flagship=clamp_field(int(n_flagship), lo_fs, hi_fs),
+        n_aaw=clamp_field(int(n_aaw), lo_aaw, hi_aaw),
+        n_ground_attack=clamp_field(int(n_ground_attack), lo_ga, hi_ga),
         n_awacs=clamp_field(int(n_awacs), lo_aw, hi_aw),
         n_jammers=clamp_field(int(n_jammers), lo_jm, hi_jm),
         player_jammer=clamp_field(int(player_jammer), lo_pj, hi_pj),

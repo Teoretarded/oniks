@@ -150,9 +150,11 @@ import sim.ew as ew
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
                            AirBase, Awacs, Carrier, Fighter, JammerAircraft)
-from sim.enemy_defense import (DRONE_ENGAGE_RANGE_M, VLS_DECK_M,
+from sim.enemy_defense import (DRONE_ENGAGE_RANGE_M, TRACK_FORM_S, VLS_DECK_M,
                                EnemyDefenseController)
 from sim.enemy_ships import Destroyer
+from sim.enemy_ship_classes import (AirDefenseShip, Flagship, GeneralDestroyer,
+                                    GroundAttackShip)
 from sim.enemy_strikes import SALVO_PERIOD_S, SALVO_SIZE, EnemyStrikeController
 from sim.missile import Missile
 from sim.pantsir import Pantsir, PantsirDefenseController
@@ -312,6 +314,16 @@ CMD_WEAPON_PERIOD_S = 1.0   # s between fighter release_weapons sweeps (the
 # back-plot error beyond the basket puts the round in the dirt, so strike
 # effectiveness EMERGES from sensor geometry, never from a roll.
 SEEKER_BASKET_M = 1_000.0
+
+# M5 flagship CEC degradation: when the datalink hub sinks the surviving
+# escorts lose fleet cohesion — their effective continuous-visibility delay
+# before a fire-control track forms (sim/enemy_defense TRACK_FORM_S, read per
+# unit via getattr) is multiplied by this factor.  A bigger TRACK_FORM_S means
+# the escort must hold a target LONGER on its own SPY-1 before it can shoot, so
+# the leaderless fleet reacts measurably slower.  Sized so the delay clearly
+# exceeds the default 1.5 s (2x -> 3.0 s) without being so large the escorts
+# stop defending themselves entirely.
+FLAGSHIP_DEAD_COHESION_FACTOR = 2.0
 
 # Terminal aim height over the acquired structure: OBB mid-height (the
 # sim/strike.py target_y doc — aiming at ground level under a target on
@@ -744,6 +756,21 @@ class CombatWorld(WorldState):
 
         carrier = next(s for s in self.ships if isinstance(s, Carrier))
         self.carrier = carrier
+        # ---- M5 flagship (CEC datalink hub, DEFAULT n_flagship=0 -> None) ----
+        # The flagship's live SPY-1 cues the escorts via _enemy_cue_radars (CEC
+        # remote cue).  When it SINKS its radar goes dark (ShipDefense.step's
+        # dead-ship branch) and drops out of the cue set automatically, AND the
+        # escorts' cohesion degrades (their effective TRACK_FORM_S rises) — a
+        # SENSOR-honest nerf: the fleet falls back to own-SPY-1 and reacts
+        # slower with the datalink down.  _flagship_alive latches the
+        # alive->dead edge so the cohesion bump + 'datalink_degraded' event
+        # fire exactly once.  None (the byte-identical default) leaves every
+        # path untouched.
+        self.flagship = next(
+            (s for s in self.ships if isinstance(s, Flagship)), None)
+        self._flagship_was_alive = (self.flagship is not None
+                                    and self.flagship.alive)
+        self._datalink_degraded = False
         # Recovery sites in NEAREST-SURVIVING-base priority order is the
         # fighters' own logic; list order here only seeds the round-robin
         # launch rotation (airfield first).
@@ -819,23 +846,36 @@ class CombatWorld(WorldState):
         return self.height_field.surface_scalar(x, z)
 
     def _spawn_ships(self):
-        """Seeded fleet generation via world/spawn_zones.sample_fleet.
+        """Seeded TYPED fleet generation via world/spawn_zones.sample_fleet.
 
-        The carrier (always 1) and config.n_destroyers destroyers are placed
+        The carrier (always 1) plus the config-driven typed roster (general
+        destroyers + the M5 classes: flagship / aaw / ground_attack) are placed
         using a numpy SeedSequence child off the world seed (tag [seed, 3] —
         never colliding with defense/recon/commander/pantsir streams at tags
         6/4/5/6 respectively).  All hulls get a heading toward BASE_POS.
         _config is set BEFORE super().__init__ so this method finds it.
+
+        BYTE-IDENTICAL: with n_flagship=n_aaw=n_ground_attack=0 (the default)
+        the typed mixer draws EXACTLY today's layout and only GeneralDestroyer
+        hulls are built — and GeneralDestroyer is numerically the legacy
+        Destroyer (sim/enemy_ship_classes.py), so the default battle replays
+        bit-for-bit.  The general hulls keep the legacy ``destroyer_{i:02d}``
+        ids in the legacy order; the new classes append after.
         """
         import math as _math
         config = getattr(self, "_config", _DEFAULT_CONFIG)
         fleet_rng = np.random.default_rng([config.seed, 3])
+        n_flagship = int(getattr(config, "n_flagship", 0))
+        n_aaw = int(getattr(config, "n_aaw", 0))
+        n_ground_attack = int(getattr(config, "n_ground_attack", 0))
         # M3-F4: dodge the ACTIVE preset field's islands (preset 0 == the
         # module default, so the rng draw order + result are byte-identical to
         # the legacy fleet on the default map). _height_fn is bound before
         # super().__init__ calls this, so it is always available here.
-        layout = sample_fleet(fleet_rng, config.n_destroyers,
-                              height_fn=self._height_fn)
+        layout = sample_fleet(
+            fleet_rng, config.n_destroyers, height_fn=self._height_fn,
+            n_flagship=n_flagship, n_aaw=n_aaw,
+            n_ground_attack=n_ground_attack)
 
         bx, bz = float(BASE_POS[0]), float(BASE_POS[2])
 
@@ -844,10 +884,24 @@ class CombatWorld(WorldState):
             return _math.degrees(_math.atan2(bx - ax, bz - az))
 
         ships = []
-        for i, xz in enumerate(layout["destroyers"]):
-            ships.append(Destroyer(
-                f"destroyer_{i:02d}", xz,
+        # General destroyers: GeneralDestroyer == legacy Destroyer numerically,
+        # keeping the legacy ids/order (byte-identical default).
+        for i, xz in enumerate(layout["general"]):
+            ships.append(GeneralDestroyer(
+                f"destroyer_{i:02d}", xz, heading_deg=_heading(xz)))
+
+        # M5 typed escorts (no-ops at count 0 -> byte-identical).
+        for i, xz in enumerate(layout["aaw"]):
+            ships.append(AirDefenseShip(
+                f"aaw_destroyer_{i:02d}", xz, heading_deg=_heading(xz)))
+        for i, xz in enumerate(layout["ground_attack"]):
+            ships.append(GroundAttackShip(
+                f"ground_attack_destroyer_{i:02d}", xz,
                 heading_deg=_heading(xz)))
+        if layout["flagship"] is not None:
+            ships.append(Flagship(
+                "flagship_00", layout["flagship"],
+                heading_deg=_heading(layout["flagship"])))
 
         ships.append(Carrier(
             "carrier_00", layout["carrier"],
@@ -1304,13 +1358,52 @@ class CombatWorld(WorldState):
 
     # ---------------------------------------------------------------- phase 5a
 
+    def _check_flagship_cec(self) -> None:
+        """M5 CEC degradation on the flagship alive->dead edge.
+
+        Two effects, both SENSOR-honest (no player-truth read):
+          1. The remote CUE evaporates — handled passively in
+             _enemy_cue_radars (the dead hub's radar fails the alive gate), so
+             escorts already fall back to own-SPY-1.  Nothing to do here.
+          2. COHESION drops — the surviving escorts' effective TRACK_FORM_S
+             rises (FLAGSHIP_DEAD_COHESION_FACTOR), so each must hold a target
+             LONGER on its own radar before a fire-control track forms.  We
+             raise the per-unit ``_track_form_s`` knob the controller reads via
+             getattr; the carrier (silent, no offense) is skipped.
+
+        Latched on the edge so the bump + the 'datalink_degraded' event fire
+        EXACTLY once.  A None flagship (byte-identical default) never enters."""
+        flagship = getattr(self, "flagship", None)
+        if flagship is None or self._datalink_degraded:
+            return
+        if self._flagship_was_alive and not flagship.alive:
+            self._datalink_degraded = True
+            base = TRACK_FORM_S * FLAGSHIP_DEAD_COHESION_FACTOR
+            for s in self.ships:
+                if s is flagship or isinstance(s, Carrier):
+                    continue
+                # Raise (never lower) the escort's track-formation delay.
+                s._track_form_s = max(
+                    getattr(s, "_track_form_s", TRACK_FORM_S), base)
+            self.events.append(("datalink_degraded", flagship.pos.copy()))
+        self._flagship_was_alive = flagship.alive
+
     def _enemy_cue_radars(self):
         """Datalink cueing sources beyond own-ship SPY-1 (spec section 3:
         "enemy ships rely on their own radar or AWACS cueing"): the live
-        AWACS radar AND any live enemy ground radars (they join the enemy
-        picture, cueing destroyers like the AWACS).  Resolved lazily —
-        the defense controller is built before the AWACS and before
-        _spawn_enemy_radars in __init__."""
+        AWACS radar, any live enemy ground radars, AND (M5) the live FLAGSHIP
+        SPY-1 — the CEC datalink hub.  They join the enemy picture, cueing the
+        escorts so an escort can form an SM-2 track on a target the flagship
+        holds before its OWN SPY-1 has line of sight.
+
+        SENSOR-honest flagship degradation: when the flagship SINKS its radar
+        goes dark (ShipDefense.step clears radar.alive on a dead ship) and the
+        ``r.alive`` gate below DROPS it from the cue set automatically — the
+        escorts lose the remote cue and fall back to own-SPY-1.  This never
+        reads player truth; it only removes a dead emitter from the datalink.
+
+        Resolved lazily — the defense controller is built before the AWACS and
+        before _spawn_enemy_radars in __init__."""
         cues = []
         awacs = getattr(self, "awacs", None)
         if awacs is not None and awacs.alive:
@@ -1318,6 +1411,13 @@ class CombatWorld(WorldState):
         for r in getattr(self, "_enemy_ground_radars", []):
             if r.alive:
                 cues.append(r)
+        # M5 CEC hub: the flagship's own SPY-1, only while the hull lives AND
+        # the radar is up.  A dead/silent flagship contributes nothing — the
+        # remote cue evaporates exactly as the doctrine demands.
+        flagship = getattr(self, "flagship", None)
+        if (flagship is not None and flagship.alive
+                and flagship.radar.alive and flagship.radar.emitting):
+            cues.append(flagship.radar)
         return cues
 
     def _step_enemy_air(self, dt: float) -> None:
@@ -1824,7 +1924,17 @@ class CombatWorld(WorldState):
         tp = order["target_pos"]
         tx, tz, aim_y = self._refine_strike_aim(float(tp[0]), float(tp[2]))
         rounds = []
-        for ship in self.ships:
+        # M5: GroundAttack hulls own the deep TLAM bank — drain THOSE cells
+        # FIRST so the dedicated land-attack ship spends its magazine before
+        # the general/AAW escorts dip into their token self-defense TLAM.  A
+        # stable sort keyed on (NOT ground-attack) preserves the legacy ship
+        # order within each group, so with NO ground-attack ships (the
+        # byte-identical default) the iteration order is UNCHANGED.
+        ordered = sorted(
+            self.ships,
+            key=lambda s: 0 if getattr(s, "ship_class_role", None)
+            == "ground_attack" else 1)
+        for ship in ordered:
             if isinstance(ship, Carrier):
                 continue                     # carriers carry no TLAM
             while (len(rounds) < SALVO_SIZE and ship.alive
@@ -2666,6 +2776,9 @@ class CombatWorld(WorldState):
         self._step_drones(dt)
         self._step_enemy_air(dt)
         self.defense.step(self, dt)
+        # M5: detect the flagship CEC-hub alive->dead edge AFTER defense.step
+        # (which clears a sunk ship's radar.alive); bump escort cohesion once.
+        self._check_flagship_cec()
         self.strikes.step(self, dt)
         # Phase 5b: the commander — fed and ticked after the reactive
         # layers so rounds its orders spawn join self.missiles this step

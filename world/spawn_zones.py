@@ -97,35 +97,120 @@ def _place(rng: np.random.Generator, placed: list, r_min: float,
                        f"{len(placed)} already placed)")
 
 
-def sample_fleet(rng: np.random.Generator, n_destroyers: int,
-                 height_fn=terrain_height_scalar) -> dict:
-    """Seeded fleet layout: {'carrier': (x, z), 'destroyers': [(x, z)...]}.
+# M5 doctrinal bands (toward the player coast = smaller range):
+#   * carrier + flagship: the DEEP central band (high-value, hang back).  The
+#     flagship rides the carrier's escort ring so the CEC hub stays close to
+#     the asset it protects.
+#   * aaw: FORWARD toward ZONE_RANGE_MIN — the air-defense picket leans into the
+#     threat axis (it shoots the inbound raid first).
+#   * ground_attack: the MID band (the general screen band) — it loiters to
+#     range the back-plot, neither deep nor exposed.
+#   * transports: the REAR (deepest) band — amphibious shipping hides behind
+#     the carrier (n_transports=0 here; the band exists for a later feature).
+# TODO(M5+ amphibious-landing, handoff 05): n_transports is intentionally
+#   UNWIRED from CombatConfig / world.combat._spawn_ships — there is no transport
+#   hull class yet.  This sampler path + the TRANSPORT_* bands + the four
+#   spawn_zones tests are forward-scaffolding for the amphibious-landing feature;
+#   wire n_transports through CombatConfig (+ CLAMP_TRANSPORTS + a Transport hull
+#   in sim/enemy_ship_classes.py) when that milestone lands.  Inert (count 0) and
+#   byte-identical-safe until then.
+AAW_RANGE_MIN_M = ZONE_RANGE_MIN_M           # 110 km — forward picket
+AAW_RANGE_MODE_M = 140_000.0                  # peaks nearer the player than the
+AAW_RANGE_MAX_M = 200_000.0                   #   general screen's 180 km mode
+TRANSPORT_RANGE_MIN_M = CARRIER_RANGE_MIN_M   # rear, with / behind the carrier
+TRANSPORT_RANGE_MODE_M = CARRIER_RANGE_MODE_M
+TRANSPORT_RANGE_MAX_M = CARRIER_RANGE_MAX_M
 
-    Carrier first (deep band), then up to 2 escorts on its 20-35 km ring,
-    then the remaining destroyers screening in the main zone.
+
+def _place_escort_ring(rng, placed, carrier, height_fn):
+    """Rejection-sample one open-water, separated point on the carrier's
+    20-35 km escort ring (the legacy escort draw, factored out)."""
+    for _ in range(_MAX_TRIES):
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        off = rng.uniform(*ESCORT_OFFSET_M)
+        p = (carrier[0] + off * math.sin(ang),
+             carrier[1] + off * math.cos(ang))
+        if is_open_water(*p, height_fn=height_fn) and _far_enough(p, placed):
+            placed.append(p)
+            return p
+    raise RuntimeError("could not place a carrier escort")
+
+
+def sample_fleet(rng: np.random.Generator, n_destroyers: int,
+                 height_fn=terrain_height_scalar,
+                 *, n_flagship: int = 0, n_aaw: int = 0,
+                 n_ground_attack: int = 0, n_transports: int = 0) -> dict:
+    """Seeded TYPED fleet roster.  Returns:
+
+        {'carrier': (x, z),
+         'flagship': (x, z) | None,
+         'aaw': [(x, z)...],
+         'ground_attack': [(x, z)...],
+         'general': [(x, z)...],
+         'transports': [(x, z)...],
+         'destroyers': [(x, z)...]}     # == 'general' (back-compat alias)
+
+    DRAW ORDER (the byte-identical contract): carrier (deep) -> up to 2 general
+    escorts on the carrier ring -> the rest of the general screen -> THEN the
+    new roles (flagship, aaw, ground_attack, transports).  Each new-role loop
+    draws NOTHING when its count is 0, and the new draws come AFTER the entire
+    legacy sequence, so with n_flagship=n_aaw=n_ground_attack=n_transports=0
+    the rng stream and every placement are bit-for-bit today's fleet — the
+    'general'/'destroyers' list is then EXACTLY the legacy 'destroyers' output.
+
+    Bands (spec 05 e): carrier/flagship deep-central, aaw forward (toward
+    ZONE_RANGE_MIN), ground_attack mid (the general screen band), transports
+    rear.  Every hull is open-water (9 km disc) + >= 25 km separated for any
+    mix (the shared rejection sampler enforces both).
 
     ``height_fn`` defaults to the module terrain (byte-identical for the
-    default map); M3-F4 passes the ACTIVE preset field's scalar so hulls dodge
-    the preset's seeded mid-ocean islands.  The rng draw order is UNCHANGED, so
-    on the default field the layout is bit-for-bit the same as before."""
+    default map); M3-F4 callers pass the ACTIVE preset field's scalar."""
     placed: list[tuple[float, float]] = []
     carrier = _place(rng, placed, CARRIER_RANGE_MIN_M, CARRIER_RANGE_MODE_M,
                      CARRIER_RANGE_MAX_M, height_fn=height_fn)
-    destroyers: list[tuple[float, float]] = []
+    # --- legacy general-destroyer sequence (UNCHANGED draw order) ---
+    general: list[tuple[float, float]] = []
     for _ in range(min(2, n_destroyers)):           # carrier escorts
-        for _ in range(_MAX_TRIES):
-            ang = rng.uniform(0.0, 2.0 * math.pi)
-            off = rng.uniform(*ESCORT_OFFSET_M)
-            p = (carrier[0] + off * math.sin(ang),
-                 carrier[1] + off * math.cos(ang))
-            if is_open_water(*p, height_fn=height_fn) and _far_enough(p, placed):
-                placed.append(p)
-                destroyers.append(p)
-                break
-        else:
-            raise RuntimeError("could not place a carrier escort")
+        general.append(_place_escort_ring(rng, placed, carrier, height_fn))
     for _ in range(max(0, n_destroyers - 2)):       # forward screen
-        destroyers.append(_place(rng, placed, ZONE_RANGE_MIN_M,
-                                 ZONE_RANGE_MODE_M, ZONE_RANGE_MAX_M,
+        general.append(_place(rng, placed, ZONE_RANGE_MIN_M,
+                              ZONE_RANGE_MODE_M, ZONE_RANGE_MAX_M,
+                              height_fn=height_fn))
+
+    # --- M5 typed roles (all loops are no-ops at count 0 -> byte-identical) ---
+    # Flagship: rides the carrier escort ring (deep-central, near its asset).
+    flagship = None
+    if n_flagship > 0:
+        flagship = _place_escort_ring(rng, placed, carrier, height_fn)
+
+    # AAW: the FORWARD air-defense picket.
+    aaw: list[tuple[float, float]] = []
+    for _ in range(max(0, n_aaw)):
+        aaw.append(_place(rng, placed, AAW_RANGE_MIN_M, AAW_RANGE_MODE_M,
+                          AAW_RANGE_MAX_M, height_fn=height_fn))
+
+    # Ground attack: the MID (general screen) band.
+    ground_attack: list[tuple[float, float]] = []
+    for _ in range(max(0, n_ground_attack)):
+        ground_attack.append(_place(rng, placed, ZONE_RANGE_MIN_M,
+                                    ZONE_RANGE_MODE_M, ZONE_RANGE_MAX_M,
+                                    height_fn=height_fn))
+
+    # Transports: the REAR (deep) band, behind the carrier.
+    transports: list[tuple[float, float]] = []
+    for _ in range(max(0, n_transports)):
+        transports.append(_place(rng, placed, TRANSPORT_RANGE_MIN_M,
+                                 TRANSPORT_RANGE_MODE_M, TRANSPORT_RANGE_MAX_M,
                                  height_fn=height_fn))
-    return {"carrier": carrier, "destroyers": destroyers}
+
+    return {
+        "carrier": carrier,
+        "flagship": flagship,
+        "aaw": aaw,
+        "ground_attack": ground_attack,
+        "general": general,
+        "transports": transports,
+        # Back-compat alias: every existing caller / test reads 'destroyers'
+        # as the general-destroyer placements.
+        "destroyers": general,
+    }
