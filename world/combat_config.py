@@ -46,6 +46,13 @@ class CombatConfig:
     oniks_ammo: int = 8
     oniks_mag_reload_s: float = 120.0
     zircon_ammo: int = 4         # scarce hypersonic anti-ship rounds (B selects)
+    # M4-A Bastion-K quasi-ballistic top-attack ASBM pool. DEFAULT 0 (OFF) so
+    # the out-of-the-box battle stays BYTE-IDENTICAL (no ASBM built -> the round
+    # is never offered in the B cycle / HUD strip, and the world's _asbm_ammo
+    # pool is 0 -> launch('asbm') returns None). A non-zero pool enables the
+    # lofted anti-ship round (sim/asbm.py AsbmMissile) that overflies the SM-2
+    # screen by altitude+speed and dives near-vertically onto a ship deck.
+    asbm_ammo: int = 0
     # M2-T2 Kh-31P player anti-radiation pool. DEFAULT 0 so the out-of-the-box
     # battle stays BYTE-IDENTICAL (no ARM available until a setup screen arms
     # it); a non-zero pool enables launch_arm() against localized emitters.
@@ -100,6 +107,12 @@ CLAMP_GUN_AMMO:      tuple = (1, 1000)
 # would silently turn the ARM ON (1 round) and break the byte-identical
 # out-of-the-box battle. Ceiling matches the other missile pools (200).
 CLAMP_ARM_AMMO:      tuple = (0, 200)
+# M4-A Bastion-K ASBM pool: floor 0 (not 1) so the OFF default survives a
+# clamp_config() round-trip. The setup-default path runs every field through
+# clamp_config; clamping asbm_ammo=0 with the missile CLAMP_AMMO=(1,200) would
+# silently turn the ASBM ON (1 round) and break the byte-identical out-of-the-
+# box battle. Ceiling matches the other missile pools (200).
+CLAMP_ASBM_AMMO:     tuple = (0, 200)
 CLAMP_RELOAD_S:      tuple = (5, 600)
 # M3-F4 map preset: a cyclic enum index, floor 0 (OPEN SEA = the byte-identical
 # default map survives a clamp_config round-trip — the setup-default path runs
@@ -139,6 +152,7 @@ def clamp_config(
     oniks_ammo: int = CombatConfig.oniks_ammo,
     oniks_mag_reload_s: float = CombatConfig.oniks_mag_reload_s,
     zircon_ammo: int = CombatConfig.zircon_ammo,
+    asbm_ammo: int = CombatConfig.asbm_ammo,
     kh31p_ammo: int = CombatConfig.kh31p_ammo,
     s300_48n6_ammo: int = CombatConfig.s300_48n6_ammo,
     s300_40n6_ammo: int = CombatConfig.s300_40n6_ammo,
@@ -165,6 +179,7 @@ def clamp_config(
     lo_am, hi_am = CLAMP_AMMO
     lo_gun, hi_gun = CLAMP_GUN_AMMO
     lo_arm, hi_arm = CLAMP_ARM_AMMO
+    lo_asbm, hi_asbm = CLAMP_ASBM_AMMO
     lo_re, hi_re = CLAMP_RELOAD_S
     lo_mp, hi_mp = CLAMP_MAP_PRESET
 
@@ -182,6 +197,7 @@ def clamp_config(
         n_s300=clamp_field(int(n_s300), lo_s3, hi_s3),
         oniks_ammo=clamp_field(int(oniks_ammo), lo_am, hi_am),
         zircon_ammo=clamp_field(int(zircon_ammo), lo_am, hi_am),
+        asbm_ammo=clamp_field(int(asbm_ammo), lo_asbm, hi_asbm),
         kh31p_ammo=clamp_field(int(kh31p_ammo), lo_arm, hi_arm),
         oniks_mag_reload_s=clamp_field(float(oniks_mag_reload_s), lo_re, hi_re),
         s300_48n6_ammo=clamp_field(int(s300_48n6_ammo), lo_am, hi_am),

@@ -583,9 +583,71 @@ SM6 = SamDef(
 )
 
 
+# --- Bastion-K quasi-ballistic top-attack ASBM (player anti-ship, M4-A) --------
+# A LOFTED anti-ship ballistic missile that beats the SM-2 area screen by
+# ALTITUDE + SPEED, then dives near-vertically onto a ship deck (DF-21D /
+# 3M22-class concept).  It REUSES the SamMissile loft+boost+coast+PN+fuse
+# machine UNCHANGED; only the terminal seeker is overridden (sim/asbm.py
+# AsbmMissile) to lock the nearest SHIP in a cone instead of an air target.
+#
+#   Anti-ship, not anti-air, so the SamDef differs from the 40N6 in three ways
+#   that MATTER:
+#     1. min_intercept_alt = 0 (dives to the SEA — a ship deck at ~12 m), NOT
+#        the 40N6's 4 km active-seeker floor (that round is blind low; this one
+#        is BUILT to hit the surface).
+#     2. A MUCH higher loft (loft_bias_max 90 km, loft_gain 2.0, a short
+#        loft_fade_range 15 km) drives a near-vertical climb to a ~90 km exo
+#        apogee held until close to the target — the quasi-ballistic arc.
+#     3. terminal_range 20 km: the MaRV hands over PARTWAY DOWN the steep
+#        ballistic reentry, NOT at apogee, so the handover flight-path angle is
+#        already steeper than -60 deg.  (Handing over at apogee would wallow —
+#        the same lesson as the 40N6's fade-outside-the-gate trick.)
+#
+#   MEASURED flight profile (tools/probe_asbm_flyoff.py, static ship, seed-free
+#   truth flyoff; the env test locks to THIS band, two-sided):
+#       range  apogee   handover-FPA  terminal-min-FPA  peakMach  reentryMach  result
+#       100km  67.7 km     -61.2 deg      -90.0 deg       4.34       3.95       HIT
+#       200km  90.0 km     -71.0 deg      -84.9 deg       4.34       3.98       HIT
+#       250km  90.0 km     -70.6 deg      -85.1 deg       4.34       3.98       HIT  <- probe range
+#       300km  90.0 km     -70.6 deg      -85.1 deg       4.34       3.98       HIT
+#       350km   -- (energy self-destruct, clean range gate) --                  MISS
+#     Apogee >= 40 km, dive steeper than -60 deg at handover and ~vertical by
+#     impact, midcourse cruise altitude ~8 km (stays ABOVE the SM6_AREA_MIN_ALT_M
+#     1500 m band so the high midcourse is SM-6-targetable — the existing
+#     counter still bites).  Peak boost Mach 4.34, reentry Mach ~4.0.
+#
+#   The loft/descent gains are shared with the SamMissile and are Mach-2.5-tuned
+#   (project memory); the ASBM does NOT fight them — the steep dive comes from
+#   the BALLISTIC fall off a 90 km apogee that the shallow midcourse steering
+#   physically cannot arrest, plus the no-cap terminal PN.  MEASURED, not copied.
+BASTION_K = SamDef(
+    weapon_id="asbm", display_name="Bastion-K ASBM",
+    length=8.0, diameter=0.62, launch_mass=4_200.0, propellant_mass=2_000.0,
+    # Cold catapult eject + short hang, then a long high-thrust solid boost.
+    eject_speed=18.0, eject_time=1.0,
+    motor_thrust=300_000.0, motor_time=16.0, isp=245.0,   # = propellant/mdot
+    ref_area=0.302,    # pi * (0.62/2)^2
+    max_g=22.0, fuse_radius=20.0,
+    # Terminal handover partway down the reentry (see note above).
+    terminal_range=20_000.0, max_range=300_000.0,
+    self_destruct_t=400.0, self_destruct_speed=200.0,
+    # Dives to the SEA: floor 0 (a ship deck), ceiling well above the apogee.
+    min_intercept_alt=0.0, max_intercept_alt=95_000.0,
+    # The quasi-ballistic loft: near-vertical climb to a ~90 km exo apogee held
+    # until close to the target (short fade), so the reentry over the hull is
+    # steep.  These three are the ASBM's discriminator vs every other SamDef.
+    loft_gain=2.0, loft_bias_max=90_000.0, loft_fade_range=15_000.0,
+)
+
+# Bastion-K ASBM ammo pool default (scarce, like the Zircon).  The world reads
+# config.asbm_ammo (default 0 -> the round is never offered: byte-identical
+# default battle).  This constant is the in-arsenal nominal stock.
+BASTION_K_AMMO: int = 4
+
+
 WEAPONS = {"oniks": ONIKS, "zircon": ZIRCON}
 SAMS = {"s300": S300, "sm2": SM2, "40n6": N40N6, "pantsir_57e6": PANTSIR_57E6,
-        "sm6": SM6}
+        "sm6": SM6, "asbm": BASTION_K}
 STRIKES = {"tomahawk": TOMAHAWK, "jassm": JASSM, "harm": HARM, "kh31p": KH31P}
 LAUNCHERS = {"bastion": BASTION, "s300_tel": S300_TEL, "sm2_vls": SM2_VLS,
              "40n6_tel": N40N6_TEL}

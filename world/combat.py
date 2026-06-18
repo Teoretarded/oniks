@@ -138,7 +138,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from sim.arsenal import KH31P, N40N6, ONIKS, S300, S300_TEL, TOMAHAWK, ZIRCON
+from sim.arsenal import (BASTION_K, KH31P, N40N6, ONIKS, S300, S300_TEL,
+                         TOMAHAWK, ZIRCON)
+from sim.asbm import AsbmMissile
 from sim.bases import Structure, apply_missile_hits_structures
 from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
@@ -448,6 +450,11 @@ class CombatWorld(WorldState):
         self._build_oniks_battery(config.n_oniks)
         self._build_s300_battery(config.n_s300)
         self._zircon_ammo = int(config.zircon_ammo)   # scarce hypersonic pool
+        # M4-A Bastion-K ASBM pool (scarce lofted top-attack anti-ship rounds).
+        # DEFAULT 0 -> launch('asbm') returns None and the round is never offered
+        # (the B cycle / HUD strip gate on this being a non-None, > 0 pool), so
+        # the out-of-the-box battle is byte-identical.
+        self._asbm_ammo = int(config.asbm_ammo)
         # M2-T2: player Kh-31P anti-radiation pool (scarce SEAD rounds) +
         # its seeded miss-offset stream.  The ARM stream is the SeedSequence
         # child [rng_seed, 8] — phase tag 8, reserved here so it can NEVER
@@ -1854,6 +1861,15 @@ class CombatWorld(WorldState):
         timer. Returns the Missile, or None when no tube is ready / Zircon dry."""
         if self.defeated:
             return None
+        if weapon_id == "asbm":
+            # The Bastion-K ASBM is a SamMissile subclass on a SHIP contact
+            # estimate (NOT a Missile on a surface point), so it has its own
+            # spawn path: resolve the nearest tracked SHIP to the aim point and
+            # delegate to launch_asbm (fog-honest: the round flies the stale
+            # ContactBoard picture; only the terminal MaRV sees truth).
+            tp = np.asarray(target_point, dtype=np.float64)
+            ship_id = self._nearest_ship_contact(tp)
+            return self.launch_asbm(ship_id)
         if weapon_id == "zircon":
             if self._zircon_ammo is None or self._zircon_ammo <= 0:
                 return None
@@ -1885,6 +1901,68 @@ class CombatWorld(WorldState):
             if self._oniks_ammo <= 0 and self._oniks_mag_cap is not None:
                 self._oniks_ammo = 0
                 self._oniks_mag_reload_left = self._oniks_mag_reload_s
+        return m
+
+    def _nearest_ship_contact(self, aim_pos):
+        """The ship contact id whose dead-reckoned estimate is nearest the aim
+        point (ground range), or None when no SHIP track is held.  FOG-HONEST:
+        reads only the ContactBoard picture (never world.ships truth), so the
+        ASBM is aimed at what the player actually SEES — a salvo on a stale
+        ship track is aimed at the stale estimate, which is exactly the miss
+        the physics-not-dice contract turns on."""
+        import math as _math
+        ax, az = float(aim_pos[0]), float(aim_pos[2])
+        best_id, best_d = None, float("inf")
+        for cid, trk in self.contacts.tracks.items():
+            if trk.get("is_air"):
+                continue                      # ships only (ASBM is anti-ship)
+            est = self.contacts.estimated_pos(cid, self.sim_time)
+            d = _math.hypot(float(est[0]) - ax, float(est[2]) - az)
+            if d < best_d:
+                best_id, best_d = cid, d
+        return best_id
+
+    def launch_asbm(self, ship_id):
+        """Fire one Bastion-K ASBM at the SHIP contact ``ship_id`` (M4-A).
+
+        The lofted quasi-ballistic top-attack anti-ship round: it flies
+        BOOST/MIDCOURSE on the dead-reckoned ContactBoard estimate (stale
+        picture, fog-honest) and only the terminal MaRV seeker (sim/asbm.py)
+        sees truth — so a shot launched on a frozen/stale track MISSES a ship
+        that moved away (physics, not dice).  Fires from the same Bastion TEL
+        tube as the Oniks/Zircon and draws from the scarce ``_asbm_ammo`` pool.
+
+        Returns the AsbmMissile, or None if any gate fails:
+          * defeated / empty pool (default config asbm_ammo=0 -> never offered);
+          * ``ship_id`` is None or not a live SHIP track (the FOG GATE — the
+            player may only target a ship the sensor picture HOLDS);
+          * the track does not resolve to a live Ship entity (it just sank);
+          * no Bastion tube is ready.
+        """
+        if self.defeated:
+            return None
+        if self._asbm_ammo is None or self._asbm_ammo <= 0:
+            return None
+        track = self.contacts.tracks.get(ship_id)
+        if track is None or track.get("is_air"):
+            return None
+        target = next((s for s in self.ships
+                       if s.ship_id == ship_id and s.alive), None)
+        if target is None:
+            return None
+        tube = next((t for t in self._oniks_tubes
+                     if t["loaded"] and t["reload_left"] <= 0.0), None)
+        if tube is None:
+            return None
+        m = AsbmMissile(BASTION_K, tube["pos"].copy(), target,
+                        contact_estimate_fn=self._contact_estimate(ship_id))
+        # Player round (fog-of-war / camera-cycle gates skip only hostile rounds).
+        m.is_hostile = False
+        self.oniks_fired += 1
+        self.missiles.append(m)
+        tube["loaded"] = False
+        tube["reload_left"] = self._oniks_tube_reload_s
+        self._asbm_ammo -= 1
         return m
 
     def _step_oniks_tubes(self, dt: float) -> None:

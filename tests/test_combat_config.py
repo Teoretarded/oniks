@@ -28,7 +28,8 @@ from world.combat_config import (
     CLAMP_DESTROYERS, CLAMP_AWACS, CLAMP_JAMMERS, CLAMP_PLAYER_JAMMER,
     CLAMP_ENEMY_RADARS,
     CLAMP_PLAYER_RADARS,
-    CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_RELOAD_S,
+    CLAMP_PANTSIR, CLAMP_DRONES, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_ASBM_AMMO,
+    CLAMP_RELOAD_S,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
 )
 
@@ -66,6 +67,10 @@ def test_defaults_match_locked_schema():
     # M2-T2: Kh-31P player ARM pool DEFAULTS to 0 (OFF) so the out-of-the-box
     # battle stays byte-identical until a setup screen arms it.
     assert c.kh31p_ammo == 0
+    # M4-A: Bastion-K ASBM pool DEFAULTS to 0 (OFF) so the out-of-the-box battle
+    # stays byte-identical (no ASBM in the B cycle / HUD strip, launch returns
+    # None) until a setup screen arms it.
+    assert c.asbm_ammo == 0
     # M3-F4: the map preset DEFAULTS to 0 (OPEN SEA = today's layout) so the
     # out-of-the-box battle map is byte-identical (make_field(0, .) is the
     # default field); presets 1-3 add seeded terrain.
@@ -192,6 +197,26 @@ def test_clamp_config_kh31p_arm_pool():
     assert clamp_config(kh31p_ammo=4).kh31p_ammo == 4
     # A default-config build (no edits) keeps the ARM OFF.
     assert clamp_config().kh31p_ammo == 0
+
+
+def test_clamp_config_asbm_pool():
+    """M4-A Bastion-K ASBM pool clamp round-trip. LIKE the Kh-31P ARM pool its
+    floor is 0 (CLAMP_ASBM_AMMO), so the OFF default survives the default-
+    through-setup path (clamp_config runs every field): clamping asbm_ammo=0
+    with the missile CLAMP_AMMO=(1,200) would silently turn the ASBM ON and
+    break the byte-identical out-of-the-box battle. Two-sided: floor 0
+    preserved, ceiling honoured, default unchanged."""
+    assert CLAMP_ASBM_AMMO[0] == 0, "ASBM pool floor must be 0 (OFF survivable)"
+    # A 0 pool stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(asbm_ammo=0).asbm_ammo == 0
+    # A negative slider clamps up to the 0 floor.
+    assert clamp_config(asbm_ammo=-5).asbm_ammo == CLAMP_ASBM_AMMO[0]
+    # The ceiling matches the other missile pools.
+    assert clamp_config(asbm_ammo=9999).asbm_ammo == CLAMP_ASBM_AMMO[1]
+    # An in-band value round-trips unchanged.
+    assert clamp_config(asbm_ammo=4).asbm_ammo == 4
+    # A default-config build (no edits) keeps the ASBM OFF.
+    assert clamp_config().asbm_ammo == 0
 
 
 def test_clamp_config_player_jammer_flag():

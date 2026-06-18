@@ -213,6 +213,14 @@ HINT_ONIKS_SEL = "ONIKS SELECTED"
 # tactical map (tactical_map.selected_emitter, fog-honest SIGINT picture).
 HINT_ARM_SEL = "KH-31P ANTI-RADIATION SELECTED"
 HINT_ARM_NO_EMITTER = "KH-31P: SELECT AN EMITTER"
+# M4-A Bastion-K quasi-ballistic top-attack ASBM. Selected with B (4-way cycle,
+# gated on asbm_ammo); fired at a SHIP contact (it flies the dead-reckoned
+# picture and dives near-vertically onto the hull). The stale-track hint warns
+# the player that a salvo on an aged ship track aims at the STALE estimate —
+# the physics-not-dice miss the round turns on.
+HINT_ASBM_SEL = "BASTION-K ASBM SELECTED - lofted top-attack"
+HINT_ASBM_NO_SHIP = "BASTION-K: NO SHIP CONTACT TO TARGET"
+HINT_ASBM_STALE = "BASTION-K: SHIP TRACK STALE - LOFT MAY MISS A MOVER"
 # Zircon fuel-limited effective reach vs a surface target (measured,
 # tools/probe_zircon_traj.py): hi-lo ~250 km, lo-lo ~150 km — past these it
 # coasts fuel-starved and splashes short. Warn the player instead of a silent whiff.
@@ -519,18 +527,32 @@ class SandboxState(GameState):
         — zircon wraps straight back to oniks, kh31p is never reachable.
 
         From kh31p the cycle always returns to oniks (even if the pool drained
-        to 0 mid-battle), so the player can never get stuck on an empty ARM."""
+        to 0 mid-battle), so the player can never get stuck on an empty ARM.
+
+        M4-A: when the world carries a Bastion-K ASBM pool (asbm_ammo > 0) the
+        cycle EXTENDS again to include 'asbm' after zircon:
+        oniks->zircon->asbm->kh31p->oniks.  Each scarce round is GATED OUT when
+        its pool is empty/absent (None or 0): the default battle (asbm_ammo ==
+        kh31p_ammo == 0) keeps the EXACT 2-way oniks<->zircon UX, byte-identical
+        — zircon wraps straight back to oniks.  Any stray selection returns to
+        oniks, so the player can never get stuck on an empty pool."""
         arm_available = getattr(self.world, "_kh31p_ammo", 0) not in (None, 0)
+        asbm_available = getattr(self.world, "_asbm_ammo", 0) not in (None, 0)
         if self.oniks_weapon == "oniks":
             self.oniks_weapon = "zircon"
         elif self.oniks_weapon == "zircon":
-            # Step onto the ARM only when it's stocked; else wrap to oniks
-            # (this is the 2-way default-battle path — byte-identical).
+            # Step onto the next stocked scarce round (ASBM, then ARM); else
+            # wrap to oniks (the 2-way default-battle path — byte-identical).
+            self.oniks_weapon = ("asbm" if asbm_available
+                                 else "kh31p" if arm_available else "oniks")
+        elif self.oniks_weapon == "asbm":
             self.oniks_weapon = "kh31p" if arm_available else "oniks"
         else:                                   # kh31p (or any stray) -> oniks
             self.oniks_weapon = "oniks"
         if self.oniks_weapon == "zircon":
             hint = HINT_ZIRCON
+        elif self.oniks_weapon == "asbm":
+            hint = HINT_ASBM_SEL
         elif self.oniks_weapon == "kh31p":
             hint = HINT_ARM_SEL
         else:
@@ -594,6 +616,30 @@ class SandboxState(GameState):
             return None
         if self.target_point is None:
             return None
+        if self.oniks_weapon == "asbm":
+            # M4-A: the ASBM is anti-ship and flies the dead-reckoned ship
+            # picture (NOT the hi-lo/lo-lo cruise envelope — skip that warning).
+            # It needs a SHIP contact near the aim point; warn (do not block) on
+            # a stale track, since the loft commits to the stale estimate and a
+            # mover can walk out from under it (physics-not-dice miss).
+            ship_id = self.world._nearest_ship_contact(self.target_point)
+            if ship_id is None:
+                self.show_hint(HINT_ASBM_NO_SHIP)
+                return None
+            trk = self.world.contacts.tracks.get(ship_id)
+            if trk is not None and float(trk.get("age", 0.0)) > 5.0:
+                self.show_hint(HINT_ASBM_STALE)
+            m = self.world.launch(self.profile, self.target_point,
+                                  tuple(self.waypoints), weapon_id="asbm")
+            if m is not None:
+                self.followed = m
+                self.rig.retarget()
+                self.effects.muzzle_blast(
+                    m.pos, ground_y=float(self._tel_pos[1]) + 1.5)
+                self._spawn_cover_debris(m.pos)
+                self.app.audio.play("launch", pos=m.pos)
+                self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
+            return m
         if self.oniks_weapon == "zircon":
             # Fuel-aware range warning (the Zircon coasts to a stall past its
             # envelope and splashes short — see ZIRCON_RANGE_*). Informational:

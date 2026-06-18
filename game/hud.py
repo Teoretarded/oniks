@@ -496,14 +496,15 @@ def bastion_weapon_strip(sandbox, world) -> list:
     """The Bastion weapon-select strip (M2-T4) — pure, GL-free, unit-testable.
 
     Returns ``[(label, selected_bool, ammo_text)]`` for the rounds the Bastion
-    TEL can chamber: ONIKS, ZIRCON, and (only when the Kh-31P ARM pool is
-    CONFIGURED, i.e. ``_kh31p_ammo`` is a non-None pool) KH-31P.  ``selected``
-    flags the active ``sandbox.oniks_weapon``.  Ammo text:
+    TEL can chamber: ONIKS, ZIRCON, and (each only when its scarce pool is
+    CONFIGURED) BASTION-K ASBM and KH-31P.  ``selected`` flags the active
+    ``sandbox.oniks_weapon``.  Ammo text:
       * ONIKS  -> magazine ``"<n>/<cap>"`` (renewable, rate-limited);
-      * ZIRCON / KH-31P -> the scarce pool count ``"<n>"``.
-    The KH-31P row is OMITTED when the ARM is unconfigured (default battle:
-    ``_kh31p_ammo`` 0/None) so the out-of-the-box Bastion strip is exactly the
-    two-round ONIKS|ZIRCON list — matching the gated 2-way B cycle."""
+      * ZIRCON / ASBM / KH-31P -> the scarce pool count ``"<n>"``.
+    The ASBM row is OMITTED when ``_asbm_ammo`` is 0/None and the KH-31P row
+    when ``_kh31p_ammo`` is 0/None, so the out-of-the-box Bastion strip is
+    exactly the two-round ONIKS|ZIRCON list — matching the gated B cycle.
+    Order mirrors the B cycle: ONIKS, ZIRCON, ASBM, KH-31P."""
     active = getattr(sandbox, "oniks_weapon", "oniks")
     oniks_ammo = getattr(world, "_oniks_ammo", None)
     oniks_cap = getattr(world, "_oniks_mag_cap", oniks_ammo)
@@ -515,6 +516,9 @@ def bastion_weapon_strip(sandbox, world) -> list:
         ("ZIRCON", active == "zircon",
          str(int(zircon)) if zircon is not None else "--"),
     ]
+    asbm = getattr(world, "_asbm_ammo", None)
+    if asbm:                                 # configured pool (non-None, > 0)
+        rows.append(("ASBM", active == "asbm", str(int(asbm))))
     arm = getattr(world, "_kh31p_ammo", None)
     if arm:                                  # configured pool (non-None, > 0)
         rows.append(("KH-31P", active == "kh31p", str(int(arm))))
