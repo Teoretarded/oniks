@@ -1119,3 +1119,46 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
   Low/High toggle, render-only). These are GL-only polish best verified with
   screenshots + the user's hands-on playtest; scheduled after the gameplay
   milestones (M4-M6) so verified gameplay value lands first.
+
+## Milestone 4 — New Trajectory Regimes (ASBM + loitering swarm) — COMPLETE
+
+### M4-A Bastion-K top-attack ASBM (commit `d01a63c`)
+- `AsbmMissile(SamMissile)` in `sim/asbm.py` re-points the loft/boost/coast/fuse
+  machine at a SHIP; terminal MaRV uncages a single ground-footprint seeker (ports
+  `_acquire_lock`) onto the nearest hull, else commits to the stale midcourse ghost
+  (honest stale-track miss). ASBM SamDef (loft ~90 km exo apogee, near-vertical dive
+  to the SEA, NOT the 40N6 floor); `asbm_ammo` pool (default 0); B-cycle 4-way + HUD
+  row (gated on the pool); launch flies the dead-reckoned contact (truth at the fuse).
+- **MEASURED (probe-first, two-sided locked):** apogee ~90 km, terminal dive <−80°,
+  peak Mach 4.34, kill 80-300 km, midcourse 7964 m > SM6_AREA_MIN_ALT_M (the existing
+  SM-6 counter stays valid). Stale-track MISS vs fresh-track KILL proven. Byte-identical
+  (asbm_ammo=0): default battle hash-identical, duel + determinism bit-identical, full
+  suite 1084 green. Deferred: tactical-map arc preview (UI), dedicated mesh+photos.
+
+### M4-B loitering swarm (commits `fcafe0f` infra, `53b2c9e` lethality)
+- `compute_swarm_speeds` (pure) syncs N loiterers to one aim point (probe: 6 routes
+  35-53 km arrive within 0.52 s). `Missile._commanded_speed` override of the Mach-hold,
+  GUARDED so unset = byte-identical (Oniks+Zircon 21600/21600 + 50914-substep dumps,
+  0 drift). SWARM WeaponDef + SWARM_POD + destructible SwarmPod + magazine + launch_swarm
+  (lateral fan, salvo-seeded weaves); `n_swarm_pods` (default 0); 'swarm' platform + H
+  arrival-mode key + HUD row.
+- **Saturation proven HONESTLY** (review caught the first attempt validated magazine
+  exhaustion, not the cap): with the magazine removed as a confound, a synced 8-bundle
+  sinks the destroyer 3/3 every seed spending only ~49 of 100k SM-2 (the 4-in-flight cap,
+  not ammo-out); lone + spaced-trickle serviced. Quality BLOCKER fixed (rounds spawned
+  underground → sample terrain at launch_xz).
+- **Lethality fix** (`53b2c9e`, measure-don't-guess overturned the floor hypothesis):
+  the blocker was the Oniks-calibrated `STALL_SPEED=200` lift fade sagging the subsonic
+  round ~38 m under skim. Per-weapon `_stall_speed` from `cruise_mach_lo` (SWARM ~51 m/s,
+  Oniks/Zircon exactly 200.0 → byte-identical). A REAL SWARM round now SPLASHES a
+  destroyer in lo-lo (`test_swarm_round_splashes_ship_in_lo_lo`, fails pre-fix).
+- **Open balance note (flagged for playtest, not a bug):** from a SwarmPod/tube launch
+  the round is boost-overshoot capped (global Oniks `RIDEOUT_THRUST` on a 55 kg airframe)
+  → real tube range ~25 km vs ~40 km design (cruise-started flies full range). A
+  per-weapon ride-out/boost pass would restore design range. The saturation test keeps
+  its documented level-flight stub; the real-round splash test is the lethality proof.
+
+**Deferred to end passes (no downstream deps):** F1/F2 terrain/graphics visual polish;
+new-weapon meshes + reference photos (ASBM, swarm loiterer+pod, M5 craft) batched into a
+focused screenshot-verified model pass. NEXT: Milestone 5 (fleet classes / sub+ASW / Buk /
+shoot-and-scoot / counter-battery radar / decoys / amphibious).

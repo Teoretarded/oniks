@@ -11,19 +11,31 @@
 
 ## MORNING REPORT  (live — updated as work proceeds; branch `feat/combat-expansion`, do NOT touch `main`)
 
-**Headline:** 2 of 6 milestones SHIPPED, GATED, and PLAYABLE overnight (M1, M2),
-the new weapon's 3D model + reference photos, AND M3's EW CORE shipped + gated as
-FOUR reviewed features — the J/S burn-through field model, the enemy Growler that
-uses it to collapse the player's radar (+ its own 3D mesh/glyph/photos), and ELINT
-bearing-sigma elevation that softens the player's geolocation under jam (M3 in
-progress; the player can already SEAD-ARM the Growler via M2 — the EW↔SEAD loop
-closes). Full test suite **945 passed, exit 0**;
-combat smoke **70/70 exit 0**; the locked regression contracts (Oniks-vs-SM-2 duel,
-Oniks/SAM flight, same-seed determinism, byte-identical out-of-the-box battle) all
-held BIT-IDENTICAL throughout. Every feature went through the Fable-Method loop
-(opus implementer → hostile spec/physics/no-cheat review → code-quality review →
-fixer) and every milestone through a personal gate + an adversarial agent fleet
-(game-test in live battles + bug-hunt + no-cheat auditor).
+**Headline (updated 2026-06-18, second session — workflow-orchestrated):** 4 of 6
+milestones SHIPPED + GATED + COMMITTED (M1, M2, M3, M4), PLUS a two-reviewer
+zero-bias whole-game audit whose 4 confirmed bugs are all fixed. Full suite
+**~1099 passed, exit 0**; smoke **70/70 exit 0**; the locked contracts (Oniks-vs-SM-2
+duel, Oniks/Zircon/SAM flight, same-seed determinism, byte-identical out-of-the-box
+battle) held BIT-IDENTICAL throughout (proven by substep byte-dumps). Every feature
+ran the Fable loop as a deterministic **Workflow** (opus implementer → hostile
+spec/physics/no-cheat review → fixer → code-quality review → fixer); the orchestrator
+personally gated each (re-ran suite/smoke/probes, read rendered maps).
+
+**This session added (branch tip `53b2c9e`):**
+- **M3 finished** — M3-F5 JAMMED-band UI + emissions meter (`5af9f7b`); HeightField
+  refactor (`17d95b0`, bit-identical, 5113-pt proof); close-range terrain_blocks LOS
+  fix (`8ca8931`); seeded map presets Open Sea/Archipelago/Strait/Fjord (`57097ec`,
+  masking +106/+203/+271 m, per-preset smoke 16/16). **Deferred:** F1/F2 render polish.
+- **Zero-bias audit + fixes** (`57fd0a8`, `8ca8931`): HIGH fighter no-cheat truth-track
+  (re-gated on a live radar hold + 8 s dwell, TDD regression); LOW ship friendly-fire;
+  LOW EW blind-class floor; MEDIUM terrain LOS. 2 findings correctly rejected.
+- **M4** — Bastion-K top-attack ASBM (`d01a63c`, probe-measured apogee ~90 km / dive
+  −85°, SM-6 counter intact); loitering swarm w/ simultaneous time-on-target (`fcafe0f`,
+  cap-saturation proven) + per-weapon STALL_SPEED so a real round splashes ships
+  (`53b2c9e`, Oniks/Zircon byte-identical). **Open balance note:** swarm tube-launch
+  range ~25 km (boost-overshoot) vs ~40 km design — flagged for playtest.
+
+**Below: the original M1/M2 + EW-core detail from the first session (unchanged).**
 
 ### Shipped milestone-by-milestone
 - **M1 — Legibility Foundation** (tip `434d825`): widget primitive library
