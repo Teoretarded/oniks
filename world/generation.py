@@ -126,53 +126,13 @@ def terrain_height(x, z):
     Noise is evaluated only where it can affect the result (bounds above) —
     bit-identical to the dense evaluation (tests pin it against the scalar
     path, including the band/skirt boundaries) but ~10x faster on large
-    mostly-ocean grids (the tactical map build measured 42 s dense)."""
-    x = np.asarray(x, dtype=np.float64)
-    z = np.asarray(z, dtype=np.float64)
-    x, z = np.broadcast_arrays(x, z)
-    shape = x.shape
-    xf = np.ravel(x)
-    zf = np.ravel(z)
+    mostly-ocean grids (the tactical map build measured 42 s dense).
 
-    h = np.full(xf.shape, -1.0e9)   # running max; far below any contribution
-
-    # Home continent: coast wiggles in [0, 2500] around z = 0; land to the south.
-    bm = zf < _CONT_BAND_M
-    if bm.any():
-        xs, zs = xf[bm], zf[bm]
-        coast = _COAST_WIGGLE * fbm(xs, np.zeros_like(xs), 30_000.0, 4, SEED + 1)
-        h[bm] = _continent(xs, zs, coast - zs, SEED + 2)
-
-    # Enemy continent: mirrored at ENEMY_COAST_Z; land rises north.
-    bm = zf > ENEMY_COAST_Z - _CONT_BAND_M
-    if bm.any():
-        xs, zs = xf[bm], zf[bm]
-        coast = (ENEMY_COAST_Z
-                 - _COAST_WIGGLE * fbm(xs, np.zeros_like(xs), 30_000.0, 4, SEED + 3))
-        h[bm] = np.maximum(h[bm], _continent(xs, zs, zs - coast, SEED + 4))
-
-    # Islands: noise only inside the shoreline; the underwater skirt only
-    # where it can still beat the ocean floor.
-    for k, (cx, cz, radius, peak) in enumerate(ISLANDS):
-        m = 1.0 - np.sqrt((xf - cx) ** 2 + (zf - cz) ** 2) / radius
-        inside = m >= 0.0
-        if inside.any():
-            lift = (_smoothstep01(m[inside]) ** 1.5
-                    * (peak * (0.4 + 0.6 * fbm(xf[inside], zf[inside],
-                                               radius * 0.35, 4,
-                                               SEED + 5 + 17 * k))))
-            h[inside] = np.maximum(h[inside], lift)
-        skirt = (m < 0.0) & (m > _SKIRT_MIN_M)
-        if skirt.any():
-            h[skirt] = np.maximum(h[skirt], m[skirt] * _ISLAND_SHORE_SLOPE)
-
-    # Ocean floor: gently rolling seabed — only where the running max sits
-    # below the floor's -60 m ceiling can the floor win the max().
-    fm = h < -60.0
-    if fm.any():
-        floor = -60.0 - 80.0 * fbm(xf[fm], zf[fm], 20_000.0, 3, SEED + 6)
-        h[fm] = np.maximum(h[fm], floor)
-    return h.reshape(shape)
+    SHIM (M3-terrain F3): delegates to ``DEFAULT_FIELD`` (the default map's
+    ``HeightField``) so every existing import stays byte-for-byte identical
+    while the field becomes the swap seam for seeded presets. The method body
+    moved verbatim into ``HeightField.height`` — same arithmetic, same order."""
+    return DEFAULT_FIELD.height(x, z)
 
 
 def is_land(x, z):
@@ -246,44 +206,12 @@ def _continent_s(x: float, z: float, signed_dist: float,
     return r * (55.0 + 90.0 * _fbm_s(x, z, 8_000.0, 4, height_seed)) + cliff
 
 
-# Conservative skip bounds: a coast wiggles by at most _COAST_WIGGLE and the
-# shelf ramp clamps _COAST_RAMP * |_SHELF_RAMP| past the coast line.
-_HOME_SKIP_Z = _COAST_WIGGLE - _SHELF_RAMP * _COAST_RAMP            # 14_500
-_ENEMY_SKIP_Z = ENEMY_COAST_Z - _COAST_WIGGLE + _SHELF_RAMP * _COAST_RAMP
-
-
 def terrain_height_scalar(x: float, z: float) -> float:
-    """Scalar terrain_height: bit-identical, ~300x faster for single points."""
-    x = float(x)
-    z = float(z)
-    h = -1.0e30
-    if z < _HOME_SKIP_Z:                          # home shelf not fully clamped
-        home_coast = _COAST_WIGGLE * _fbm_s(x, 0.0, 30_000.0, 4, SEED + 1)
-        h = _continent_s(x, z, home_coast - z, SEED + 2)
-    if z > _ENEMY_SKIP_Z:                         # enemy shelf not fully clamped
-        enemy_coast = ENEMY_COAST_Z - _COAST_WIGGLE * _fbm_s(
-            x, 0.0, 30_000.0, 4, SEED + 3)
-        e = _continent_s(x, z, z - enemy_coast, SEED + 4)
-        if e > h:
-            h = e
-    for k, (cx, cz, radius, peak) in enumerate(ISLANDS):
-        dx = x - cx
-        dz = z - cz
-        m = 1.0 - math.sqrt(dx * dx + dz * dz) / radius
-        if m > 0.0:                               # inside: noise-lifted peak
-            t = m if m < 1.0 else 1.0             # smoothstep01 (m > 0 here)
-            s = t * t * (3.0 - 2.0 * t)
-            h_isl = s ** 1.5 * (peak * (0.4 + 0.6 * _fbm_s(
-                x, z, radius * 0.35, 4, SEED + 5 + 17 * k)))
-        else:                                     # outside: plain skirt slope
-            h_isl = m * _ISLAND_SHORE_SLOPE
-        if h_isl > h:
-            h = h_isl
-    if h < -60.0:                                 # floor can win only here
-        floor = -60.0 - 80.0 * _fbm_s(x, z, 20_000.0, 3, SEED + 6)
-        if floor > h:
-            h = floor
-    return h
+    """Scalar terrain_height: bit-identical, ~300x faster for single points.
+
+    SHIM (M3-terrain F3): delegates to ``DEFAULT_FIELD.height_scalar`` — the
+    body moved verbatim into the method, same float64 arithmetic / same order."""
+    return DEFAULT_FIELD.height_scalar(x, z)
 
 
 # --- surface fast path (Task GATE perf) ----------------------------------------
@@ -302,25 +230,179 @@ def terrain_height_scalar(x: float, z: float) -> float:
 #   * the ocean floor is always < 0.
 # Inside the all-water region the clamp is exactly 0.0, so the early return
 # is bit-identical to max(terrain_height_scalar(x, z), 0.0) (tested).
-
-_ISLAND_R2 = tuple((cx, cz, float(radius) * float(radius))
-                   for (cx, cz, radius, _peak) in ISLANDS)
+# (The actual skip bounds + island-radius² table now live on HeightField,
+# derived in __init__ with the identical formulas — see that class.)
 
 
 def surface_height_scalar(x: float, z: float) -> float:
-    """max(terrain_height_scalar(x, z), 0.0) with an exact open-water 0."""
-    x = float(x)
-    z = float(z)
-    if _COAST_WIGGLE <= z <= ENEMY_COAST_Z - _COAST_WIGGLE:
-        for cx, cz, r2 in _ISLAND_R2:
+    """max(terrain_height_scalar(x, z), 0.0) with an exact open-water 0.
+
+    SHIM (M3-terrain F3): delegates to ``DEFAULT_FIELD.surface_scalar`` — the
+    body moved verbatim into the method; identical short-circuit + arithmetic."""
+    return DEFAULT_FIELD.surface_scalar(x, z)
+
+
+# --- HeightField (M3-terrain F3) ----------------------------------------------
+#
+# The terrain seam for seeded map presets. ``HeightField`` binds the per-map
+# tuning constants (SEED, ISLANDS, ENEMY_COAST_Z, coast/cliff/shelf tuning,
+# max_height) to ``self`` and holds the three query methods. The method bodies
+# are the EXACT historical ``terrain_height`` / ``terrain_height_scalar`` /
+# ``surface_height_scalar`` bodies — same float64 arithmetic in the same order,
+# calling the same pure noise helpers — so the default field
+# (``HeightField()``) is BIT-IDENTICAL to the pre-refactor module functions
+# (pinned by tests/test_heightfield.py and tests/test_generation.py). The
+# default's max IS TERRAIN_MAX_HEIGHT (430 m); per-field max plumbing into the
+# flyer-skip optimizations is a later presets task.
+
+
+class HeightField:
+    """A self-contained terrain heightfield. The default instance reproduces
+    today's world byte-for-byte; later presets supply different constants."""
+
+    def __init__(
+        self,
+        seed: int = SEED,
+        islands=ISLANDS,
+        enemy_coast_z: float = ENEMY_COAST_Z,
+        max_height: float = TERRAIN_MAX_HEIGHT,
+        coast_wiggle: float = _COAST_WIGGLE,
+        coast_ramp: float = _COAST_RAMP,
+        shelf_ramp: float = _SHELF_RAMP,
+        island_shore_slope: float = _ISLAND_SHORE_SLOPE,
+        cont_band_m: float = _CONT_BAND_M,
+        skirt_min_m: float = _SKIRT_MIN_M,
+    ):
+        self.seed = seed
+        self.islands = list(islands)
+        self.enemy_coast_z = enemy_coast_z
+        self.max_height = max_height
+        self._coast_wiggle = coast_wiggle
+        self._coast_ramp = coast_ramp
+        self._shelf_ramp = shelf_ramp
+        self._island_shore_slope = island_shore_slope
+        self._cont_band_m = cont_band_m
+        self._skirt_min_m = skirt_min_m
+        # Derived skip bounds (scalar fast path) and island r^2 (surface fast
+        # path) — the IDENTICAL formulas the module functions used before the
+        # M3-F3 refactor, so the default field's bounds are byte-for-byte equal.
+        self._home_skip_z = coast_wiggle - shelf_ramp * coast_ramp
+        self._enemy_skip_z = enemy_coast_z - coast_wiggle + shelf_ramp * coast_ramp
+        self._island_r2 = tuple((cx, cz, float(radius) * float(radius))
+                                for (cx, cz, radius, _peak) in self.islands)
+
+    # -- vectorized ----------------------------------------------------------
+    def height(self, x, z):
+        """Vectorized float64 terrain height (m). > 0 land, < 0 seabed.
+        Body == the historical ``terrain_height`` — identical arithmetic."""
+        seed = self.seed
+        enemy_coast_z = self.enemy_coast_z
+        x = np.asarray(x, dtype=np.float64)
+        z = np.asarray(z, dtype=np.float64)
+        x, z = np.broadcast_arrays(x, z)
+        shape = x.shape
+        xf = np.ravel(x)
+        zf = np.ravel(z)
+
+        h = np.full(xf.shape, -1.0e9)   # running max; far below any contribution
+
+        # Home continent: coast wiggles in [0, 2500] around z = 0; land south.
+        bm = zf < self._cont_band_m
+        if bm.any():
+            xs, zs = xf[bm], zf[bm]
+            coast = self._coast_wiggle * fbm(xs, np.zeros_like(xs), 30_000.0, 4, seed + 1)
+            h[bm] = _continent(xs, zs, coast - zs, seed + 2)
+
+        # Enemy continent: mirrored at enemy_coast_z; land rises north.
+        bm = zf > enemy_coast_z - self._cont_band_m
+        if bm.any():
+            xs, zs = xf[bm], zf[bm]
+            coast = (enemy_coast_z
+                     - self._coast_wiggle * fbm(xs, np.zeros_like(xs), 30_000.0, 4, seed + 3))
+            h[bm] = np.maximum(h[bm], _continent(xs, zs, zs - coast, seed + 4))
+
+        # Islands: noise only inside the shoreline; the underwater skirt only
+        # where it can still beat the ocean floor.
+        for k, (cx, cz, radius, peak) in enumerate(self.islands):
+            m = 1.0 - np.sqrt((xf - cx) ** 2 + (zf - cz) ** 2) / radius
+            inside = m >= 0.0
+            if inside.any():
+                lift = (_smoothstep01(m[inside]) ** 1.5
+                        * (peak * (0.4 + 0.6 * fbm(xf[inside], zf[inside],
+                                                   radius * 0.35, 4,
+                                                   seed + 5 + 17 * k))))
+                h[inside] = np.maximum(h[inside], lift)
+            skirt = (m < 0.0) & (m > self._skirt_min_m)
+            if skirt.any():
+                h[skirt] = np.maximum(h[skirt], m[skirt] * self._island_shore_slope)
+
+        # Ocean floor: gently rolling seabed — only where the running max sits
+        # below the floor's -60 m ceiling can the floor win the max().
+        fm = h < -60.0
+        if fm.any():
+            floor = -60.0 - 80.0 * fbm(xf[fm], zf[fm], 20_000.0, 3, seed + 6)
+            h[fm] = np.maximum(h[fm], floor)
+        return h.reshape(shape)
+
+    # -- scalar fast path ----------------------------------------------------
+    def height_scalar(self, x: float, z: float) -> float:
+        """Scalar terrain height: bit-identical to ``height``, ~300x faster for
+        single points. Body == the historical ``terrain_height_scalar``."""
+        seed = self.seed
+        enemy_coast_z = self.enemy_coast_z
+        x = float(x)
+        z = float(z)
+        h = -1.0e30
+        if z < self._home_skip_z:                     # home shelf not fully clamped
+            home_coast = self._coast_wiggle * _fbm_s(x, 0.0, 30_000.0, 4, seed + 1)
+            h = _continent_s(x, z, home_coast - z, seed + 2)
+        if z > self._enemy_skip_z:                    # enemy shelf not fully clamped
+            enemy_coast = enemy_coast_z - self._coast_wiggle * _fbm_s(
+                x, 0.0, 30_000.0, 4, seed + 3)
+            e = _continent_s(x, z, z - enemy_coast, seed + 4)
+            if e > h:
+                h = e
+        for k, (cx, cz, radius, peak) in enumerate(self.islands):
             dx = x - cx
             dz = z - cz
-            if dx * dx + dz * dz < r2:
-                break                             # inside an island: full math
-        else:
-            return 0.0                            # provably open water
-    h = terrain_height_scalar(x, z)
-    return h if h > 0.0 else 0.0
+            m = 1.0 - math.sqrt(dx * dx + dz * dz) / radius
+            if m > 0.0:                               # inside: noise-lifted peak
+                t = m if m < 1.0 else 1.0             # smoothstep01 (m > 0 here)
+                s = t * t * (3.0 - 2.0 * t)
+                h_isl = s ** 1.5 * (peak * (0.4 + 0.6 * _fbm_s(
+                    x, z, radius * 0.35, 4, seed + 5 + 17 * k)))
+            else:                                     # outside: plain skirt slope
+                h_isl = m * self._island_shore_slope
+            if h_isl > h:
+                h = h_isl
+        if h < -60.0:                                 # floor can win only here
+            floor = -60.0 - 80.0 * _fbm_s(x, z, 20_000.0, 3, seed + 6)
+            if floor > h:
+                h = floor
+        return h
+
+    # -- surface fast path ---------------------------------------------------
+    def surface_scalar(self, x: float, z: float) -> float:
+        """max(height_scalar(x, z), 0.0) with an exact open-water 0. Body ==
+        the historical ``surface_height_scalar``."""
+        x = float(x)
+        z = float(z)
+        if self._coast_wiggle <= z <= self.enemy_coast_z - self._coast_wiggle:
+            for cx, cz, r2 in self._island_r2:
+                dx = x - cx
+                dz = z - cz
+                if dx * dx + dz * dz < r2:
+                    break                             # inside an island: full math
+            else:
+                return 0.0                            # provably open water
+        h = self.height_scalar(x, z)
+        return h if h > 0.0 else 0.0
+
+
+# The default map's field. The module shims above delegate here, so every
+# existing import (terrain_height / terrain_height_scalar / surface_height_scalar
+# / is_land) keeps working byte-for-byte — the bit-identical gate is trivial.
+DEFAULT_FIELD = HeightField()
 
 
 LANES = [  # 4 polylines (x, z) float64 crossing the ocean, dodging ISLANDS by >= 12 km

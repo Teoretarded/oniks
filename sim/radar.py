@@ -52,13 +52,19 @@ class Radar:
     destruction (Phase 3 wires HP); ``emitting`` is the radar-silence switch
     (a silent radar sees nothing — and can't be passively located later)."""
 
-    def __init__(self, radar_id: str, pos, antenna_m: float, ranges: dict):
+    def __init__(self, radar_id: str, pos, antenna_m: float, ranges: dict,
+                 height_fn=terrain_height_scalar):
         self.radar_id = radar_id
         self.pos = np.asarray(pos, dtype=np.float64)
         self.antenna_m = float(antenna_m)
         self.ranges = dict(ranges)      # size class -> max range (m)
         self.alive = True
         self.emitting = True
+        # M3-terrain F3: the terrain height function for this radar's LOS
+        # check. Default == the module shim terrain_height_scalar, so existing
+        # callers stay byte-identical; world/combat.py threads the active
+        # HeightField so player AND enemy read ONE terrain truth (no asymmetry).
+        self._height_fn = height_fn
 
     @property
     def antenna_alt(self) -> float:
@@ -83,7 +89,8 @@ class Radar:
         if rng > radar_horizon_m(self.antenna_alt, float(target_pos[1])):
             return False
         return not terrain_blocks(
-            (self.pos[0], self.antenna_alt, self.pos[2]), target_pos)
+            (self.pos[0], self.antenna_alt, self.pos[2]), target_pos,
+            height_fn=self._height_fn)
 
 
 class RadarNetwork:

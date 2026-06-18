@@ -483,12 +483,18 @@ class FighterRadar:
     radar stays in sync via the fighter's own update logic.
     """
 
-    def __init__(self, radar_id: str, pos: np.ndarray, antenna_m: float):
+    def __init__(self, radar_id: str, pos: np.ndarray, antenna_m: float,
+                 height_fn=None):
+        # M3-terrain F3: thread the active HeightField's scalar query so the
+        # fighter nose radar reads the SAME terrain as the player (no fog
+        # asymmetry). None -> Radar's default (module shim) -> byte-identical.
+        radar_kw = {} if height_fn is None else {"height_fn": height_fn}
         self._radar = _radar_mod.Radar(
             radar_id=radar_id,
             pos=pos,
             antenna_m=antenna_m,
             ranges=dict(FIGHTER_RADAR_RANGES),
+            **radar_kw,
         )
         self._heading_ref: float = 0.0   # set by Fighter each update
 
@@ -600,6 +606,7 @@ class Fighter:
         aircraft_id: str,
         base: AirBase,
         patrol_anchor_xz,
+        height_fn=None,
     ):
         self.aircraft_id = aircraft_id
         self._base = base           # starting base (may be re-selected on RTB)
@@ -631,6 +638,7 @@ class Fighter:
             radar_id=f"{aircraft_id}_radar",
             pos=self.pos.copy(),
             antenna_m=0.0,   # antenna IS the aircraft; pos[1] is the altitude
+            height_fn=height_fn,
         )
         # alive flag for kill spiral (AC_FALLING analogue)
         self._alive: bool = True
@@ -1421,6 +1429,7 @@ class Awacs:
         aircraft_id: str,
         anchor_a_xz,
         anchor_b_xz,
+        height_fn=None,
     ):
         """
         Parameters
@@ -1429,6 +1438,10 @@ class Awacs:
             Unique string identifier.
         anchor_a_xz, anchor_b_xz :
             Opposite corners of the orbit rectangle in the XZ plane (metres).
+        height_fn :
+            M3-terrain F3 — the active HeightField's scalar terrain query for
+            the radar LOS. None -> Radar's default (module shim) ->
+            byte-identical to the legacy path.
         """
         self.aircraft_id = aircraft_id
         self.pos = np.zeros(3, dtype=np.float64)
@@ -1460,11 +1473,13 @@ class Awacs:
         self._flee_heading: float = self.heading
 
         # Radar — 360 deg, mounted at aircraft altitude.
+        _awacs_radar_kw = {} if height_fn is None else {"height_fn": height_fn}
         self.radar = _radar_mod.Radar(
             radar_id=f"{aircraft_id}_radar",
             pos=self.pos.copy(),   # kept in sync each update
             antenna_m=AWACS_ANTENNA_OFFSET_M,
             ranges=dict(AWACS_RADAR_RANGES),
+            **_awacs_radar_kw,
         )
 
     # -----------------------------------------------------------------------
@@ -1653,8 +1668,10 @@ class JammerAircraft(Awacs):
         anchor_a_xz,
         anchor_b_xz,
         jam_power_w: float = JAMMER_POWER_W,
+        height_fn=None,
     ):
-        super().__init__(aircraft_id, anchor_a_xz, anchor_b_xz)
+        super().__init__(aircraft_id, anchor_a_xz, anchor_b_xz,
+                         height_fn=height_fn)
         # Jammer flies its own altitude band (the AWACS __init__ planted it at
         # AWACS_ALT_M); lift it to the standoff orbit altitude.
         self.pos[1] = JAMMER_ALT_M
@@ -1663,12 +1680,17 @@ class JammerAircraft(Awacs):
 
         # Replace the inherited AWACS SEARCH radar with a pure jam BEACON:
         # empty ranges => detects nothing (never a sensor); jam_power_w drives
-        # the EW field model; emitting=True => radiating the corridor.
+        # the EW field model; emitting=True => radiating the corridor.  Threads
+        # the active field's height_fn like every other enemy_air sensor so a
+        # preset that swaps world.height_field keeps ONE terrain truth (M3-F3
+        # invariant) — harmless on the default map (empty ranges never gate LOS).
+        _beacon_kw = {} if height_fn is None else {"height_fn": height_fn}
         self.emitter = _radar_mod.Radar(
             radar_id=f"{aircraft_id}_jammer",
             pos=self.pos.copy(),
             antenna_m=0.0,                 # the aircraft IS the antenna
             ranges={},                     # a jammer SEES nothing
+            **_beacon_kw,
         )
         self.emitter.jam_power_w = float(jam_power_w)
         self.emitter.emitting = True

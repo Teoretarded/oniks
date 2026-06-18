@@ -158,6 +158,7 @@ from sim.recon import (DRONE_GONE, DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
 from sim.sam import SamMissile
 from sim.strike import PlayerArmMissile, StrikeMissile
 from world.combat_config import CombatConfig, DEFAULT as _DEFAULT_CONFIG
+from world import generation
 from world.generation import BASE_POS, SEED, terrain_height_scalar
 from world.spawn_zones import sample_fleet
 from world.world import (CANISTER_MOUTH_OFFSET, SAM_MOUTH_OFFSETS, SAM_TEL_POS,
@@ -409,6 +410,21 @@ class CombatWorld(WorldState):
         # _config must be set BEFORE super().__init__ because _spawn_ships
         # is called from there and reads it.
         self._config = config
+        # M3-terrain F3: the ONE active terrain field for this map, built once
+        # here and threaded to every sensor (player AND enemy) so they read a
+        # single terrain truth — no fog asymmetry, no truth leak. The default
+        # map uses generation.DEFAULT_FIELD (byte-identical to the legacy module
+        # functions); a future preset swaps this one assignment everywhere at
+        # once. Set BEFORE super().__init__ because _build_contacts (player
+        # radar) runs there. terrain_height_at / surface_height_at (used by the
+        # SAM / missile / strike LOS) are overridden to read THIS field too.
+        self.height_field = generation.DEFAULT_FIELD
+        # Bind the scalar query ONCE so every sensor stores the SAME callable
+        # object (a fresh ``field.height_scalar`` access makes a new bound
+        # method each time — equal but not identical; caching it lets the
+        # no-cheat symmetry assertion check object identity and lets a preset
+        # rebind one attribute to swap the whole field).
+        self._height_fn = self.height_field.height_scalar
         super().__init__(rng_seed)
 
         # Wire the finite-magazine armory AFTER super().__init__ so the
@@ -553,9 +569,12 @@ class CombatWorld(WorldState):
         self._player_jammer = bool(config.player_jammer)
         self.drone = self._spawn_drone(recon_rng)
         self.drone_wrecks: list[ReconDrone] = []   # falling airframes
-        self.elint = ElintReceiver(rng=recon_rng)
+        self.elint = ElintReceiver(
+            rng=recon_rng, height_fn=self._height_fn)
         self.sar = SarSensor()
-        self.rwr = RwrReceiver(drone_id=self.drone.aircraft_id)
+        self.rwr = RwrReceiver(
+            drone_id=self.drone.aircraft_id,
+            height_fn=self._height_fn)
         self._drone_respawn_left = 0.0
         self._elint_next_t = 0.0
         self._fix_next_t = 0.0
@@ -615,10 +634,12 @@ class CombatWorld(WorldState):
                   + [self.air_bases[1]] * CARRIER_FIGHTERS)
         for i, base in enumerate(roster):
             fighter = Fighter(f"fighter_{i:02d}", base,
-                              FIGHTER_CAP_ANCHOR_XZ)
+                              FIGHTER_CAP_ANCHOR_XZ,
+                              height_fn=self._height_fn)
             base.parked.append(fighter)
             self.enemy_air.append(fighter)
-        self.awacs = Awacs("awacs_00", AWACS_ANCHOR_A_XZ, AWACS_ANCHOR_B_XZ)
+        self.awacs = Awacs("awacs_00", AWACS_ANCHOR_A_XZ, AWACS_ANCHOR_B_XZ,
+                           height_fn=self._height_fn)
         self.enemy_air.append(self.awacs)
         # ---- M3-F2 escort jammers (config.n_jammers, DEFAULT 0) ----
         # Each is enemy_air (NOT a Ship): a standoff Growler whose always-on
@@ -633,7 +654,8 @@ class CombatWorld(WorldState):
                   JAMMER_ANCHOR_A_XZ[1])
             bx = (JAMMER_ANCHOR_B_XZ[0] + j * 70_000.0,
                   JAMMER_ANCHOR_B_XZ[1])
-            jammer = JammerAircraft(f"jammer_{j:02d}", ax, bx)
+            jammer = JammerAircraft(f"jammer_{j:02d}", ax, bx,
+                                    height_fn=self._height_fn)
             self._jammers.append(jammer)
             self.enemy_air.append(jammer)
         self._cap_next_t = 0.0
@@ -663,6 +685,19 @@ class CombatWorld(WorldState):
         # Integrator-side mission execution records (fighters + spawned
         # rounds per active commander mission; completion + BDA run here).
         self._cmd_missions: list[dict] = []
+
+    # --- terrain accessors (M3-terrain F3) --------------------------------
+    # Override WorldState's module-shim accessors to read THIS world's active
+    # HeightField, so the SAM / missile / strike terrain LOS (which call
+    # world.terrain_height_at / world.surface_height_at) share the exact field
+    # the radars and recon sensors use. For the default map this is
+    # generation.DEFAULT_FIELD, so the result is byte-identical to the legacy
+    # terrain_height_scalar / surface_height_scalar.
+    def terrain_height_at(self, x: float, z: float) -> float:
+        return self.height_field.height_scalar(x, z)
+
+    def surface_height_at(self, x: float, z: float) -> float:
+        return self.height_field.surface_scalar(x, z)
 
     def _spawn_ships(self):
         """Seeded fleet generation via world/spawn_zones.sample_fleet.
@@ -765,6 +800,7 @@ class CombatWorld(WorldState):
                 pos=(xpos, ypos + _ENEMY_RADAR_ANTENNA_M, zpos),
                 antenna_m=_ENEMY_RADAR_ANTENNA_M,
                 ranges=_ENEMY_RADAR_RANGES,
+                height_fn=self._height_fn,
             )
             self._enemy_ground_radars.append(r)
 
@@ -789,7 +825,8 @@ class CombatWorld(WorldState):
         x, z = RADAR_STATION_XZ
         self.radar_station = Radar(
             "radar_player_00", (x, terrain_height_scalar(x, z), z),
-            RADAR_ANTENNA_M, PLAYER_RADAR_RANGES)
+            RADAR_ANTENNA_M, PLAYER_RADAR_RANGES,
+            height_fn=self._height_fn)
         self.radar_net = RadarNetwork([self.radar_station])
         return ContactBoard((BASE_POS[0], BASE_POS[2]),
                             visible_fn=self._player_visible)
@@ -872,7 +909,8 @@ class CombatWorld(WorldState):
         Phase-7 setup screen; the id stays 'drone_00' so the side-level
         RWR filter survives respawns."""
         return ReconDrone(aircraft_id="drone_00",
-                          spawn_xz=(BASE_POS[0], BASE_POS[2]), rng=rng)
+                          spawn_xz=(BASE_POS[0], BASE_POS[2]), rng=rng,
+                          height_fn=self._height_fn)
 
     @property
     def drone_respawn_left(self) -> float:
