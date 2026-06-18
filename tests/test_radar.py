@@ -28,10 +28,24 @@ def test_terrain_blocks_flat_hill_and_low_hill():
     assert not terrain_blocks(a, b, height_fn=low)
 
 
-def test_terrain_blocks_short_path_never_self_blocks():
-    # under 2 sample steps -> no interior samples -> never blocked
+def test_terrain_blocks_excludes_endpoints():
+    # A sensor must never block itself with its own hilltop: terrain high ONLY
+    # at the very endpoints (the sensor's hill + the target's hill), clear
+    # between -> not blocked (endpoints are excluded from sampling).
+    def endpoints_only(x, z):
+        return 9_999.0 if (x < 30.0 or x > 970.0) else 0.0
     assert not terrain_blocks((0.0, 10.0, 0.0), (1_000.0, 10.0, 0.0),
-                              height_fn=lambda x, z: 9_999.0)
+                              height_fn=endpoints_only)
+
+
+def test_terrain_blocks_short_interior_ridge_masks():
+    # 2026-06-18 audit fix: a ridge in the MIDDLE of a short (< 4 km) sight line
+    # now masks it. The old coarse 2 km step took ZERO interior samples under
+    # ~4 km, so a low target behind a close crest read LOS-CLEAR.
+    def mid_ridge(x, z):
+        return 500.0 if 1_400.0 < x < 1_800.0 else 0.0
+    assert terrain_blocks((0.0, 10.0, 0.0), (3_200.0, 10.0, 0.0),
+                          height_fn=mid_ridge)
 
 
 RANGES = {"ship": 350_000.0, "fighter": 350_000.0, "stealth": 35_000.0}

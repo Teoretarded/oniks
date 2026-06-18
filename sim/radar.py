@@ -22,7 +22,15 @@ import numpy as np
 from world.generation import terrain_height_scalar
 
 HORIZON_K = 4_120.0     # m per sqrt(m): d = K*(sqrt(h_radar) + sqrt(h_tgt))
-LOS_STEP_M = 2_000.0    # terrain sight-line sample spacing
+LOS_STEP_M = 2_000.0    # terrain sight-line sample spacing (long range)
+# Close-in sampling (2026-06-18 audit fix): the coarse 2 km step took ZERO
+# interior samples for any sight line under ~4 km (int(dist // 2000) == 0..1)
+# and could step over a narrow ridge, so a coastal crest a few km out never
+# masked a low target. Inside LOS_FINE_RANGE_M we step finely so close-range
+# terrain masks honestly; beyond it the legacy 2 km step is kept (long-range
+# behaviour byte-identical + bounded cost at 600 km).
+LOS_FINE_STEP_M = 400.0
+LOS_FINE_RANGE_M = 6_000.0
 
 
 def radar_horizon_m(h_radar_m: float, h_target_m: float) -> float:
@@ -33,11 +41,18 @@ def radar_horizon_m(h_radar_m: float, h_target_m: float) -> float:
 
 def terrain_blocks(a, b, height_fn=terrain_height_scalar) -> bool:
     """True when terrain rises above the straight sight line a -> b (both
-    (x, y, z) meters). Samples every LOS_STEP_M, endpoints excluded so a
-    radar can never block itself with its own hilltop."""
+    (x, y, z) meters). Endpoints are excluded (``range(1, n)``) so a radar can
+    never block itself with its own hilltop. Sample spacing is LOS_FINE_STEP_M
+    inside LOS_FINE_RANGE_M (so a close coastal crest masks a low target — the
+    old coarse step took no interior samples under ~4 km) and the legacy
+    LOS_STEP_M beyond it (byte-identical long-range behaviour + bounded cost)."""
     ax, ay, az = float(a[0]), float(a[1]), float(a[2])
     bx, by, bz = float(b[0]), float(b[1]), float(b[2])
-    n = int(math.hypot(bx - ax, bz - az) // LOS_STEP_M)
+    dist = math.hypot(bx - ax, bz - az)
+    if dist <= LOS_FINE_RANGE_M:
+        n = max(2, int(math.ceil(dist / LOS_FINE_STEP_M)))
+    else:
+        n = int(dist // LOS_STEP_M)
     for i in range(1, n):
         t = i / n
         if height_fn(ax + (bx - ax) * t, az + (bz - az) * t) \

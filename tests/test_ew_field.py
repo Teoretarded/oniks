@@ -40,8 +40,19 @@ class _Jammer:
         self.jam_power_w = float(jam_power_w)
 
 
+def _flat_sea(x, z):
+    """Open water under the whole EW test geometry — isolates the EW field
+    model from terrain LOS.  RADAR_POS sits at a coastal x where the REAL
+    HeightField is ~144 m, so with the default terrain height_fn the sea-level
+    test radar would be 'buried' and the M3 close-range LOS sampling would mask
+    every close bearing.  The terrain x EW interaction has its OWN test
+    (test_terrain_masked_jammer_does_not_jam, which passes height_fn directly)."""
+    return -100.0
+
+
 def _radar():
-    return Radar("rt", RADAR_POS, RADAR_ANTENNA_M, dict(PLAYER_RANGES))
+    return Radar("rt", RADAR_POS, RADAR_ANTENNA_M, dict(PLAYER_RANGES),
+                 height_fn=_flat_sea)
 
 
 def _at_ground_range(rng_m, bearing_rad=0.0, alt_m=0.0):
