@@ -183,6 +183,19 @@ RADAR_STATION_XZ = (40_000.0, -6_000.0)
 RADAR_ANTENNA_M = 18.0          # radome center above the slab
 ONIKS_LAUNCHER_SPACING_M = 6.0  # side-by-side gap between Oniks TELs (~2.9 m wide)
 S300_LAUNCHER_SPACING_M = 8.0   # side-by-side gap between S-300 TELs (~3.05 m wide)
+
+# --- M5 #4 SHOOT-AND-SCOOT relocate (player action; NO config field) ----------
+# A firing TEL (Bastion / S-300 / Buk) can be ordered to a new map position
+# after it shoots; while it drives it is COMMITTED (cannot launch), and on
+# arrival its pad, every launch tube, AND its destructible Structure all move to
+# the new pad, so the enemy's stale back-plot points at empty dirt (the headline
+# dodge — physics-not-dice, never a roll).  These two constants size the move.
+# Open-source K-300P / Buk road march: a TEL convoys at ~40 km/h on a prepared
+# road, and emplace/displace (jacks, erector, cabling) is a fixed ~30-40 s dwell.
+RELOCATE_SPEED_MPS = 12.0      # ~43 km/h TEL road-march drive speed
+RELOCATE_SETUP_S = 35.0        # emplace/displace dwell EACH END (committed, not
+#                                yet moving) — total committed time is
+#                                2*RELOCATE_SETUP_S + drive_distance/RELOCATE_SPEED_MPS
 PLAYER_RADAR_RANGES = {         # size class -> max detection range (m)
     "ship": 350_000.0, "fighter": 350_000.0,
     "missile": 120_000.0, "stealth": 35_000.0,
@@ -770,6 +783,19 @@ class CombatWorld(WorldState):
             self.structures.append(Structure(
                 f"cbr_{i:02d}", "radar_station", np.asarray(r.pos).copy(),
                 on_destroyed=lambda _s, _r=r: setattr(_r, "alive", False)))
+        # ---- M5 #4 SHOOT-AND-SCOOT: relocatable firing-TEL registry ----
+        # GENERIC over the THREE firing TELs the back-plot targets (Bastion /
+        # S-300 / Buk): one descriptor per launcher binds its live pad position,
+        # its launch tubes, and its destructible Structure so ONE
+        # _step_relocations drives all of them.  The radar station, Pantsir,
+        # swarm pod and CBR are NOT relocatable in v1 (fixed sites — keeps scope
+        # to the firing TELs).  Each descriptor's relocate state DEFAULTS to idle
+        # (dest=None, committed=False, move_left_s=0) so a battle that never calls
+        # request_relocate is byte-identical: _step_relocations is a pure no-op
+        # and the arm gates' "and not committed" clause is vacuously True.  Built
+        # here (after every firing-TEL Structure exists) by pairing each launcher
+        # position list with its tube list and the matching kind-tagged Structure.
+        self._relocatable = self._build_relocatable_registry()
         # The controller defends EVERY player structure (Bastion/S-300/radar
         # + the Pantsirs themselves): it prioritises the threat closest in
         # time-to-impact to any protected asset.  Stepped in step() AFTER the
@@ -2603,13 +2629,159 @@ class CombatWorld(WorldState):
             return False
         return True
 
+    # ----------------------------------------------- M5 #4 SHOOT-AND-SCOOT
+    #
+    # The relocate mechanic is GENERIC over a "relocatable launcher" so the
+    # Oniks Bastion, S-300, and Buk firing TELs reuse ONE implementation.  Each
+    # descriptor in self._relocatable binds a launcher's LIVE pad position array
+    # (the same object stored in the battery's _*_launcher_positions list — so
+    # mutating it in place moves the renderer + structure source of truth), its
+    # launch tubes, the per-tube mouth offsets (captured at build, so the tube
+    # 'pos' can be recomputed from the moved pad — the load-bearing honesty
+    # link), and the matching destructible Structure.  Relocate state defaults
+    # to idle, so a battle that never calls request_relocate is byte-identical.
+
+    def _build_relocatable_registry(self) -> list:
+        """Pair every firing-TEL launcher with its tubes + Structure into one
+        relocatable-launcher descriptor list.  Called once in __init__ AFTER all
+        firing-TEL Structures exist.  The radar station / Pantsir / swarm pod /
+        CBR are intentionally absent (fixed sites in v1).  Returns [] when no
+        firing TEL is built (cannot happen — n_oniks/n_s300 floor at 1 — but the
+        Buk slice is empty at n_buk=0, byte-identical)."""
+        reg: list = []
+        specs = (
+            ("bastion_tel", self._oniks_launcher_positions, self._oniks_tubes,
+             len(self._oniks_tubes) // max(1, len(self._oniks_launcher_positions))),
+            ("s300_tel", self._s300_launcher_positions, self._s300_tubes,
+             len(self._s300_tubes) // max(1, len(self._s300_launcher_positions))),
+            ("buk_tel", self._buk_launcher_positions, self._buk_tubes,
+             (len(self._buk_tubes) // max(1, len(self._buk_launcher_positions)))
+             if self._buk_launcher_positions else 0),
+        )
+        structs_by_kind: dict[str, list] = {}
+        for s in self.structures:
+            structs_by_kind.setdefault(s.kind, []).append(s)
+        for kind, positions, tubes, per in specs:
+            kstructs = structs_by_kind.get(kind, [])
+            for i, lpos in enumerate(positions):
+                my_tubes = tubes[i * per:(i + 1) * per]
+                # Mouth offset of each tube from THIS launcher's current pad
+                # (the pads are still the originals here, so the offset is exact;
+                # re-pinning tube pos = moved pad + offset reproduces the geometry
+                # at the new site — the moving-Structure honesty link).
+                offsets = [np.asarray(t["pos"], dtype=np.float64) - lpos
+                           for t in my_tubes]
+                struct = kstructs[i] if i < len(kstructs) else None
+                reg.append({
+                    "kind": kind,
+                    "platform": struct.structure_id if struct else f"{kind}_{i:02d}",
+                    "pos": lpos,              # SAME ndarray as the battery list
+                    "tubes": my_tubes,
+                    "offsets": offsets,
+                    "structure": struct,
+                    # relocate state — DEFAULT IDLE (byte-identical no-op)
+                    "dest": None,             # (2,) target xz, or None
+                    "committed": False,
+                    "move_left_s": 0.0,
+                })
+        return reg
+
+    def _relocatable_for(self, platform):
+        """Resolve a relocate descriptor by platform id (the Structure id, e.g.
+        'bastion_tel_00') or by passing the Structure object itself.  Returns the
+        descriptor dict or None."""
+        pid = getattr(platform, "structure_id", platform)
+        for d in self._relocatable:
+            if d["platform"] == pid or d["structure"] is platform:
+                return d
+        return None
+
+    def _launcher_committed(self, tube) -> bool:
+        """True while the tube's launcher is COMMITTED to a relocate (driving or
+        in the emplace/displace dwell).  Read via a per-tube flag so the existing
+        per-tube arm/launch loops gain only an 'and not committed' clause; the
+        flag is absent until a relocate is ordered, so the default is False
+        (byte-identical)."""
+        return bool(tube.get("committed", False))
+
+    def request_relocate(self, platform, dest_xz) -> bool:
+        """Order a firing TEL to SHOOT-AND-SCOOT to ``dest_xz`` (a map xz).
+
+        PLAYER ACTION (no config field).  On success the launcher is COMMITTED
+        immediately — its arm gate goes False and any launch is refused — and a
+        deterministic constant-speed drive (RELOCATE_SPEED_MPS) plus a fixed
+        emplace/displace dwell (RELOCATE_SETUP_S each end) begins.  The pad,
+        every tube, and the Structure stay at the OLD site (so the enemy's stale
+        back-plot still points there) until ARRIVAL, when _step_relocations
+        re-pins all of them to the new pad and clears the commit (re-armed if
+        ammo/reload allow).  Reload timers KEEP RUNNING while driving (the tube
+        re-cocks en route).
+
+        Returns False (no-op) when the platform is unknown, already committed (a
+        2nd request is refused), or dead — and True when the relocate is booked.
+        DETERMINISM: no RNG, no wall-clock (the [seed,11] tag stays reserved)."""
+        d = self._relocatable_for(platform)
+        if d is None:
+            return False
+        if d["committed"]:
+            return False                      # refuse a 2nd request mid-move
+        struct = d["structure"]
+        if struct is not None and not struct.alive:
+            return False                      # a dead TEL cannot drive
+        dest = np.asarray(dest_xz, dtype=np.float64).reshape(-1)[:2]
+        # Drive distance is ground range from the CURRENT pad to the destination.
+        dx = float(dest[0]) - float(d["pos"][0])
+        dz = float(dest[1]) - float(d["pos"][2])
+        drive_s = float(np.hypot(dx, dz)) / RELOCATE_SPEED_MPS
+        d["dest"] = dest.copy()
+        d["committed"] = True
+        d["move_left_s"] = 2.0 * RELOCATE_SETUP_S + drive_s
+        for t in d["tubes"]:
+            t["committed"] = True             # disarm this launcher's tubes
+        return True
+
+    def _step_relocations(self, dt: float) -> None:
+        """Advance every committed relocate; re-pin the pad, EVERY tube, and the
+        Structure to the new pad on arrival.  A PURE NO-OP while every launcher
+        is idle (committed=False) — so the default battle is byte-identical.
+
+        On arrival (move_left_s reaches 0): set the launcher pad ndarray to the
+        destination at the destination's terrain height, recompute each tube's
+        pos = pad + its baked mouth offset, move the Structure .pos (its OBB
+        rebuilds from .pos PER QUERY in sim/bases.py, so the damage sweep follows
+        the move with no desync), clear the commit, and re-arm the tubes."""
+        for d in self._relocatable:
+            if not d["committed"]:
+                continue                      # idle launcher: nothing to do
+            d["move_left_s"] = max(0.0, d["move_left_s"] - dt)
+            if d["move_left_s"] > 0.0:
+                continue                      # still displacing / driving / emplacing
+            # --- ARRIVAL: snap pad + tubes + Structure to the new pad ---
+            dest = d["dest"]
+            ny = float(terrain_height_scalar(float(dest[0]), float(dest[1])))
+            pad = d["pos"]
+            pad[0] = float(dest[0])
+            pad[1] = ny
+            pad[2] = float(dest[1])
+            for t, off in zip(d["tubes"], d["offsets"]):
+                t["pos"] = pad + off          # recompute mouth from the moved pad
+                t["committed"] = False        # re-arm this launcher's tube
+            struct = d["structure"]
+            if struct is not None:
+                struct.pos = pad.copy()       # OBB recomputes from .pos per query
+            d["committed"] = False
+            d["dest"] = None
+
     @property
     def launcher_armed(self) -> bool:
         """Salvo gate: armed while ANY Oniks tube is loaded and re-cocked, and
-        the battery is not yet rubble (every bastion_tel structure dead)."""
+        the battery is not yet rubble (every bastion_tel structure dead).  M5 #4:
+        a tube whose launcher is COMMITTED to a relocate is NOT available (the
+        'and not committed' clause — vacuously True while idle, byte-identical)."""
         if self.defeated:
             return False
         return any(t["loaded"] and t["reload_left"] <= 0.0
+                   and not self._launcher_committed(t)
                    for t in self._oniks_tubes)
 
     # ----------------------------------------------------- Oniks salvo battery
@@ -2660,8 +2832,11 @@ class CombatWorld(WorldState):
             weapon = ZIRCON
         else:
             weapon = ONIKS
+        # M5 #4: a tube whose launcher is COMMITTED to a relocate cannot fire
+        # (the 'and not committed' clause — vacuously True while idle).
         tube = next((t for t in self._oniks_tubes
-                     if t["loaded"] and t["reload_left"] <= 0.0), None)
+                     if t["loaded"] and t["reload_left"] <= 0.0
+                     and not self._launcher_committed(t)), None)
         if tube is None:
             return None
         pos = tube["pos"]
@@ -2734,8 +2909,10 @@ class CombatWorld(WorldState):
                        if s.ship_id == ship_id and s.alive), None)
         if target is None:
             return None
+        # M5 #4: a relocating Bastion TEL cannot fire its ASBM either.
         tube = next((t for t in self._oniks_tubes
-                     if t["loaded"] and t["reload_left"] <= 0.0), None)
+                     if t["loaded"] and t["reload_left"] <= 0.0
+                     and not self._launcher_committed(t)), None)
         if tube is None:
             return None
         m = AsbmMissile(BASTION_K, tube["pos"].copy(), target,
@@ -2927,22 +3104,25 @@ class CombatWorld(WorldState):
     @property
     def sam_launcher_armed(self) -> bool:
         """48N6 salvo gate: a round in the pool, no magazine refill pending,
-        and at least one S-300 tube re-cocked."""
+        and at least one S-300 tube re-cocked.  M5 #4: a tube whose launcher is
+        COMMITTED to a relocate is excluded (vacuously True while idle)."""
         if self.sam_ammo <= 0:
             return False
         if self._s300_48n6_mag_reload_left > 0.0:
             return False
-        return any(t["reload_left"] <= 0.0 for t in self._s300_tubes)
+        return any(t["reload_left"] <= 0.0 and not self._launcher_committed(t)
+                   for t in self._s300_tubes)
 
     @property
     def sam_40n6_launcher_armed(self) -> bool:
         """40N6 salvo gate: a 40N6 round in the pool, no refill pending, and a
-        tube re-cocked."""
+        tube re-cocked (and the launcher not relocate-committed — M5 #4)."""
         if self.sam_ammo_40n6 <= 0:
             return False
         if self._s300_40n6_mag_reload_left > 0.0:
             return False
-        return any(t["reload_left"] <= 0.0 for t in self._s300_tubes)
+        return any(t["reload_left"] <= 0.0 and not self._launcher_committed(t)
+                   for t in self._s300_tubes)
 
     def launch_sam(self, aircraft_id, round_id: str = "48n6"):
         """Salvo S-300 launch: fire the selected round from the next READY tube
@@ -2966,8 +3146,10 @@ class CombatWorld(WorldState):
         target = self._find_air_entity(aircraft_id)
         if target is None:
             return None
-        tube = next((t for t in self._s300_tubes if t["reload_left"] <= 0.0),
-                    None)
+        # M5 #4: skip a tube whose launcher is relocate-committed.
+        tube = next((t for t in self._s300_tubes
+                     if t["reload_left"] <= 0.0
+                     and not self._launcher_committed(t)), None)
         if tube is None:
             return None
         m = SamMissile(weapon_def, tube["pos"].copy(), target,
@@ -3103,22 +3285,25 @@ class CombatWorld(WorldState):
     @property
     def buk_9m317_launcher_armed(self) -> bool:
         """9M317 salvo gate: a round in the pool, no magazine refill pending,
-        and at least one Buk tube re-cocked."""
+        and at least one Buk tube re-cocked (and not relocate-committed — M5 #4,
+        vacuously True while idle)."""
         if self.buk_9m317_ammo <= 0:
             return False
         if self._buk_9m317_mag_reload_left > 0.0:
             return False
-        return any(t["reload_left"] <= 0.0 for t in self._buk_tubes)
+        return any(t["reload_left"] <= 0.0 and not self._launcher_committed(t)
+                   for t in self._buk_tubes)
 
     @property
     def buk_9m338_launcher_armed(self) -> bool:
         """9M338 salvo gate: a 9M338 round in the pool, no refill pending, and a
-        tube re-cocked."""
+        tube re-cocked (and not relocate-committed — M5 #4)."""
         if self.buk_9m338_ammo <= 0:
             return False
         if self._buk_9m338_mag_reload_left > 0.0:
             return False
-        return any(t["reload_left"] <= 0.0 for t in self._buk_tubes)
+        return any(t["reload_left"] <= 0.0 and not self._launcher_committed(t)
+                   for t in self._buk_tubes)
 
     def launch_buk(self, aircraft_id, round_id: str = "9m317"):
         """Salvo Buk launch at the AIR contact ``aircraft_id``: fire the
@@ -3145,8 +3330,10 @@ class CombatWorld(WorldState):
         target = self._find_air_entity(aircraft_id)
         if target is None:
             return None
-        tube = next((t for t in self._buk_tubes if t["reload_left"] <= 0.0),
-                    None)
+        # M5 #4: skip a tube whose launcher is relocate-committed.
+        tube = next((t for t in self._buk_tubes
+                     if t["reload_left"] <= 0.0
+                     and not self._launcher_committed(t)), None)
         if tube is None:
             return None
         m = SamMissile(weapon_def, tube["pos"].copy(), target,
@@ -3397,6 +3584,11 @@ class CombatWorld(WorldState):
         self._step_oniks_tubes(dt)        # per-tube Oniks salvo reload
         self._step_s300_tubes(dt)         # per-tube S-300 salvo reload
         self._step_buk_tubes(dt)          # M5 per-tube Buk reload + mag refills
+        # M5 #4 SHOOT-AND-SCOOT: advance any committed relocate; re-pin the pad +
+        # tubes + Structure on arrival.  PURE NO-OP while every launcher is idle
+        # (the byte-identical default) — reload timers above keep running so a
+        # tube re-cocks WHILE driving (the mid-reload-relocate regression).
+        self._step_relocations(dt)
         self._step_swarm_pod(dt)          # M4-B swarm cell-magazine refill
         self._step_drones(dt)
         # M5: step the enemy subs BEFORE the strikes/defense layers so a Kalibr
