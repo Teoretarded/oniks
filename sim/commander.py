@@ -257,6 +257,89 @@ COMMANDER_TICK_S: float = 1.0   # s between doctrine evaluations
 
 
 # ---------------------------------------------------------------------------
+# Back-plot geometry helper (the DRY/symmetry seam)
+# ---------------------------------------------------------------------------
+#
+# back_plot_surface() is the SHARED launch-point back-projection. The enemy
+# commander (process_missile_track) calls it to localize a player Oniks/SAM
+# launch; the SAME math is intended to be reused by the player counter-battery
+# radar (#3) and the corner-reflector decoy model (#5), so a single tested
+# function runs on both sides of the duel.
+#
+# It is PURE (no self, no RNG, no truth read): given only the FIRST-SEEN sensor
+# track (position + velocity) it returns the estimated surface launch point, or
+# None when the geometry cannot be localized (a coast-parallel / receding
+# dogleg). The two regimes were factored VERBATIM out of process_missile_track
+# (no behavior change) — see the bit-identical test tests/test_backplot_helper.py.
+
+
+def back_plot_surface(
+    first_pos: np.ndarray,
+    first_vel: np.ndarray,
+    *,
+    coast_z: float = HOME_COAST_Z,
+    climb_vy: float = BACKPLOT_CLIMB_VY,
+    min_close_vz: float = BACKPLOT_MIN_CLOSE_VZ,
+) -> Optional[tuple[float, float]]:
+    """Back-project a first-detection missile track to its surface launch point.
+
+    Pure geometric estimate from the SENSOR track only (no truth read). Two
+    regimes — the old single fy/vy time-to-surface projection was degenerate for
+    level flight and slid level-cruise estimates tens of km the WRONG way
+    (measured ~150 km downrange, into the enemy's quadrant), so the enemy could
+    never localize a sea-skimming launch:
+
+      * Boost climb (``vy >= climb_vy``): the round was caught still climbing
+        near launch — project backward in time to the surface (y = 0). Accurate
+        close in.
+      * Level sea-skimmer (``vy < climb_vy``): the launch is far behind it, off
+        the bottom of the time-to-surface math. Intersect the horizontal ground
+        track with the known home coastline (``coast_z``) instead. A
+        coast-parallel or receding track (a deliberate dogleg) cannot be
+        localized -> returns None (``vz <= min_close_vz`` or the round is on the
+        coast side already, ``dz <= 0``).
+
+    Args:
+        first_pos:  (3,) XYZ position when first detected.
+        first_vel:  (3,) XYZ velocity when first detected.
+        coast_z:    the believed home coastline Z the level track is projected
+                    back to (default HOME_COAST_Z).
+        climb_vy:   the vy boundary between the boost-climb and level regimes.
+        min_close_vz: a level track must close toward the coast faster than this
+                    to be localizable.
+
+    Returns:
+        (launch_x, launch_z) estimate, or None when the geometry cannot localize.
+    """
+    vx = float(first_vel[0])
+    vy = float(first_vel[1])
+    vz = float(first_vel[2])
+    fx = float(first_pos[0])
+    fy = float(first_pos[1])
+    fz = float(first_pos[2])
+
+    if vy >= climb_vy:
+        # Boost climb caught near launch: project backward in time to the
+        # surface (y = 0). Accurate while the round is still climbing.
+        t_back = fy / vy
+        launch_x = fx - vx * t_back
+        launch_z = fz - vz * t_back
+    else:
+        # Level sea-skimmer: the launch is far behind it, off the bottom of
+        # the time-to-surface math. Intersect the horizontal ground track
+        # with the known home coastline instead. A coast-parallel or
+        # receding track (a deliberate dogleg) cannot be localized -> no fix.
+        dz = fz - coast_z
+        if vz <= min_close_vz or dz <= 0.0:
+            return None
+        s = dz / vz
+        launch_x = fx - vx * s
+        launch_z = coast_z
+
+    return (launch_x, launch_z)
+
+
+# ---------------------------------------------------------------------------
 # Internal data structures
 # ---------------------------------------------------------------------------
 
@@ -1378,40 +1461,17 @@ class EnemyCommander:
         if already_plotted:
             return
 
-        # Extrapolate first_seen_pos backward by the track age at first detection
-        # (i.e., the time from launch to first detection) to get the surface
-        # launch point.  We don't know the actual time-since-launch, so we
-        # use the observed velocity at first detection and project backward
-        # until Y reaches 0 (surface).
-        vx = float(first_seen_vel[0])
-        vy = float(first_seen_vel[1])
-        vz = float(first_seen_vel[2])
-        fx = float(first_seen_pos[0])
-        fy = float(first_seen_pos[1])
-        fz = float(first_seen_pos[2])
-
-        # Back-project the launch point from the first-detection track. Two
-        # regimes — the old single fy/vy time-to-surface projection was
-        # degenerate for level flight and slid level-cruise estimates tens of km
-        # the WRONG way (measured ~150 km downrange, into the enemy's quadrant),
-        # so the enemy could never localize a sea-skimming launch:
-        if vy >= BACKPLOT_CLIMB_VY:
-            # Boost climb caught near launch: project backward in time to the
-            # surface (y = 0). Accurate while the round is still climbing.
-            t_back = fy / vy
-            launch_x = fx - vx * t_back
-            launch_z = fz - vz * t_back
-        else:
-            # Level sea-skimmer: the launch is far behind it, off the bottom of
-            # the time-to-surface math. Intersect the horizontal ground track
-            # with the known home coastline instead. A coast-parallel or
-            # receding track (a deliberate dogleg) cannot be localized -> no fix.
-            dz = fz - HOME_COAST_Z
-            if vz <= BACKPLOT_MIN_CLOSE_VZ or dz <= 0.0:
-                return
-            s = dz / vz
-            launch_x = fx - vx * s
-            launch_z = HOME_COAST_Z
+        # Extrapolate first_seen_pos backward to the surface launch point using
+        # the SHARED back_plot_surface() helper (the DRY/symmetry seam — the same
+        # math the player CBR (#3) and corner-reflector decoys (#5) reuse). We
+        # don't know the actual time-since-launch, so the helper uses the observed
+        # velocity at first detection: boost-climb -> time-project to y = 0;
+        # level sea-skimmer -> intersect the ground track with the home coast.
+        # A coast-parallel / receding dogleg returns None (cannot localize).
+        plot = back_plot_surface(first_seen_pos, first_seen_vel)
+        if plot is None:
+            return
+        launch_x, launch_z = plot
 
         error_m = det_range * BACKPLOT_ERR_FRAC
 
