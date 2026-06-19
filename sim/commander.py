@@ -171,6 +171,22 @@ BACKPLOT_CLIMB_VY: float = 50.0       # m/s; above this the round is still in it
 BACKPLOT_MIN_CLOSE_VZ: float = 50.0   # m/s; a level track must be closing toward
 #                                       the coast at least this fast to localize
 #                                       (a coast-parallel / receding dogleg is not).
+BACKPLOT_COAST_SETBACK_M: float = 300.0  # m; coastal anti-ship batteries deploy
+#   INLAND of the waterline (cliff-top emplacements with clear sea LOS — the real
+#   Bastion-P doctrine), so the level-skimmer ground track is projected back to
+#   coast_z - this setback, not the bare waterline. WHY THIS NUMBER (measured):
+#   tools/probe_backplot_reliability.py showed the bare-waterline projection
+#   (setback 0) put the centroid ~600 m SEAWARD of the true Bastion pad (z=-600,
+#   600 m inland) — a systematic bias that left the strike relying on the outer
+#   edge of the 1 km terminal seeker basket. CONSERVATIVE: 300 m is HALF the
+#   measured 600 m true setback, so the estimate tightens to ~300 m (well inside
+#   the basket) but DELIBERATELY UNDER-CORRECTS and never snipes to the true pad —
+#   the enemy's belief about coastal-battery setback is approximate, a doctrine
+#   belief like HOME_COAST_Z, NOT a truth read. The error FLOOR (error_m =
+#   det_range*BACKPLOT_ERR_FRAC, ~7 km at the AWACS slant) is unchanged — the fix
+#   stays a wide-uncertainty CUE. The dogleg/scoot WINNABILITY escapes are
+#   structurally untouched: the rejection test below runs on the WATERLINE
+#   (coast_z), so the setback never widens the no-fix window.
 
 # AWACS flee range (spec section 6 "AWACS: order flee when any player missile
 # track closes within ...").
@@ -280,6 +296,7 @@ def back_plot_surface(
     coast_z: float = HOME_COAST_Z,
     climb_vy: float = BACKPLOT_CLIMB_VY,
     min_close_vz: float = BACKPLOT_MIN_CLOSE_VZ,
+    coast_setback_m: float = BACKPLOT_COAST_SETBACK_M,
 ) -> Optional[tuple[float, float]]:
     """Back-project a first-detection missile track to its surface launch point.
 
@@ -294,19 +311,28 @@ def back_plot_surface(
         close in.
       * Level sea-skimmer (``vy < climb_vy``): the launch is far behind it, off
         the bottom of the time-to-surface math. Intersect the horizontal ground
-        track with the known home coastline (``coast_z``) instead. A
+        track with the believed coastal-battery setback line
+        (``coast_z - coast_setback_m``) instead — coastal anti-ship batteries
+        deploy inland of the waterline, so projecting to the bare coast biases
+        the estimate seaward (MEASURED ~600 m for the Bastion pad). A
         coast-parallel or receding track (a deliberate dogleg) cannot be
-        localized -> returns None (``vz <= min_close_vz`` or the round is on the
-        coast side already, ``dz <= 0``).
+        localized -> returns None. The localizability test runs on the WATERLINE
+        (``dz = fz - coast_z``; ``vz <= min_close_vz`` or ``dz <= 0``), so the
+        setback NEVER widens the no-fix window — the dogleg/scoot escapes are
+        unchanged.
 
     Args:
         first_pos:  (3,) XYZ position when first detected.
         first_vel:  (3,) XYZ velocity when first detected.
-        coast_z:    the believed home coastline Z the level track is projected
-                    back to (default HOME_COAST_Z).
+        coast_z:    the believed home coastline Z (the localizability datum the
+                    level track is tested against; default HOME_COAST_Z).
         climb_vy:   the vy boundary between the boost-climb and level regimes.
         min_close_vz: a level track must close toward the coast faster than this
                     to be localizable.
+        coast_setback_m: believed inland setback of a coastal battery from the
+                    waterline; the level estimate's Z is coast_z - this (a
+                    doctrine belief, NOT a truth read; default
+                    BACKPLOT_COAST_SETBACK_M, deliberately under the true 600 m).
 
     Returns:
         (launch_x, launch_z) estimate, or None when the geometry cannot localize.
@@ -329,12 +355,18 @@ def back_plot_surface(
         # the time-to-surface math. Intersect the horizontal ground track
         # with the known home coastline instead. A coast-parallel or
         # receding track (a deliberate dogleg) cannot be localized -> no fix.
+        # NOTE: the localizability test is on the WATERLINE (coast_z) so the
+        # setback correction below cannot widen the no-fix escape window.
         dz = fz - coast_z
         if vz <= min_close_vz or dz <= 0.0:
             return None
-        s = dz / vz
+        # Project to the believed inland setback line (coastal batteries sit
+        # back from the waterline): a better geometric estimate that removes the
+        # measured seaward bias without snipe-ing to truth (under-corrected).
+        target_z = coast_z - coast_setback_m
+        s = (fz - target_z) / vz
         launch_x = fx - vx * s
-        launch_z = coast_z
+        launch_z = target_z
 
     return (launch_x, launch_z)
 

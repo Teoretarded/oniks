@@ -1162,3 +1162,50 @@ flagged, not introduced by M2); (3) hands-on playtest recommended.
 new-weapon meshes + reference photos (ASBM, swarm loiterer+pod, M5 craft) batched into a
 focused screenshot-verified model pass. NEXT: Milestone 5 (fleet classes / sub+ASW / Buk /
 shoot-and-scoot / counter-battery radar / decoys / amphibious).
+
+## M5 #2 — back_plot_surface() helper + launch-site back-plot reliability buff (2026-06-19)
+
+### Task A — extract back_plot_surface() (commit `5e1b1e3`, BIT-IDENTICAL)
+- Factored the launch-point back-projection (climb time-to-surface + level-skimmer
+  coast-intersection) out of `EnemyCommander.process_missile_track` into the PURE,
+  module-level `back_plot_surface(first_pos, first_vel, *, coast_z, climb_vy,
+  min_close_vz)` — the DRY/symmetry seam the player CBR (#3) + corner-reflector
+  decoys (#5) reuse. Zero behavior change, proved TWO ways: a parametrized golden
+  table (climb/level/reject cases captured VERBATIM from HEAD) + a 3000-step
+  default-battle digest == pre-change HEAD (`d6a70695…`). Duel + full suite + smoke
+  green.
+
+### Task B — RELIABILITY buff (BALANCE — needs the user's hands-on playtest)
+**memory: enemy-lethality-backplot, playtest-before-polish.** The launch-site
+back-plot is the enemy's ONLY base-kill path; this change makes the enemy localize
+a straight sea-skim leak more accurately, so it is BALANCE-CRITICAL and must be
+playtested by hand.
+- **Measure-first** (`tools/probe_backplot_reliability.py`, real CombatWorld, real
+  Bastion pad): a lo-lo Oniks is first detected ~114 s after launch at ~350 km
+  AWACS slant; the OLD ~12 km mis-projection (GAME_ANALYSIS §5) is ALREADY fixed by
+  the coast-intersection logic. The residual flaw was a systematic **600 m seaward
+  bias**: the level-skimmer projected to the bare waterline (z=0) while the true
+  Bastion pad sits 600 m inland (z=−600) — the strike relied on the outer edge of
+  the 1 km terminal seeker basket.
+- **The buff** (physics-not-dice, conservative): new named constant
+  `BACKPLOT_COAST_SETBACK_M = 300.0` — project the level-skimmer ground track back
+  to the believed coastal-battery setback line (`coast_z − setback`) instead of the
+  bare waterline. A doctrine BELIEF about coastal-battery emplacement (like
+  HOME_COAST_Z), NOT a truth read. 300 m is HALF the measured 600 m true setback:
+  the estimate tightens but DELIBERATELY UNDER-CORRECTS so it never snipes to truth.
+- **MEASURED before/after** (probe): straight sea-skim centroid error **600 m → 300 m**
+  (well inside the 1 km basket); cluster still forms within 3 detected launches.
+  Error FLOOR unchanged (`error_m = det_range·0.02 ≈ 7 km` — a wide CUE, not a snipe).
+- **Two-sided WINNABLE proof:** (a) the dogleg/coast-parallel salvo still yields
+  ZERO fixes — the rejection test is unchanged (runs on the waterline, not the
+  setback line), so the no-fix escape window did not grow; AND a coast-parallel
+  salvo is never even detected by the AWACS look-down sector. (b) a player who
+  relocates ≥ 1 basket (8 km) is NOT hit by the stale centroid (measured 8005 m
+  from the relocated pad → outside the seeker basket → hits dirt).
+- **Digest exception (the ONE allowed, documented):** the default-battle digest
+  WILL change. `tools/wf_backplot_digest.py` now runs to 16 000 steps (reaches
+  back-plot formation) and is DETERMINISTIC after dropping the `id()`-derived
+  track_id from the hash: pre-buff (setback 0) `996f851f…` vs pinned post-buff
+  `bba4b1b5…`. The DUEL (`test_sm2_statistics`) is BIT-IDENTICAL (untouched path).
+- Tests: `tests/test_backplot_helper.py` (Task A), `tests/test_backplot_reliability.py`
+  (Task B, two-sided + measured, slow real-world world-sim gates marked `slow`).

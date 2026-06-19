@@ -31,10 +31,13 @@ from world.combat_config import CombatConfig
 
 DT = 1.0 / 120.0
 
-# Pinned after Task B (the buff intentionally changes commander behavior). Set
-# to the pre-change HEAD digest BEFORE Task A; updated to the post-buff digest
-# AFTER Task B with the change documented in the commit + build log.
-PINNED_DIGEST = None
+# Pinned post-Task-B digest. Task A (the back_plot_surface extract) left this
+# digest BIT-IDENTICAL to pre-change HEAD; Task B (the reliability buff) is the
+# ONE allowed, documented change — the 16 000-step window reaches back-plot
+# formation, where the buffed level-skimmer projection now records fixes at the
+# coastal-setback line (z = -300) instead of the bare waterline (z = 0), shifting
+# the commander back-plot state. This pin makes the post-buff battle reproducible.
+PINNED_DIGEST = "bba4b1b52292beae4b8143ff5971c4aed21d05573a1d3c15dd92e34598d936b5"
 
 
 def _f(h, x):
@@ -47,20 +50,31 @@ def _vec(h, v):
 
 
 def _hash_commander_backplot(h, cw):
-    """Hash the enemy commander's back-plot pipeline state (the path the
-    extract + the buff touch). Robust to the commander not yet existing."""
+    """Hash the enemy commander's back-plot pipeline state (the path the extract
+    + the buff touch). Robust to the commander not yet existing.
+
+    DETERMINISM NOTE: a real-world back-plot fix's ``track_id`` is
+    ``hostile_{id(missile):x}`` — derived from a Python object id (a memory
+    address), which is NOT reproducible across processes. We deliberately do NOT
+    hash the track_id; we hash the GEOMETRIC/NUMERIC fix content (estimate,
+    error, cluster centroid, fix count, targetable), which IS deterministic and
+    is exactly what the extract (unchanged) and the buff (z shifted by the
+    setback) affect. Fixes are sorted by their estimate so dict/order effects
+    cannot perturb the digest."""
     cmd = getattr(cw, "commander", None)
     if cmd is None:
         h.update(b"NOCMD")
         return
     pic = cmd.picture
-    bps = list(getattr(pic, "_back_plots", []))
+    bps = sorted(getattr(pic, "_back_plots", []),
+                 key=lambda b: (float(b.estimated_pos[0]),
+                                float(b.estimated_pos[1]), float(b.error_m)))
     h.update(struct.pack("<i", len(bps)))
     for bp in bps:
         _vec(h, bp.estimated_pos)
         _f(h, bp.error_m)
-        h.update(bp.track_id.encode("utf-8"))
-    clusters = list(getattr(pic, "clusters", []))
+    clusters = sorted(getattr(pic, "clusters", []),
+                      key=lambda c: (float(c.centre[0]), float(c.centre[1])))
     h.update(struct.pack("<i", len(clusters)))
     for c in clusters:
         _vec(h, c.centre)
@@ -68,14 +82,18 @@ def _hash_commander_backplot(h, cw):
         h.update(b"\x01" if c.targetable else b"\x00")
 
 
-def digest(steps=3000, seed=1337):
+def digest(steps=16_000, seed=1337):
     cfg = CombatConfig(seed=seed)
     cw = CombatWorld(cfg)
     h = hashlib.sha256()
 
-    # Fire a lo-lo (sea-skim) Oniks salvo from the real Bastion pad toward the
-    # fleet band — the realistic leak that the commander back-plots. Three
-    # rounds at intervals so distinct tracks accumulate.
+    # Fire lo-lo (sea-skim) Oniks salvos from the real Bastion pad toward the
+    # fleet band — the realistic leak the commander back-plots. The horizon
+    # (16 000 steps = ~133 s) is set from the MEASURED flight: a lo-lo round is
+    # first detected ~114 s after launch (~350 km AWACS slant), so this window
+    # REACHES back-plot formation — the digest actually EXERCISES the buffed
+    # level-skimmer projection (Task A leaves it bit-identical; Task B changes it,
+    # which is the one allowed, documented digest change, pinned below).
     target = np.array([0.0, 0.0, 220_000.0])
     fire_steps = {60, 360, 660}
     for i in range(steps):
