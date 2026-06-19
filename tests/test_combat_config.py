@@ -32,6 +32,7 @@ from world.combat_config import (
     CLAMP_RELOAD_S,
     CLAMP_SWARM_PODS, CLAMP_SWARM_CELLS,
     CLAMP_BUK,
+    CLAMP_CBR,
     CLAMP_FLAGSHIP, CLAMP_AAW, CLAMP_GROUND_ATTACK,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
     CLAMP_SUBS, CLAMP_SONOBUOYS, CLAMP_ASW_AMMO, CLAMP_SUB_KALIBR,
@@ -93,6 +94,10 @@ def test_defaults_match_locked_schema():
     assert c.buk_9m317_ammo == 6
     assert c.buk_9m338_ammo == 6
     assert c.buk_mag_reload_s == 45.0
+    # M5 #3: the CBR (counter-battery / early-warning radar) count DEFAULTS to 0
+    # (OFF) so the out-of-the-box battle stays byte-identical (no CBR built -> not
+    # in radar_net / the emitter feed -> the tracker never steps).
+    assert c.n_cbr == 0
     # M5 enemy ship classes: ALL DEFAULT 0 so the out-of-the-box fleet stays
     # byte-identical (the typed mixer draws today's 1 carrier + n_destroyers
     # general layout; _spawn_ships builds GeneralDestroyer == legacy Destroyer).
@@ -258,6 +263,31 @@ def test_clamp_config_buk():
     assert clamp_config().buk_mag_reload_s == 45.0
     assert clamp_config(buk_9m317_ammo=9999).buk_9m317_ammo == CLAMP_AMMO[1]
     assert clamp_config(buk_9m338_ammo=9999).buk_9m338_ammo == CLAMP_AMMO[1]
+
+
+# ---------------------------------------------------------------------------
+# M5 #3: n_cbr config field, clamp (OFF default survivable)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_cbr():
+    """M5 #3 CBR count clamp round-trip. LIKE the Buk/swarm/ARM gates its floor
+    is 0, so the OFF default survives the default-through-setup path (clamp_config
+    runs every field): clamping n_cbr=0 with a (1, ..) range would silently build
+    the CBR, join it to radar_net + the emitter feed, and break the byte-identical
+    out-of-the-box battle. Two-sided: floor 0 preserved, ceiling honoured, default
+    unchanged."""
+    assert CLAMP_CBR[0] == 0, "CBR count floor must be 0 (OFF survivable)"
+    # A 0 count stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_cbr=0).n_cbr == 0
+    # A negative slider clamps up to the 0 floor.
+    assert clamp_config(n_cbr=-5).n_cbr == CLAMP_CBR[0]
+    # The ceiling is honoured (a small early-warning fit, mirroring CLAMP_BUK).
+    assert CLAMP_CBR == (0, 2)
+    assert clamp_config(n_cbr=9999).n_cbr == CLAMP_CBR[1]
+    # An in-band value round-trips unchanged.
+    assert clamp_config(n_cbr=1).n_cbr == 1
+    # A default-config build (no edits) keeps the CBR OFF.
+    assert clamp_config().n_cbr == 0
 
 
 # ---------------------------------------------------------------------------

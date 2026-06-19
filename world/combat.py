@@ -146,6 +146,7 @@ from sim.bases import (DIMS_TEL as _BUK_STRUCT_DIMS, HP_S300_TEL as _BUK_STRUCT_
                        Structure, apply_missile_hits_structures)
 from sim.commander import EnemyCommander
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
+from sim.counter_battery import CBR_ANTENNA_M, CBR_RANGES, CbrTracker
 import sim.ew as ew
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
@@ -221,6 +222,22 @@ BUK_RADAR_RANGES = {            # size class -> max detection range (m)
 # top) because 'buk_tel' is not in the locked sim/bases.py tables.  ``defeated``
 # checks only bastion_tel, so a Buk death never trips the lose condition (mirror
 # of the Pantsir / swarm-pod wrappers).
+
+# --- M5 #3 CBR counter-battery / early-warning radar (config-driven, default 0) ---
+# A fixed PLAYER ground radar sited on the home coast, just inland of the
+# waterline (clear sea LOS, like the Bastion emplacement).  Its set + ranges live
+# in sim/counter_battery.py (CBR_ANTENNA_M=35 m tall mast, CBR_RANGES with a LONG
+# 190 km 'missile' reach but SHORT 'ship'/'fighter' rings — a missile-WARNING set
+# that COMPLEMENTS the 18 m station, not a second area-search radar).  The CBR
+# Radar joins radar_net (so inbound Tomahawk/JASSM/HARM tracks surface EARLIER on
+# the ContactBoard) and EMITS (honest cost: ESM-locatable + HARM-able).  The CBR
+# Structure reuses the player radar-station OBB/HP defaults; on_destroyed clears
+# the Radar's ``alive`` so the net coverage + the emitter feed drop the node
+# (mirror of the radar-station / Buk / Pantsir wrappers).  ``defeated`` checks
+# only bastion_tel, so a CBR death never trips the lose condition.  With n_cbr=0
+# NOTHING is built (byte-identical default battle).
+CBR_SITE_XZ = (8_000.0, -1_500.0)   # home coast, just inland of the z=0 waterline
+CBR_LAUNCHER_SPACING_M = 12.0       # side-by-side gap for multiple CBR masts
 
 COMBAT_SITES = [
     {"id": "radar_player_00", "kind": "radar",
@@ -611,6 +628,24 @@ class CombatWorld(WorldState):
         self._buk_tube_reload_s = float(BUK_TEL.reload_s)
         self._build_buk_battery(self.n_buk)
 
+        # M5 #3 CBR counter-battery / early-warning radar(s).  DEFAULT n_cbr=0 ->
+        # NO CBR Radar/Structure built, NOTHING joins radar_net, the tracker list
+        # stays empty, and world.cbr_threats / cbr_cues are empty: the out-of-the-
+        # box battle is byte-identical.  _build_cbr (when n_cbr>0) builds each CBR
+        # Radar, appends it to self.radar_net (so inbound strike tracks surface
+        # earlier on the ContactBoard), and creates one CbrTracker per radar.
+        # Built AFTER _build_contacts ran in super().__init__ (radar_net exists),
+        # like the Buk battery above.  The CbrTrackers add NO RNG (the back-plot
+        # is deterministic — the reserved [seed, 9] stream is unused).  The CBR
+        # Structures are appended to self.structures below (with the other
+        # destructible wrappers) so a single ``structures`` list still owns them.
+        self.n_cbr = int(config.n_cbr)
+        self._cbr_radars: list = []
+        self._cbr_trackers: list = []
+        self.cbr_threats: list = []
+        self.cbr_cues: list = []
+        self._build_cbr(self.n_cbr)
+
         # M5 #1: a Transport subclasses Destroyer for the hull/damage/racetrack,
         # but it is NOT a combatant — it carries no radar (radar is None) and no
         # weapons, so it must be EXCLUDED from the fire-control / strike /
@@ -720,6 +755,21 @@ class CombatWorld(WorldState):
                 dims=_BUK_STRUCT_DIMS, hp=_BUK_STRUCT_HP,
                 on_destroyed=lambda _s, _r=radar: (
                     setattr(_r, "alive", False) if _r is not None else None)))
+        # M5 #3: one destructible Structure per CBR mast.  Kind "radar_station"
+        # reuses the player radar-station OBB/HP defaults (in sim/bases.py's
+        # locked tables, like the enemy ground radars).  on_destroyed clears the
+        # paired CBR Radar's ``alive`` so the net coverage AND the emitter feed
+        # drop the node (the _feed_enemy_picture CBR accrual gates on r.alive +
+        # emitting — mirror of the radar-station / Buk wrapper).  ``defeated``
+        # checks only bastion_tel, so a CBR death never trips the lose condition.
+        # Empty list when n_cbr=0 (byte-identical default).
+        for i, r in enumerate(self._cbr_radars):
+            # r.pos[1] is the SITE terrain height (the Buk convention — the mast
+            # height is added inside Radar.antenna_alt), so the Structure ground
+            # centre is r.pos directly.
+            self.structures.append(Structure(
+                f"cbr_{i:02d}", "radar_station", np.asarray(r.pos).copy(),
+                on_destroyed=lambda _s, _r=r: setattr(_r, "alive", False)))
         # The controller defends EVERY player structure (Bastion/S-300/radar
         # + the Pantsirs themselves): it prioritises the threat closest in
         # time-to-impact to any protected asset.  Stepped in step() AFTER the
@@ -2086,6 +2136,23 @@ class CombatWorld(WorldState):
             # HARM package that is heard again flips back to alive.
             pic.mark_emitter_alive(radar.radar_id)
 
+        # M5 #3 HONEST COST: every live, emitting CBR mast is a PLAYER emitter the
+        # enemy ESM can localize (and the commander can HARM) — the SAME accrual
+        # as the radar station above (functional-ESM model: no range gate against
+        # a search set; gated only on the emitter being alive + emitting and an
+        # enemy platform surviving to hear it).  Killing the CBR Structure clears
+        # its radar.alive (the wrapper's on_destroyed), so ``heard`` goes False
+        # and the fix DECAYS — the node drops out of the picture with its mast.
+        # At n_cbr=0 _cbr_radars is empty -> this loop is a no-op (byte-identical).
+        any_enemy_alive = (any(s.alive for s in self.ships)
+                           or self.awacs.alive
+                           or any(f.alive for f in self._fighter_list))
+        for cbr in self._cbr_radars:
+            cbr_heard = (cbr.alive and cbr.emitting and any_enemy_alive)
+            pic.update_emitter(cbr.radar_id, cbr.pos, cbr_heard, dt_s, now)
+            if cbr_heard:
+                pic.mark_emitter_alive(cbr.radar_id)
+
         detectors = self._enemy_sensor_radars()
 
         # Player missiles -> track store + launch back-plot (first-seen
@@ -2974,6 +3041,65 @@ class CombatWorld(WorldState):
         self.buk_9m317_ammo = self._buk_9m317_mag_cap
         self.buk_9m338_ammo = self._buk_9m338_mag_cap
 
+    # ----------------------------------------------- M5 #3 CBR early-warning radar
+
+    def _build_cbr(self, n: int) -> None:
+        """Build N CBR masts side by side at the CBR site (n=0 -> nothing built,
+        byte-identical default).  Each CBR Radar (tall 35 m mast + LONG
+        missile-warning range, SHORT surface/air rings — sim/counter_battery.py)
+        JOINS self.radar_net so inbound strike tracks surface EARLIER on the
+        ContactBoard, and gets a paired CbrTracker.  The destructible CBR
+        Structures + their on_destroyed (drop the radar from the net + emitter
+        feed) are appended in __init__ with the other wrappers.  Adds NO RNG (the
+        back-plot is deterministic)."""
+        if n <= 0:
+            return
+        cx, cz = CBR_SITE_XZ
+        cy = terrain_height_scalar(cx, cz)
+        for i in range(n):
+            dx = (i - (n - 1) * 0.5) * CBR_LAUNCHER_SPACING_M
+            # pos[1] is the SITE terrain height (the Buk/station convention — the
+            # tall mast is added inside Radar.antenna_alt = pos[1] + antenna_m, so
+            # the 35 m mast raises the horizon datum to ~terrain+35 m).
+            radar = Radar(
+                radar_id=f"cbr_{i:02d}",
+                pos=(cx + dx, cy, cz),
+                antenna_m=CBR_ANTENNA_M,
+                ranges=CBR_RANGES,
+                height_fn=self._height_fn,
+            )
+            self._cbr_radars.append(radar)
+            self.radar_net.radars.append(radar)
+            self._cbr_trackers.append(CbrTracker(radar))
+
+    def _step_cbr(self) -> None:
+        """Step every CbrTracker against THIS tick's inbound hostile rounds, then
+        publish the merged read-only ``cbr_threats`` / ``cbr_cues`` accessors.
+
+        FOG / NO CHEAT: each tracker reads ONLY the rounds its own CBR Radar
+        physically ``detects()`` (range / horizon / terrain) — the inbound set is
+        the live HOSTILE land-attack StrikeMissiles + hostile interceptors
+        (SamMissile is_hostile) the enemy has fired; the tracker gates them and
+        back-plots the SHOOTER via the SHARED back_plot_surface() helper.  It does
+        NOT auto-fire.  At n_cbr=0 _cbr_trackers is empty -> threats/cues stay
+        empty (byte-identical default battle)."""
+        # Reset publishes even when no tracker runs (empty at n_cbr=0).
+        self.cbr_threats = []
+        self.cbr_cues = []
+        if not self._cbr_trackers:
+            return
+        # The inbound HOSTILE rounds to back-plot: enemy land-attack strike rounds
+        # (StrikeMissile is_hostile) and enemy interceptors (SamMissile is_hostile,
+        # e.g. SM-2/SM-6).  Player rounds (is_hostile False) are never fed.
+        inbound = [m for m in self.missiles
+                   if m.alive and getattr(m, "is_hostile", False)
+                   and isinstance(m, (StrikeMissile, SamMissile))]
+        now = self.sim_time
+        for tracker in self._cbr_trackers:
+            out = tracker.step(inbound, self.structures, now)
+            self.cbr_threats.extend(out["threats"])
+            self.cbr_cues.extend(out["cues"])
+
     @property
     def buk_9m317_launcher_armed(self) -> bool:
         """9M317 salvo gate: a round in the pool, no magazine refill pending,
@@ -3333,6 +3459,12 @@ class CombatWorld(WorldState):
         # physically sees them — horizon math already right for a 9 km
         # CAP vs the mast-height station.
         self.contacts.update(self.enemy_air, dt, self.sim_time)
+        # M5 #3: step the CBR early-warning tracker AFTER the contact/strike
+        # layers are current this frame (so it sees this tick's inbound rounds),
+        # like _step_acoustic_sensors.  It reads the live hostile rounds gated by
+        # each CBR Radar.detects() (FOG); publishes the read-only cbr_threats /
+        # cbr_cues.  No-op at n_cbr=0 (empty publishes) -> byte-identical.
+        self._step_cbr()
         self._step_recon_sensors()
         # M5: the player's passive sonobuoy net + acoustic triangulation, then
         # the in-flight ASW rounds (a basket-acquire kills a boat).  Both no-op

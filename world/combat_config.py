@@ -98,6 +98,16 @@ class CombatConfig:
     buk_9m317_ammo: int = 6
     buk_9m338_ammo: int = 6
     buk_mag_reload_s: float = 45.0
+    # M5 #3 player COUNTER-BATTERY / EARLY-WARNING RADAR (CBR).  DEFAULT 0 (OFF)
+    # so the out-of-the-box battle stays BYTE-IDENTICAL: with n_cbr=0 the world
+    # builds NO CBR Radar/Structure, it is NOT in radar_net or any emitter/ELINT
+    # list, the CbrTracker is never stepped, and world.cbr_threats / cbr_cues are
+    # empty.  A non-zero count adds a fixed ground radar that catches inbound
+    # strike tracks EARLY (tall mast + long missile-warning range) and back-plots
+    # the SHOOTER via the SHARED sim.commander.back_plot_surface() helper (the
+    # symmetric mirror of the enemy's trick); it EMITS (honest cost: ESM-locatable
+    # + HARM-able) and does NOT auto-fire.
+    n_cbr: int = 0
     # M3-F4 seeded map preset (0 OPEN SEA / 1 ARCHIPELAGO / 2 NARROW STRAIT /
     # 3 FJORD COAST). DEFAULT 0 so the out-of-the-box battle map is
     # BYTE-IDENTICAL: world/generation.make_field(0, seed) returns the default
@@ -181,6 +191,13 @@ CLAMP_SWARM_CELLS:   tuple = (4, 24)
 # the byte-identical out-of-the-box battle).  Ceiling 2 (a small medium-SAM
 # battery, mirroring CLAMP_S300).
 CLAMP_BUK:           tuple = (0, 2)
+# M5 #3 CBR (counter-battery / early-warning radar) count: floor 0 (OFF default
+# survives a clamp_config round-trip — the setup-default path runs every field
+# through clamp_config; clamping n_cbr=0 with a (1, ..) range would silently
+# build the CBR, join it to radar_net + the emitter feed, and break the
+# byte-identical out-of-the-box battle).  Ceiling 2 (a small early-warning fit,
+# mirroring CLAMP_BUK).
+CLAMP_CBR:           tuple = (0, 2)
 CLAMP_DRONES:        tuple = (0, 3)
 CLAMP_ONIKS:         tuple = (1, 5)     # Oniks launchers (2 tubes each)
 CLAMP_S300:          tuple = (1, 2)     # S-300 launchers (4 tubes each)
@@ -286,6 +303,7 @@ def clamp_config(
     buk_9m317_ammo: int = CombatConfig.buk_9m317_ammo,
     buk_9m338_ammo: int = CombatConfig.buk_9m338_ammo,
     buk_mag_reload_s: float = CombatConfig.buk_mag_reload_s,
+    n_cbr: int = CombatConfig.n_cbr,
     map_preset: int = CombatConfig.map_preset,
     n_subs: int = CombatConfig.n_subs,
     sub_kalibr_ammo: int = CombatConfig.sub_kalibr_ammo,
@@ -320,6 +338,7 @@ def clamp_config(
     lo_sp, hi_sp = CLAMP_SWARM_PODS
     lo_sc, hi_sc = CLAMP_SWARM_CELLS
     lo_bk, hi_bk = CLAMP_BUK
+    lo_cbr, hi_cbr = CLAMP_CBR
     lo_su, hi_su = CLAMP_SUBS
     lo_sb, hi_sb = CLAMP_SONOBUOYS
     lo_asw, hi_asw_ammo = CLAMP_ASW_AMMO
@@ -361,6 +380,7 @@ def clamp_config(
         buk_9m317_ammo=clamp_field(int(buk_9m317_ammo), lo_am, hi_am),
         buk_9m338_ammo=clamp_field(int(buk_9m338_ammo), lo_am, hi_am),
         buk_mag_reload_s=clamp_field(float(buk_mag_reload_s), lo_re, hi_re),
+        n_cbr=clamp_field(int(n_cbr), lo_cbr, hi_cbr),
         map_preset=clamp_field(int(map_preset), lo_mp, hi_mp),
         n_subs=clamp_field(int(n_subs), lo_su, hi_su),
         sub_kalibr_ammo=clamp_field(int(sub_kalibr_ammo), lo_sk, hi_sk),
