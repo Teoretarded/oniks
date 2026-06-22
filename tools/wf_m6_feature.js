@@ -14,7 +14,8 @@ export const meta = {
   ],
 }
 
-const F = args || {}
+let F = args || {}
+if (typeof F === 'string') { try { F = JSON.parse(F) } catch (e) { F = {} } }
 const ID = F.id || 'm6-feature'
 const TITLE = F.title || 'an M6 feature'
 const TESTCMD = F.testCmd || 'python -m pytest -q -n auto <feature test files> tests/test_sm2_statistics.py'
