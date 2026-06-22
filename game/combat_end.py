@@ -26,8 +26,8 @@ from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.states import (
     ACCENT, ACCENT_DIM, BG0, BG2, DANGER, DISABLED, FOCUS_BAR_W,
     FOOTER_MARGIN, MUTED, OK_COL, PAD, PAUSE_DIM_A, PRESS_FLASH_A,
-    PRESS_FLASH_S, ROW_H, TEXT_COL, GameState, draw_header_rule, draw_panel,
-    move_selection,
+    PRESS_FLASH_S, ROW_H, TEXT_COL, WARN, GameState, draw_header_rule,
+    draw_panel, move_selection,
 )
 
 # --- Layout -------------------------------------------------------------------
@@ -39,6 +39,44 @@ _ITEMS        = ("REMATCH", "NEW BATTLE", "MAIN MENU")
 _IDX_REMATCH  = 0
 _IDX_NEW      = 1
 _IDX_MENU     = 2
+
+# Grade -> banner colour (S/A green, B amber, C/D red — same OK/WARN/DANGER
+# palette the rest of the HUD uses).
+_GRADE_COLS = {"S": OK_COL, "A": OK_COL, "B": WARN, "C": DANGER, "D": DANGER}
+
+
+def _fmt_mmss(t):
+    """sim seconds -> 'm:ss' (or '--:--' for a never-fixed None)."""
+    if t is None:
+        return "--:--"
+    t = max(0.0, float(t))
+    m = int(t) // 60
+    s = int(t) % 60
+    return f"{m}:{s:02d}"
+
+
+def scorecard_rows(card):
+    """Pure: a ScoreCard -> ordered list of (label, value, colour-key) rows for
+    the end-overlay stats block.  GL-free + unit-testable; the overlay maps the
+    colour key to the OK/WARN/DANGER palette.  ``colour-key`` is 'ok' | 'warn'
+    | 'danger' | 'text'."""
+    intact = card.base_intact_pct
+    return [
+        ("KILLS", f"{card.kills}/{card.enemy_total}",
+         "ok" if card.kills >= card.enemy_total else "warn"),
+        ("ROUNDS", f"{card.rounds_fired}", "text"),
+        ("EFFICIENCY", f"{card.efficiency:.2f}", "text"),
+        ("FIRST FIX", _fmt_mmss(card.first_fix_t),
+         "danger" if card.first_fix_t is None else "text"),
+        ("BACK-PLOTTED", "YES" if card.was_back_plotted else "NO",
+         "danger" if card.was_back_plotted else "ok"),
+        ("LEAK RATE", f"{card.leak_rate * 100:.0f}%", "text"),
+        ("BASE INTACT", f"{intact * 100:.0f}%",
+         "ok" if intact >= 0.999 else ("warn" if intact > 0.0 else "danger")),
+    ]
+
+
+_ROW_COL = {"ok": OK_COL, "warn": WARN, "danger": DANGER, "text": TEXT_COL}
 
 
 class CombatEndOverlay(GameState):
@@ -56,6 +94,11 @@ class CombatEndOverlay(GameState):
         Called when the player chooses NEW BATTLE (opens the setup screen).
     menu_cb:
         Called when the player chooses MAIN MENU.
+    scorecard:
+        Optional :class:`game.scoring.ScoreCard` (M6 after-action scoring).
+        When given, a stats block (grade + metric rows) renders above the
+        option rows.  Defaults to ``None`` — the legacy / smoke path with no
+        stats, so existing callers and tools are unchanged.
     """
 
     def __init__(
@@ -65,11 +108,13 @@ class CombatEndOverlay(GameState):
         rematch_cb:   Callable[[], None],
         new_battle_cb: Callable[[], None],
         menu_cb:      Callable[[], None],
+        scorecard=None,
     ):
         super().__init__(app)
         self._gl   = None
         self.text  = None
         self.victory = victory
+        self.scorecard = scorecard
 
         self._callbacks = {
             "REMATCH":    rematch_cb,
@@ -166,7 +211,20 @@ class CombatEndOverlay(GameState):
         small_lh = text.line_height(SMALL_SIZE)
         body_lh  = text.line_height(BODY_SIZE)
         inner_w  = END_PANEL_W - 2 * PAD
-        panel_h  = (PAD + head_lh + 2 + small_lh + 10 + 10
+
+        # M6 stats block (grade row + one line per metric) — height 0 when no
+        # ScoreCard is attached, so the legacy/smoke panel is byte-for-byte the
+        # old geometry.
+        card = self.scorecard
+        if card is not None:
+            stat_rows = scorecard_rows(card)
+            stats_h = (head_lh + 4               # grade row
+                       + len(stat_rows) * small_lh + 10)   # metric lines + gap
+        else:
+            stat_rows = []
+            stats_h = 0
+
+        panel_h  = (PAD + head_lh + 2 + small_lh + 10 + stats_h + 10
                     + len(_ITEMS) * ROW_H + PAD)
         px = (w - END_PANEL_W) // 2
         py = (h - panel_h)     // 2 - 40
@@ -189,9 +247,31 @@ class CombatEndOverlay(GameState):
         rule_y = py + PAD + head_lh + 2 + small_lh + 10
         draw_header_rule(text, px + PAD, rule_y, inner_w)
 
+        # --- M6 stats block (grade + metric rows) ----------------------------
+        block_y = rule_y + 10
+        if card is not None:
+            label_x = px + PAD
+            val_x = px + END_PANEL_W - PAD            # right-aligned values
+            grade_col = _GRADE_COLS.get(card.grade, TEXT_COL)
+            # Big grade letter on the left, 'GRADE' label trailing it.
+            text.draw_text(label_x, block_y, card.grade or "-",
+                           grade_col, HEADER_SIZE)
+            gw = text.text_width(card.grade or "-", HEADER_SIZE)
+            text.draw_text(label_x + gw + 8,
+                           block_y + (head_lh - small_lh),
+                           "GRADE", MUTED, SMALL_SIZE)
+            sy = block_y + head_lh + 4
+            for label, value, key in stat_rows:
+                text.draw_text(label_x, sy, label, MUTED, SMALL_SIZE)
+                vw = text.text_width(value, SMALL_SIZE)
+                text.draw_text(val_x - vw, sy, value,
+                               _ROW_COL.get(key, TEXT_COL), SMALL_SIZE)
+                sy += small_lh
+            block_y = sy + 10
+
         # --- Option rows -----------------------------------------------------
         row_x = px + PAD
-        ry    = rule_y + 10
+        ry    = block_y
         for i, name in enumerate(_ITEMS):
             selected = (i == self._sel)
             col = MUTED

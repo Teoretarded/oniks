@@ -35,6 +35,10 @@ from engine.mesh import Mesh
 from game.combat_end import CombatEndOverlay
 from game.controls import PLATFORMS_COMBAT, combat_platforms
 from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
+from game.scoring import (
+    compute_par, compute_scorecard, grade, new_telemetry,
+    picture_has_actionable_contact,
+)
 from models.airfield import build_airfield
 from models.awacs import build_awacs
 from models.carrier import build_carrier
@@ -112,6 +116,15 @@ class CombatState(SandboxState):
         # keeps running underneath, dimmed, exactly as the spec asks; input
         # routes to it while it is up.  None until the battle ends.
         self._end_overlay: CombatEndOverlay | None = None
+        # M6 after-action scoring telemetry: a per-battle accumulator updated in
+        # sim_step (round counts from the launch-wrapper returns, first-fix from
+        # the PLAYER contact picture, leakers from own-round TERMINAL events).
+        # All fog-honest — see game/scoring.py.  Built into the ScoreCard at
+        # battle end (the ONE truth read allowed: the AAR kill tallies).
+        self._telemetry = new_telemetry()
+        # Player offensive rounds already counted as leakers (by id), so a round
+        # is tallied ONCE the first time it enters its TERMINAL homing leg.
+        self._leaker_seen: set[int] = set()
 
     def _pantsir_ammo_total(self) -> int:
         """Pooled 57E6 rounds remaining across all Pantsir units (alive or
@@ -125,11 +138,86 @@ class CombatState(SandboxState):
         """True while the post-launch HUD flash window is open."""
         return self._pantsir_engage_left > 0.0
 
+    # ----------------------------------------------------- scoring telemetry
+
+    @staticmethod
+    def _is_player_offensive(m) -> bool:
+        """A player OFFENSIVE round (Oniks/Zircon/ASBM cruise — NOT a SAM) in
+        its TERMINAL homing leg: the go-low payoff a 'leaker' measures.  Excludes
+        every hostile round (is_hostile) and friendly SAM intercepts (a SAM
+        carries ``sam_phase``).  Friendly-round state -> no fog."""
+        if getattr(m, "is_hostile", False):
+            return False
+        if hasattr(m, "sam_phase") or type(m).__name__.endswith("SamMissile"):
+            return False
+        return True
+
+    def request_launch(self):
+        """Single-fire (SPACE, and the salvo's FIRST round): count ONE player
+        round on a real launch (non-None Missile return).  Counting on the
+        wrapper RETURN is precise — a refused/empty/reloading tube returns None
+        and is NOT counted.  The world launch path is untouched (no counter in
+        world -> the CombatWorld digest stays byte-identical)."""
+        m = super().request_launch()
+        if m is not None:
+            self._telemetry["rounds_fired"] += 1
+        return m
+
+    def _request_sam_launch(self):
+        """S-300 single-fire: count ONE round on a real (non-None) launch."""
+        m = super()._request_sam_launch()
+        if m is not None:
+            self._telemetry["rounds_fired"] += 1
+        return m
+
+    def _tick_salvo(self, dt: float) -> None:
+        """Salvo ripple rounds (the queued tubes after the first): count exactly
+        the player rounds the salvo ADDED to ``world.missiles`` this tick — by
+        diffing the live player-round id set across the base tick.  This is
+        precise even when several beats fall due in one tick (high warp) and
+        never counts a no-op reload beat (which adds no round).  The salvo's
+        FIRST round already fired through request_launch above, so it is counted
+        there, not here (it was launched before this tick's diff window)."""
+        before = self._player_round_ids()
+        super()._tick_salvo(dt)
+        after = self._player_round_ids()
+        self._telemetry["rounds_fired"] += len(after - before)
+
+    def _player_round_ids(self) -> set:
+        """Ids of the player's OWN live rounds currently in ``world.missiles``
+        (non-hostile cruise + friendly SAM).  Friendly-round state -> no fog."""
+        return {id(m) for m in getattr(self.world, "missiles", ())
+                if not getattr(m, "is_hostile", False)}
+
+    def _accumulate_telemetry(self) -> None:
+        """Fog-honest in-battle telemetry, called each sim_step AFTER world.step:
+          * first_fix_t — latched ONCE to ``world.sim_time`` the first time the
+            PLAYER contact picture (world.contacts.tracks) holds an enemy SURFACE
+            contact (is_air False): the recon->fire opening move.  Reads only the
+            radar-gated player picture -> an UNDETECTED hostile never trips it.
+          * leakers — each player OFFENSIVE round counted ONCE the first time it
+            enters its TERMINAL homing leg (a round that got through to terminal).
+            Reads friendly-round state only.
+        Neither read touches enemy truth for a decision; both are measurements."""
+        world = self.world
+        tel = self._telemetry
+        if tel["first_fix_t"] is None and picture_has_actionable_contact(world):
+            tel["first_fix_t"] = float(getattr(world, "sim_time", 0.0))
+        for m in getattr(world, "missiles", ()):
+            mid = id(m)
+            if mid in self._leaker_seen:
+                continue
+            if (getattr(m, "phase_label", None) == "TERMINAL"
+                    and self._is_player_offensive(m)):
+                self._leaker_seen.add(mid)
+                tel["leakers"] += 1
+
     def sim_step(self, dt: float) -> None:
         """Base sim step, then refresh the Pantsir 'ENGAGING' HUD flash: any
         drop in pooled 57E6 ammo this step is a fresh launch -> relatch the
-        window; otherwise let it count down in real time.  Finally latch the
-        end screen the first time the battle is decided."""
+        window; otherwise let it count down in real time.  Accumulate the M6
+        scoring telemetry, then latch the end screen the first time the battle
+        is decided."""
         super().sim_step(dt)
         ammo = self._pantsir_ammo_total()
         if ammo < self._pantsir_ammo_prev:
@@ -138,6 +226,7 @@ class CombatState(SandboxState):
             self._pantsir_engage_left = max(0.0,
                                             self._pantsir_engage_left - dt)
         self._pantsir_ammo_prev = ammo
+        self._accumulate_telemetry()
         self._check_end_state()
 
     # ------------------------------------------------------------- end screen
@@ -159,16 +248,38 @@ class CombatState(SandboxState):
         REMATCH replays the SAME config, NEW BATTLE re-opens the setup
         screen, MAIN MENU discards the session.  enter() is called so its
         deferred GL/text bind runs (the overlay is owned by this state, not
-        switched in via the state machine)."""
+        switched in via the state machine).
+
+        M6: compute the after-action ScoreCard (a deterministic END pass — the
+        ONE truth read allowed, the AAR kill tallies) and pass it into the
+        overlay's stats block.  Any failure degrades gracefully to the legacy
+        no-stats overlay so a scoring edge case can never block the end screen."""
         app = self.app
         config = self._config
         overlay = CombatEndOverlay(
             app, victory,
             rematch_cb=lambda: app.start_combat(config),
             new_battle_cb=app.open_combat_setup,
-            menu_cb=app.quit_to_menu)
+            menu_cb=app.quit_to_menu,
+            scorecard=self._build_scorecard())
         overlay.enter()
         self._end_overlay = overlay
+
+    def _build_scorecard(self):
+        """Compose the end-of-battle ScoreCard from the world + telemetry and
+        grade it against the per-seed PAR.  Returns None on any error (the
+        overlay then renders the legacy no-stats layout)."""
+        try:
+            card = compute_scorecard(self.world, self._telemetry)
+            seed = int(getattr(self._config, "seed", 0)) if self._config \
+                else int(getattr(getattr(self.world, "_config", None),
+                                 "seed", 0) or 0)
+            cfg = self._config or getattr(self.world, "_config", None)
+            if cfg is not None:
+                card.grade = grade(card, compute_par(seed, cfg))
+            return card
+        except Exception:
+            return None
 
     def handle_event(self, ev) -> None:
         """Route input to the end overlay once the battle is decided (its
