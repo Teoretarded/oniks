@@ -27,6 +27,7 @@ from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.hud_widgets import badge as _badge
 from game.hud_widgets import gauge_bar as _hud_gauge_bar
 from game.keybinds import ACTIONS
+from game.timewarp import drop_cause
 from game.states import (ACCENT, ACCENT_DIM, BG0, DANGER, MUTED, OK_COL,
                          SEMANTIC_COLORS, TEXT_COL, WARN, draw_header_rule,
                          draw_panel)
@@ -1292,8 +1293,24 @@ class HUD:
     @staticmethod
     def _scale_text(sandbox) -> str:
         eff = sandbox.effective_time_scale()
+        requested = sandbox.controls.requested_scale
+        # M6 AUTO-TIME-WARP: when auto pacing is ON show the EFFECTIVE scale and
+        # a TARGET / cause tag; the auto-drop tag (INBOUND/TERMINAL/INTERCEPT)
+        # tells the player WHY time slowed, and '^ramping' marks the ease back.
+        if getattr(sandbox.controls, "auto_warp", False):
+            txt = f"x{eff:g}"
+            cause = drop_cause(sandbox.world)
+            if cause is not None or sandbox.warp_drop_active():
+                txt += f" (auto: {cause or 'LAUNCH'})"
+            elif eff < requested - 1e-3:
+                txt += f" (auto ^ramping -> x{requested:g})"
+            elif eff > requested + 1e-3:
+                txt += f" (auto v-> x{requested:g})"
+            else:
+                txt += f" (auto x{requested:g})"
+            return txt
         txt = f"x{eff:g}"
-        if eff != sandbox.controls.requested_scale:
+        if eff != requested:
             txt += " (launch)"      # accel locked to 1x through the cinematic
         return txt
 

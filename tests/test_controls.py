@@ -75,6 +75,13 @@ class FakeSandbox:
     def cycle_salvo_mode(self):
         self.log.append("salvo_mode")
 
+    def toggle_auto_warp(self):
+        # M6 auto-time-warp: the key dispatches to the SandboxControls method
+        # (the real sandbox forwards to it); record the dispatch here so the
+        # binding test can assert the key routed.
+        self.log.append("auto_warp_toggle")
+        return self.app.keybinds  # unused; mirror real return shape harmlessly
+
 
 @pytest.fixture
 def ctl(tmp_path):
@@ -157,3 +164,33 @@ def test_salvo_keys_dispatch(ctl):
     ctl._handle_key(pygame.K_f)
     ctl._handle_key(pygame.K_y)
     assert sb.log == ["salvo_fire", "salvo_mode"]
+
+
+def test_extended_time_ladder_reaches_64x():
+    # M6 AUTO-TIME-WARP extends the ladder to (1,2,4,8,16,32,64).
+    assert TIME_SCALES == (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+
+
+def test_time_up_climbs_past_the_old_16x_top(ctl):
+    # The old ladder topped at 16x; = now climbs to 32x then 64x and clamps.
+    for _ in range(6):
+        ctl._handle_key(pygame.K_EQUALS)
+    assert ctl.requested_scale == 64.0
+    ctl._handle_key(pygame.K_EQUALS)             # clamped at the ceiling
+    assert ctl.requested_scale == 64.0
+
+
+def test_auto_warp_toggle_key_dispatches(ctl):
+    # M6: T routes to the sandbox auto-warp toggle.
+    sb = ctl.sandbox
+    ctl._handle_key(pygame.K_t)
+    assert sb.log == ["auto_warp_toggle"]
+
+
+def test_auto_warp_toggle_flips_controls_state(ctl):
+    # The SandboxControls method itself flips the flag + re-bases the director.
+    assert not ctl.auto_warp
+    assert ctl.toggle_auto_warp() is True
+    assert ctl.auto_warp
+    assert ctl.toggle_auto_warp() is False
+    assert not ctl.auto_warp

@@ -1374,3 +1374,62 @@ refill readout + the expanded board.
   already ships as the M1-F4 `tube_cells` row inside the launcher block; the Pantsir
   is intentionally omitted from the per-battery board (it is a point-defense unit, not
   a firing TEL with a tube/magazine board — its summary stays in `pantsir_status_row`).
+
+## M6 #3 — AUTO-TIME-WARP (event-aware: target warp, auto-drop to 1x, ramp back) (2026-06-22)
+
+Generalises the EXISTING launch-cinematic 1x lock (`world.launch_realtime_lock`) +
+the `TIME_SCALES` ladder into a smart event-aware pacing system: the player sets a
+TARGET warp on the extended - / = ladder, and the sim auto-DROPS to 1x on an important
+event (a DETECTED inbound hostile / an own round in TERMINAL / an active intercept),
+holds for a >=1 s real-time debounce DWELL, then EASES back toward the target over
+~1.5 s. The way every modern wargame/4X auto-slows on contact.
+
+- **PURE director (`game/timewarp.py`, NO pygame/GL, headless-tested):**
+  `TimeWarpDirector.tick(dt_real, requested_scale, drop_active) -> effective_scale`
+  is a pure easing/dwell state machine — eases in log2 space at a fixed slew
+  (`_SLEW_OCT_PER_S = 3/RAMP_S`, so an 8x == 3-octave transition lands in `RAMP_S`),
+  re-arms `DWELL_S` (=1.0 s) each frame the drop is active, holds 1x through the dwell
+  after it clears, then ramps back. NO wall-clock — the only time it sees is the
+  `dt_real` handed in, so two identical tick sequences are bit-identical.
+- **FOG / NO-CHEAT (LOAD-BEARING):** the inbound predicate
+  `inbound_detected(world)` fires ONLY when a strike id is held in BOTH
+  `_strike_board` AND `contacts.tracks` (is_air) — the player's DETECTED picture. A
+  sea-skimming Tomahawk under the horizon (alive + is_hostile + in `_strike_board`,
+  NOT in `contacts.tracks`) does NOT drop the warp (the load-bearing fog test asserts
+  this) — otherwise the auto-warp would leak that an undetected threat exists. The
+  own-round predicates (`own_terminal` non-hostile cruise `Missile` TERMINAL;
+  `intercept_window` non-hostile `SamMissile` TERMINAL or a Pantsir engaging) read
+  `world.missiles` directly — friendly rounds the player owns have no fog. The enemy
+  commander is NEVER read or modified.
+- **DETERMINISM / PHYSICS NOT DICE:** no new outcome roll. The director never feeds
+  the sim; it only governs the real->sim multiplier the App loop already applies
+  (`acc += dt_real * time_scale`). The warp stays a PURE multiplier on accumulated
+  sim time, so the commander / back-plot is bit-identical at any warp for a given seed
+  (the determinism test steps the same seed to the same sim_time at 1x vs 8x pacing
+  and asserts identical back-plots).
+- **BYTE-IDENTICAL DEFAULT (the gate):** auto-warp is OFF by default. `effective_
+  time_scale` checks `controls.auto_warp` — OFF takes the legacy `launch_realtime_lock`
+  path with NO event drops, the director never ticks (guarded in `controls.update`),
+  and `event_drop`/`warp_drop_active` are never reached. `tools/wf_m5_digest.py`
+  bit-identical pre/post: HEAD `7d571632…06add` == post-change `7d571632…06add`. Duel
+  (`test_sm2_statistics`) green / bit-identical.
+- **Ladder + ceiling:** `TIME_SCALES` extended to (1,2,4,8,16,32,64). The App loop
+  caps at 64 sim steps/frame, so 64x is the documented practical ceiling (higher
+  saturates the step guard rather than running faster).
+- **Keybind:** `auto_warp_toggle` = T (SIMULATION group; T was unclaimed by every
+  prior default — F/Y salvo, O battery panel, G jam, H swarm are all taken). The F1
+  overlay regenerates live from `ACTIONS`.
+- **HUD:** `_scale_text` shows the EFFECTIVE scale plus a cause tag when auto-warp is
+  ON — `(auto: INBOUND/TERMINAL/INTERCEPT)` on a drop, `(auto ^ramping -> xN)` while
+  easing back, `(auto xN)` at the settled target.
+- **Files:** NEW `game/timewarp.py` (pure `TimeWarpDirector` + the 3 fog-safe drop
+  predicates + `event_drop`/`drop_cause`), `game/controls.py` (`TIME_SCALES` extended;
+  `SandboxControls` owns the director + `auto_warp` flag + `toggle_auto_warp`; ticks
+  the director in `update`; `auto_warp_toggle` dispatch), `game/sandbox.py`
+  (`warp_drop_active` helper; `effective_time_scale` delegates to the director when ON),
+  `game/hud.py` (`_scale_text` target/effective/cause), `game/keybinds.py` (ActionDef
+  `auto_warp_toggle`=T), NEW `tests/test_timewarp.py` (19), updated `tests/test_controls`
+  (extended ladder + new action) + `tests/test_keybinds` (default table).
+- **Gate (self-verified):** targeted `pytest -q -n auto` green (test_timewarp 19 +
+  controls/keybinds/sm2_statistics/hud/world_state/salvo/battery_panel), smoke 80/80
+  exit 0, digest bit-identical, duel bit-identical.

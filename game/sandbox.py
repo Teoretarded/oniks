@@ -48,6 +48,7 @@ from game.hud import HUD
 from game.salvo import (RIPPLE_INTERVAL_S, SALVO_MODES, SalvoQueue,
                        next_salvo_mode, ready_tube_count, tot_delays)
 from game.states import GameState
+from game.timewarp import event_drop
 from game import tactical_map
 from game.tactical_map import TacticalMap
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
@@ -978,14 +979,38 @@ class SandboxState(GameState):
         self.app.audio.play("launch", pos=m.pos)
         self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
 
+    def warp_drop_active(self) -> bool:
+        """The OR of every reason the effective time scale must sit at 1x: the
+        launch cinematic lock, an in-flight salvo window, and (M6 auto-warp)
+        the fog-safe event-drop predicates (inbound DETECTED / own terminal /
+        intercept window).  FOG-SAFE: ``event_drop`` reads only the player's
+        detected picture for the inbound case (an undetected hostile never
+        drops the warp).  Used both as the legacy hard 1x lock and as the
+        ``drop_active`` fed to the auto-warp director."""
+        return (launch_realtime_lock(self.world.missiles)
+                or self._salvo.active
+                or event_drop(self.world))
+
     def effective_time_scale(self) -> float:
-        """Requested accel, forced to 1x through the launch cinematic
-        (IGNITION/RIDE-OUT/PITCH-OVER/BOOST).  A queued salvo also holds 1x so
-        each round's launch window plays in real time (the ripple cadence is
-        gated by the cinematic length, not the warp)."""
+        """The time scale fed to the App loop's accumulator.
+
+        AUTO-WARP OFF (default, byte-identical): the requested accel, hard-
+        forced to 1x through the launch cinematic / a queued salvo (the legacy
+        behaviour — event drops are NOT applied so existing play is unchanged).
+
+        AUTO-WARP ON: the smoothly-eased scale the director computed from
+        ``warp_drop_active`` on the previous frame's real-dt tick — it auto-
+        drops to 1x on important events (+ a >=1 s debounce dwell) and ramps
+        back toward the requested target.  The warp stays a PURE multiplier on
+        accumulated sim time, so the commander / back-plot is bit-identical at
+        any warp for a given seed.
+        """
+        ctl = self.controls
+        if getattr(ctl, "auto_warp", False):
+            return ctl.warp_director.effective
         if launch_realtime_lock(self.world.missiles) or self._salvo.active:
             return 1.0
-        return self.controls.requested_scale
+        return ctl.requested_scale
 
     # ------------------------------------------------------------ sim step
 

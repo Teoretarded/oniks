@@ -29,9 +29,14 @@ from __future__ import annotations
 import pygame
 
 from game.cameras import FREE_SPEEDS
+from game.timewarp import TimeWarpDirector
 
-# Time-acceleration ladder stepped by - / = (plan-fixed).
-TIME_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0)
+# Time-acceleration ladder stepped by - / = .  M6 AUTO-TIME-WARP extends it
+# past 16x to (1,2,4,8,16,32,64); the App loop caps at 64 sim steps/frame, so
+# 64x is the documented practical ceiling (higher would saturate the step
+# guard rather than run faster).  Existing default play never climbs past the
+# old top (the byte-identical default starts at index 0 = 1x).
+TIME_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
 
 # TAB platform cycles (Phase 4): SANDBOX keeps the original two-platform
 # toggle; COMBAT adds the recon drone as a third tasking platform
@@ -135,6 +140,13 @@ class SandboxControls:
 
     Owns the requested time-accel rate (TIME_SCALES index); the sandbox
     clamps it to 1x while a launch cinematic is playing.
+
+    M6 AUTO-TIME-WARP: also owns an ``auto_warp`` toggle + a pure
+    :class:`TimeWarpDirector`.  When auto-warp is ON the - / = ladder sets the
+    TARGET warp and the director auto-drops to 1x on important events (passed
+    in each frame by the sandbox), then eases back.  When OFF the director is
+    untouched and ``effective_time_scale`` uses the legacy launch-lock path —
+    so the default battle (auto-warp OFF) stays byte-identical.
     """
 
     def __init__(self, sandbox):
@@ -143,10 +155,24 @@ class SandboxControls:
                                     sandbox.app.keybinds)
         self._scale_idx = 0
         self._orbit_drag = False        # RMB/LMB orbit drag live (Task CAM)
+        # M6 auto-time-warp: OFF by default (byte-identical), so the director
+        # is dormant until the player presses the auto_warp_toggle key.
+        self.auto_warp = False
+        self.warp_director = TimeWarpDirector()
 
     @property
     def requested_scale(self) -> float:
         return TIME_SCALES[self._scale_idx]
+
+    def toggle_auto_warp(self) -> bool:
+        """T (auto_warp_toggle binding): flip auto-time-warp ON/OFF.  Turning
+        it ON re-bases the director on the current requested rate (no stale
+        ease); turning it OFF leaves the requested rate as-is so the player
+        keeps manual control.  Returns the new state."""
+        self.auto_warp = not self.auto_warp
+        if self.auto_warp:
+            self.warp_director.reset(self.requested_scale)
+        return self.auto_warp
 
     def handle_event(self, ev) -> None:
         sandbox = self.sandbox
@@ -221,6 +247,8 @@ class SandboxControls:
             sandbox.cycle_salvo_mode()
         elif action == "battery_panel":
             sandbox.toggle_battery_panel()
+        elif action == "auto_warp_toggle":
+            sandbox.toggle_auto_warp()
         elif action == "pause":
             app.paused = not app.paused
         elif action == "frame_step":
@@ -240,6 +268,16 @@ class SandboxControls:
             sandbox.toggle_controls_overlay()
 
     def update(self, dt_real: float) -> None:
-        """Per-frame held-key poll (free-cam flight only, real time)."""
+        """Per-frame held-key poll (free-cam flight only, real time).
+
+        Also advances the M6 auto-time-warp director here (the one existing
+        per-frame real-dt seam), so ``effective_time_scale`` can read the eased
+        scale next frame without any main-loop change.  When auto-warp is OFF
+        the director is left dormant (the sandbox uses the legacy launch-lock
+        path), keeping the default battle byte-identical.
+        """
         if self.sandbox.rig.mode == "free":
             self.free.update(dt_real)
+        if self.auto_warp:
+            drop = self.sandbox.warp_drop_active()
+            self.warp_director.tick(dt_real, self.requested_scale, drop)

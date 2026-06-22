@@ -102,6 +102,11 @@ ACTIONS: tuple[ActionDef, ...] = (
     # claimed by the M3-F4 drone EW pod (jam); O was unclaimed by every default
     # (and F/Y are the salvo keys), so the panel binds to O.
     ActionDef("battery_panel", "BATTERY PANEL", "SIMULATION", pygame.K_o),
+    # M6 AUTO-TIME-WARP: T toggles event-aware auto pacing — the - / = ladder
+    # sets the TARGET warp and the sim auto-drops to 1x on important events
+    # (inbound detected / own terminal / intercept), then eases back.  T was
+    # unclaimed by every prior default.  OFF by default -> byte-identical.
+    ActionDef("auto_warp_toggle", "AUTO TIME-WARP", "SIMULATION", pygame.K_t),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),
