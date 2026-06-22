@@ -183,6 +183,15 @@ class Pantsir:
         self.unit_id = unit_id
         self.pos = np.asarray(pos, dtype=np.float64).copy()
         self.alive = True
+        # Own-force LIVE engagement flag: True while this unit holds a FORMED
+        # fire-control track on a live inbound hostile (the gun/SAM channels are
+        # actively prosecuting it).  Set every step by _UnitDefense.step; read by
+        # the HUD "ENGAGING" cue and the M6 auto-time-warp intercept_window
+        # predicate (game/timewarp.py).  Pure own-force telemetry — NOTHING in
+        # the sim branches on it, so it never perturbs a sim outcome and the
+        # default battle stays byte-identical.  Covers the gun-only engagement
+        # window (no 57E6 in flight) that the missile-based drop misses.
+        self.engaging = False
 
         # --- Radar (joins the player network) ----------------------------------
         self.radar = Radar(
@@ -589,6 +598,20 @@ class _UnitDefense:
 
     # ------------------------------------------------------------------- step
 
+    def _is_engaging(self, now: float) -> bool:
+        """Own-force live-engagement signal: this unit holds at least one FORMED
+        fire-control track on a live hostile (gun + SAM channels are prosecuting
+        it), OR it has a 57E6 in flight.  The track condition covers the gun-only
+        window (a hostile inside GUN_RANGE_M before/without a SAM launch); the
+        in-flight condition keeps the flag latched while an own round homes in.
+        Reads only own-force state — fog-safe."""
+        if self._inflight:
+            return True
+        for st in self._tracks.values():
+            if self._tracked(st, now) and st["missile"].alive:
+                return True
+        return False
+
     def step(self, world, dt: float, structures) -> None:
         unit = self.unit
         unit.radar.alive = unit.alive   # dead unit → radar dark
@@ -596,6 +619,7 @@ class _UnitDefense:
         if not unit.alive:
             self._tracks.clear()
             self._inflight.clear()
+            unit.engaging = False       # a dead unit prosecutes nothing
             return
 
         now = world.sim_time
@@ -625,6 +649,11 @@ class _UnitDefense:
         self._inflight = [(sam, key) for sam, key in self._inflight if sam.alive]
         self._try_sam_launch(world, now, structures)
         self._run_gun(world, now, dt)
+        # Publish the own-force live-engagement flag AFTER both channels have run
+        # this step (so a fresh launch's in-flight round / a just-formed track is
+        # reflected immediately).  Read-only telemetry — never branched on in the
+        # sim, so the default battle stays byte-identical.
+        unit.engaging = self._is_engaging(now)
 
 
 # ---------------------------------------------------------------------------

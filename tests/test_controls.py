@@ -194,3 +194,58 @@ def test_auto_warp_toggle_flips_controls_state(ctl):
     assert ctl.auto_warp
     assert ctl.toggle_auto_warp() is False
     assert not ctl.auto_warp
+
+
+def test_real_sandboxstate_defines_the_auto_warp_forwarder():
+    # REGRESSION (the masked BLOCKER): the key dispatch calls
+    # sandbox.toggle_auto_warp() on the REAL SandboxState — which previously had
+    # NO such method (hasattr was False), so pressing T crashed and the whole
+    # auto-warp feature was unreachable.  The FakeSandbox stub above forwards,
+    # masking it.  Assert the real class actually defines the forwarder, mirror-
+    # ing the other dispatched actions that exist on SandboxState.
+    from game.sandbox import SandboxState
+    for action in ("toggle_battery_panel", "cycle_salvo_mode", "request_salvo",
+                   "request_launch", "toggle_auto_warp"):
+        assert hasattr(SandboxState, action), (
+            f"SandboxState is missing {action} — the key dispatch would crash")
+
+
+def test_real_forwarder_routes_the_T_key_to_the_director(tmp_path):
+    # INTEGRATION (not the FakeSandbox stub): drive _handle_key(K_t) through a
+    # sandbox whose toggle_auto_warp IS the REAL SandboxState.toggle_auto_warp
+    # bound method, wired to a REAL SandboxControls + director.  Pressing T must
+    # flip controls.auto_warp (and re-base the director) WITHOUT raising — the
+    # end-to-end path the masked stub never exercised.
+    from game.sandbox import SandboxState
+
+    class _Freecam:
+        pass
+
+    class _Rig:
+        mode = "launcher"
+        freecam = _Freecam()
+
+    class _RealForwarderSandbox:
+        """Minimal SandboxState-shaped host: a REAL SandboxControls + the REAL
+        forwarder bound onto it, so the dispatch hits production code."""
+
+        def __init__(self, kb):
+            self.app = FakeApp(kb)
+            self.rig = _Rig()
+            self.map_open = False
+            self.controls = SandboxControls(self)
+
+        # The REAL forwarder (calls self.controls.toggle_auto_warp() +
+        # self.app.audio.ui_click()), bound here so the dispatch path is real.
+        toggle_auto_warp = SandboxState.toggle_auto_warp
+
+    kb = Keybinds(str(tmp_path / "settings.json"))
+    sb = _RealForwarderSandbox(kb)
+    ctl = sb.controls
+    assert not ctl.auto_warp
+    ctl._handle_key(pygame.K_t)                  # must not raise (the BLOCKER)
+    assert ctl.auto_warp                         # forwarder reached the director
+    assert ctl.warp_director.effective == pytest.approx(1.0)  # re-based at 1x
+    assert "ui_click" in sb.app.audio.calls      # forwarder's UX click fired
+    ctl._handle_key(pygame.K_t)
+    assert not ctl.auto_warp

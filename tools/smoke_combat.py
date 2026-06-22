@@ -642,6 +642,21 @@ def main() -> int:
     check("M6 battery panel: O closes the board",
           not state.battery_panel_open)
 
+    # --- M6 AUTO-TIME-WARP (T): the SandboxState forwarder reaches the director.
+    # Exercises the REAL key dispatch path on the live CombatState — the bug was
+    # that SandboxState had no toggle_auto_warp, so pressing T crashed and the
+    # feature was unreachable.  Off by default (byte-identical); T flips it on,
+    # re-bases the director on the requested rate, and T again flips it off.
+    check("M6 auto-warp: OFF by default", not state.controls.auto_warp)
+    check("M6 auto-warp: T (forwarder) flips it ON",
+          state.toggle_auto_warp() is True and state.controls.auto_warp)
+    check("M6 auto-warp: T again flips it OFF",
+          state.toggle_auto_warp() is False
+          and not state.controls.auto_warp)
+    # OFF again -> the effective scale tracks the requested rate (no eased dir).
+    check("M6 auto-warp: OFF restores the requested time scale",
+          state.effective_time_scale() == state.controls.requested_scale)
+
     state.render(PHYS_DT)
     print(f"[smoke] screenshot {app._save_screenshot()}")
     pygame.quit()

@@ -227,6 +227,99 @@ def test_intercept_window_false_when_no_terminal_sam():
     assert not intercept_window(w)
 
 
+class _FakePantsir:
+    """Faithfully-shaped Pantsir: exposes the own-force ``engaging`` bool flag
+    that sim/pantsir.py publishes (and that game/timewarp._pantsir_engaging
+    reads).  alive defaults True."""
+
+    def __init__(self, engaging=False, alive=True):
+        self.engaging = engaging
+        self.alive = alive
+
+
+def test_intercept_window_true_for_engaging_pantsir_gun_only():
+    # The gun-only engagement window (no 57E6 in the air): a live Pantsir with
+    # its own-force ``engaging`` flag set drops the warp even with NO SAM round
+    # in flight.  Fog-safe: ``engaging`` is own-force state, not enemy truth.
+    w = _FakeWorld(pantsirs=[_FakePantsir(engaging=True)])
+    assert intercept_window(w)
+    assert event_drop(w)
+    assert drop_cause(w) == "INTERCEPT"
+
+
+def test_intercept_window_false_for_idle_pantsir():
+    w = _FakeWorld(pantsirs=[_FakePantsir(engaging=False)])
+    assert not intercept_window(w)
+
+
+def test_intercept_window_ignores_dead_engaging_pantsir():
+    # A dead unit prosecutes nothing (sim clears its flag), but be defensive:
+    # an alive=False unit must not drop the warp even if the flag lingered.
+    w = _FakeWorld(pantsirs=[_FakePantsir(engaging=True, alive=False)])
+    assert not intercept_window(w)
+
+
+def test_real_pantsir_publishes_engaging_flag_for_gun_only_window():
+    # END-TO-END (real units in a real CombatWorld, no GL): a real Pantsir with
+    # a FORMED fire-control track on a live inbound hostile but NO 57E6 in flight
+    # (SAM ammo zeroed) must publish unit.engaging == True, so intercept_window's
+    # gun-only branch is actually reachable in-game — the dead-code gap the
+    # finding flagged.  Reuses the proven tools/smoke_combat.py w12 geometry
+    # (an inbound Tomahawk at the Bastion-guard Pantsir) so the radar LOS /
+    # terrain checks pass exactly as they do in a live battle.
+    import numpy as np
+    from sim.arsenal import TOMAHAWK
+    from sim.strike import StrikeMissile
+    from world.combat import CombatWorld
+    from world.generation import BASE_POS
+
+    PHYS_DT = 1.0 / 120.0
+    w = CombatWorld()
+    w.radar_station.emitting = False        # isolate from the commander
+    for s in w.ships:
+        s.tomahawk_ammo = 0
+        s.sm2_ammo = 0                      # no friendly SAM in flight anywhere
+    for p in w.pantsirs:
+        p.missile_ammo = 0                 # NO SAM channel on ANY unit -> the
+        p.gun.ammo = 0                     # ONLY intercept_window source left is
+        #                                    the gun-engaging flag (zero the gun
+        #                                    too so a kill never ends it early —
+        #                                    the flag is the FIRE-CONTROL track,
+        #                                    independent of the round count)
+    p_bastion = w.pantsirs[0]
+    assert p_bastion.engaging is False      # idle at construction (default init)
+
+    inbound = StrikeMissile(
+        TOMAHAWK,
+        np.array([BASE_POS[0], 50.0, p_bastion.pos[2] + 18_000.0]),
+        np.zeros(3), (BASE_POS[0], BASE_POS[2]), target_y=0.0)
+    inbound.launch_platform = None
+    w.missiles.append(inbound)
+
+    saw_engaging = False
+    saw_intercept_window = False
+    for _ in range(int(120.0 / PHYS_DT)):
+        w.step(PHYS_DT)
+        # No friendly SAM round can exist (all SAM ammo zeroed), so the ONLY
+        # way intercept_window can be True is the gun-engaging Pantsir flag.
+        assert not any(_is_friendly_sam_in_flight(m) for m in w.missiles)
+        if p_bastion.engaging:
+            saw_engaging = True
+            saw_intercept_window = saw_intercept_window or intercept_window(w)
+        if not inbound.alive:
+            break
+    assert saw_engaging, "real Pantsir must publish the gun-only ENGAGING flag"
+    assert saw_intercept_window, (
+        "intercept_window must fire solely on the live gun-engaging flag")
+
+
+def _is_friendly_sam_in_flight(m) -> bool:
+    """A live non-hostile SAM round (used by the gun-only test to PROVE no SAM
+    channel is contaminating the intercept_window assertion)."""
+    from sim.sam import SamMissile
+    return isinstance(m, SamMissile) and getattr(m, "alive", False)
+
+
 def test_event_drop_false_on_empty_world():
     assert not event_drop(_FakeWorld())
 

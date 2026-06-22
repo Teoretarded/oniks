@@ -513,6 +513,18 @@ class SandboxState(GameState):
         self.battery_panel_open = not self.battery_panel_open
         self.app.audio.ui_click()
 
+    def toggle_auto_warp(self) -> bool:
+        """T (auto_warp_toggle binding): flip M6 AUTO-TIME-WARP on/off.
+
+        The toggle state + director live on :class:`SandboxControls`; this is
+        the SandboxState-side forwarder the key dispatch calls (mirroring
+        toggle_battery_panel / cycle_salvo_mode), so the binding reaches the
+        director.  Pure UI/pacing — auto-warp OFF keeps the default battle
+        byte-identical (the director stays dormant).  Returns the new state."""
+        new_state = self.controls.toggle_auto_warp()
+        self.app.audio.ui_click()
+        return new_state
+
     def toggle_radar(self) -> None:
         """R (radar_toggle binding): flip the player radar station's
         emissions — the COMBAT counter to ESM localization. Silent radars

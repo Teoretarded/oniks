@@ -236,10 +236,14 @@ def _is_sam(m) -> bool:
 
 
 def _pantsir_engaging(unit) -> bool:
-    """A Pantsir is 'engaging' when its point-defense controller currently
-    holds a live intercept track.  Reads own-force state only (the Pantsir is
-    a player unit).  Defensive: returns False for any unit shape that does not
-    expose an engagement signal."""
+    """A Pantsir is 'engaging' when its point-defense fire control currently
+    holds a FORMED track on a live inbound hostile (gun/SAM channels actively
+    prosecuting it) or has a 57E6 in flight.  ``sim/pantsir.py`` publishes this
+    own-force signal as the ``unit.engaging`` flag every step (the same gun-
+    channel engagement the HUD 'ENGAGING' cue reflects), so the gun-only window
+    — a threat inside GUN_RANGE_M with no SAM in the air — drops the warp too.
+    Reads own-force state only (the Pantsir is a player unit) -> fog-safe.
+    Defensive: returns False for any unit shape lacking the bool signal."""
     for attr in ("engaging", "is_engaging"):
         val = getattr(unit, attr, None)
         if isinstance(val, bool):
