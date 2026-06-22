@@ -219,6 +219,8 @@ class SandboxControls:
             sandbox.request_salvo()
         elif action == "salvo_mode":
             sandbox.cycle_salvo_mode()
+        elif action == "battery_panel":
+            sandbox.toggle_battery_panel()
         elif action == "pause":
             app.paused = not app.paused
         elif action == "frame_step":

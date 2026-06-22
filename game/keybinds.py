@@ -95,6 +95,13 @@ ACTIONS: tuple[ActionDef, ...] = (
     # graceful no-op (it reuses the single-fire validation).
     ActionDef("salvo_fire", "SALVO / RIPPLE FIRE", "ENGAGEMENT", pygame.K_f),
     ActionDef("salvo_mode", "SALVO MODE", "ENGAGEMENT", pygame.K_y),
+    # M6 per-battery STATUS PANEL: toggles the EXPANDED full battery board
+    # (every Oniks/S-300 tube's LOADED/RELOADING/EMPTY + the magazine pool +
+    # refill timers), drawn like the F1 overlay.  Player-only own-force
+    # telemetry, EXEMPT from the radar gate.  The spec proposed G, but G is now
+    # claimed by the M3-F4 drone EW pod (jam); O was unclaimed by every default
+    # (and F/Y are the salvo keys), so the panel binds to O.
+    ActionDef("battery_panel", "BATTERY PANEL", "SIMULATION", pygame.K_o),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),

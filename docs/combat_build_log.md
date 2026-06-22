@@ -1329,3 +1329,48 @@ the documented SM-2 `<=4 in flight` saturation king move.
 - **Deferred (per the spec, backlog):** FAN spread preview on the tactical map; KEYUP
   early-release-stops-queuing (the queue exposes `cancel()` — wiring is a controls
   pass); per-platform TOT speed from the live WeaponDef (uses a coarse fallback now).
+
+## M6 #2 — per-battery STATUS PANEL (per-tube LOADED/RELOADING/EMPTY + magazine + reload timers) (2026-06-22)
+
+A player-only HUD board surfacing every player firing battery (each Oniks TEL, each
+S-300 TEL) with the state of every physical tube — LOADED (green) / RELOADING (amber)
+/ EMPTY (grey) — plus the shared magazine pool n/cap and the magazine-refill countdown
+when dry. Toggled with O into an EXPANDED full board drawn like the F1 overlay. Builds
+on the M1-F4 `tube_cells` plumbing — this adds the per-BATTERY grouping + the pool/
+refill readout + the expanded board.
+
+- **PURE helpers (`game/hud.py`, GL-free, headless-tested):** `tube_state(t,
+  pool_has_round=True)` classifies one tube (Oniks: reload_left>0→RELOADING,
+  loaded→LOADED, else EMPTY; S-300, no `loaded` key: reload_left>0→RELOADING, else
+  pool>0→LOADED else EMPTY — the reload timer always outranks the loaded flag).
+  `battery_status_rows(world)` groups the FLAT `_oniks_tubes` (2/TEL) and `_s300_tubes`
+  (4/TEL) by `len(_*_launcher_positions)` and returns one dict per TEL
+  `{name, tubes:[(state, reload_left)], pool_text, pool_col, refill_left}`. Oniks pool
+  is `_oniks_ammo/_oniks_mag_cap` (None→infinite→pool_text None, mirrors
+  `oniks_ammo_row`); S-300 pool is the shared 48N6+40N6 stock; refill from the mag
+  reload-left timers when dry. NO contact/enemy/missiles read — own-force only,
+  EXEMPT from the radar gate (the same exemption `oniks_ammo_row`/`tube_cells` use).
+- **FOG / NO-CHEAT:** the panel shows ONLY player-owned hardware; it reads no enemy
+  state and feeds nothing to the commander. The toggle is a pure UI bool the world
+  never reads.
+- **BYTE-IDENTICAL DEFAULT (the gate):** adds ZERO sim/world data — only
+  `SandboxState.battery_panel_open` (a UI bool) and the keybind. `tools/wf_m5_digest.py`
+  bit-identical pre/post: HEAD `7d571632…06add` == post-change `7d571632…06add`. Duel
+  (`test_sm2_statistics`) 7 green / bit-identical.
+- **Keybind:** spec proposed G, but G is now claimed by the M3-F4 drone EW pod (`jam`);
+  O was unclaimed by every default (F/Y are the salvo keys), so `battery_panel` binds
+  to O (SIMULATION group). The F1 overlay regenerates live from `ACTIONS` so it picks
+  up the new row automatically (test_hud asserts headers, not a count — unchanged).
+- **Files:** `game/hud.py` (NEW pure `tube_state` + `battery_status_rows` +
+  `_oniks_battery_rows`/`_s300_battery_rows`/`_group_tubes`; NEW `HUD._battery_panel`
+  + `_battery_row` expanded board, routed in `HUD.draw`), `game/sandbox.py`
+  (`battery_panel_open` + `toggle_battery_panel`), `game/controls.py`
+  (`battery_panel` dispatch), `game/keybinds.py` (ActionDef `battery_panel`=O), NEW
+  `tests/test_battery_panel.py` (13), `tools/smoke_combat.py` (+4 panel checks).
+- **Gate (self-verified):** targeted `pytest -q -n auto` 84 green (test_battery_panel
+  13 + tube_panel/hud/keybinds/controls/salvo/sm2_statistics), smoke 80/80 exit 0
+  (76 + 4 panel), digest bit-identical, duel bit-identical.
+- **Deferred (per the spec, backlog):** the compact per-active-platform tube row
+  already ships as the M1-F4 `tube_cells` row inside the launcher block; the Pantsir
+  is intentionally omitted from the per-battery board (it is a point-defense unit, not
+  a firing TEL with a tube/magazine board — its summary stays in `pantsir_status_row`).

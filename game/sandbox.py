@@ -331,6 +331,11 @@ class SandboxState(GameState):
         self.hud = HUD(self.text)
         self.hud_visible = True
         self.controls_overlay = False   # F1: live binding-table overlay
+        # M6 per-battery STATUS PANEL: O toggles the EXPANDED full battery board
+        # (every player tube's LOADED/RELOADING/EMPTY + magazine + refill).
+        # Pure UI toggle — adds ZERO sim/world data, so the default battle stays
+        # byte-identical by construction (the world never reads this flag).
+        self.battery_panel_open = False
 
         # Player intent (driven by the tactical map)
         self.profile = "hi-lo"
@@ -497,6 +502,14 @@ class SandboxState(GameState):
         """F1 (reserved binding): the controls overlay generated live from
         the binding table. An overlay, not a menu — the sim keeps running."""
         self.controls_overlay = not self.controls_overlay
+        self.app.audio.ui_click()
+
+    def toggle_battery_panel(self) -> None:
+        """O (battery_panel binding): toggle the EXPANDED per-battery STATUS
+        PANEL (every player Oniks/S-300 tube's LOADED/RELOADING/EMPTY + the
+        magazine pool + refill timers).  An overlay, not a menu — the sim keeps
+        running; player-only own-force telemetry, no enemy state."""
+        self.battery_panel_open = not self.battery_panel_open
         self.app.audio.ui_click()
 
     def toggle_radar(self) -> None:

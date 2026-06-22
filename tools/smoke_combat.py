@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pygame
 
+from game.hud import battery_status_rows
 from game.salvo import ready_tube_count
 from main import App, PHYS_DT
 from sim.a2a import IrMissile
@@ -623,6 +624,23 @@ def main() -> int:
           and state.cycle_salvo_mode() == "tot"
           and state.cycle_salvo_mode() == "ripple")
     state.followed = None
+
+    # --- M6 per-battery STATUS PANEL (O): the expanded board GL draw + toggle.
+    # battery_status_rows is own-force only (Oniks/S-300 tubes + pools), so the
+    # board surfaces every player battery; rendering it must not crash.
+    bats = battery_status_rows(state.world)
+    check("M6 battery panel: own batteries surfaced (>=1 Oniks + S-300)",
+          any(b["name"].startswith("BASTION") for b in bats)
+          and any(b["name"].startswith("S-300") for b in bats))
+    check("M6 battery panel: each Oniks TEL has 2 tubes",
+          all(len(b["tubes"]) == 2 for b in bats
+              if b["name"].startswith("BASTION")))
+    state.toggle_battery_panel()
+    check("M6 battery panel: O opens the board", state.battery_panel_open)
+    state.render(PHYS_DT)                    # GL draw of the expanded board
+    state.toggle_battery_panel()
+    check("M6 battery panel: O closes the board",
+          not state.battery_panel_open)
 
     state.render(PHYS_DT)
     print(f"[smoke] screenshot {app._save_screenshot()}")

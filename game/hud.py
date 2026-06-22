@@ -167,6 +167,20 @@ TUBE_ROW_GAP = 6            # px, gap between the panel body and the tube row
 TUBE_GAUGE_H = 6            # px, height of a RELOADING cell's progress gauge
 TUBE_LABEL_GAP = 2          # px, gap between a tube's index label and its badge
 
+# --- Expanded per-battery STATUS PANEL board (M6) -------------------------------
+#
+# The full-screen-ish board (O) drawn like the F1 overlay: one ROW per player
+# battery (name + pooled magazine on the left, the tube badges on the right),
+# from the pure ``battery_status_rows`` helper.  Player-only own-force telemetry,
+# EXEMPT from the radar gate; no enemy / contact / truth read.
+BPANEL_W = 460              # px, board panel width (matches the F1 overlay feel)
+BPANEL_DIM = 24             # px, dim-rect margin around the board
+BPANEL_ROW_H = 40           # px, per-battery row pitch (name + tube badges)
+BPANEL_NAME_W = 132         # px, battery-name + pool column width
+BPANEL_TITLE = "BATTERY STATUS"
+BPANEL_FOOTER = "O CLOSE"
+BPANEL_EMPTY = "NO PLAYER BATTERIES"     # SANDBOX / no finite-battery world
+
 
 def _clamp01(v: float) -> float:
     """Clamp ``v`` into [0, 1] (local copy so the helper stays GL-free)."""
@@ -250,6 +264,134 @@ def tube_cells(world, platform):
                 cells.append((str(i + 1), "EMPTY", 0.0))
         return cells
     return []
+
+
+def tube_state(t, pool_has_round: bool = True) -> str:
+    """Classify ONE physical launch tube as LOADED / RELOADING / EMPTY (M6) —
+    pure, GL-free, deterministic, OWN-FORCE ONLY.
+
+    ``t`` is a live tube dict (``_oniks_tubes`` / ``_s300_tubes`` entry).
+
+      * An Oniks tube carries a ``loaded`` flag and its own ``reload_left``
+        re-cock timer:
+          reload_left > 0           -> RELOADING (the tube is re-cocking);
+          loaded (and re-cocked)    -> LOADED;
+          else                      -> EMPTY (re-cocked but the magazine had
+                                       no round to feed it).
+      * An S-300 tube has NO ``loaded`` key (its rounds come from the shared
+        48N6/40N6 pool), so readiness depends on the POOL: the caller passes
+        ``pool_has_round`` (does EITHER pool still hold a round):
+          reload_left > 0           -> RELOADING;
+          pool_has_round            -> LOADED;
+          else                      -> EMPTY.
+
+    The reload timer always outranks the loaded flag so a tube mid-cycle reads
+    RELOADING even if a stale ``loaded`` flag lingers."""
+    if float(t.get("reload_left", 0.0)) > 0.0:
+        return "RELOADING"
+    if "loaded" in t:                       # Oniks tube
+        return "LOADED" if t.get("loaded") else "EMPTY"
+    return "LOADED" if pool_has_round else "EMPTY"   # S-300 tube (pool-fed)
+
+
+def battery_status_rows(world):
+    """Per-battery STATUS PANEL data (M6) — pure, GL-free, deterministic,
+    OWN-FORCE ONLY.  One dict per PLAYER firing battery (each Oniks TEL, each
+    S-300 TEL), so the panel shows every physical tube of every battery the
+    player commands at a glance.
+
+    Returns ``[{name, tubes, pool_text, pool_col, refill_left}]`` where:
+      * ``name``       battery label ("BASTION TEL 1", "S-300 TEL 1", ...);
+      * ``tubes``      list of ``(state, reload_left)`` — state is a
+                       :func:`tube_state` token, reload_left the per-tube
+                       re-cock countdown (s, 0.0 when not reloading);
+      * ``pool_text``  shared magazine readout ("<n>/<cap>" for Oniks; both
+                       48N6/40N6 stocks for the S-300), or ``None`` when the
+                       magazine is INFINITE (the SANDBOX world has no finite
+                       pool — mirrors ``oniks_ammo_row`` returning None);
+      * ``pool_col``   ARMED_COL while rounds remain, RELOAD_COL when dry;
+      * ``refill_left`` magazine-refill countdown (s) while the pool is dry and
+                       the armory is reloading it; 0.0 otherwise.
+
+    FOG / NO-CHEAT: reads ONLY the world's own launcher/magazine attributes
+    (_oniks_tubes / _s300_tubes grouped by the launcher-position count, the
+    ammo pools, the reload timers).  It NEVER touches contacts / enemy /
+    world.missiles truth.  A world without the tube structures (the SANDBOX
+    WorldState) yields ``[]`` (no per-battery panel), exactly like ``tube_cells``
+    / ``oniks_ammo_row`` degrade in the sandbox."""
+    rows: list = []
+    rows += _oniks_battery_rows(world)
+    rows += _s300_battery_rows(world)
+    return rows
+
+
+def _group_tubes(tubes, n_launchers):
+    """Split a FLAT tube list into per-launcher slices (Oniks: 2/TEL, S-300:
+    4/TEL).  ``n_launchers`` is ``len(_*_launcher_positions)``; an unknown count
+    (0/None) falls back to one slice so a malformed world never crashes."""
+    n = max(1, int(n_launchers or 1))
+    per = max(1, len(tubes) // n)
+    return [tubes[i * per:(i + 1) * per] for i in range(n)]
+
+
+def _oniks_battery_rows(world):
+    """Per-Oniks-TEL battery dicts (FLAT _oniks_tubes grouped 2-per-TEL by the
+    launcher-position count), or [] when the world has no Oniks battery (the
+    SANDBOX WorldState)."""
+    tubes = getattr(world, "_oniks_tubes", None)
+    if not tubes:
+        return []
+    positions = getattr(world, "_oniks_launcher_positions", [])
+    ammo = getattr(world, "_oniks_ammo", None)
+    cap = getattr(world, "_oniks_mag_cap", ammo)
+    if ammo is None:                        # infinite (SANDBOX): no pool readout
+        pool_text, pool_col, refill_left = None, ARMED_COL, 0.0
+    elif ammo > 0:
+        pool_text, pool_col, refill_left = f"{ammo}/{cap}", ARMED_COL, 0.0
+    else:
+        refill_left = float(getattr(world, "_oniks_mag_reload_left", 0.0))
+        pool_text, pool_col = f"0/{cap}", RELOAD_COL
+    rows = []
+    for i, slice_ in enumerate(_group_tubes(tubes, len(positions))):
+        cells = [(tube_state(t), float(t.get("reload_left", 0.0)))
+                 for t in slice_]
+        rows.append({"name": f"BASTION TEL {i + 1}", "tubes": cells,
+                     "pool_text": pool_text, "pool_col": pool_col,
+                     "refill_left": refill_left})
+    return rows
+
+
+def _s300_battery_rows(world):
+    """Per-S-300-TEL battery dicts (FLAT _s300_tubes grouped 4-per-TEL).  The
+    48N6 + 40N6 pools are SHARED across every tube, so the pool readout and the
+    LOADED/EMPTY tube decision use the combined stock.  [] when the world has no
+    S-300 battery (the SANDBOX WorldState)."""
+    tubes = getattr(world, "_s300_tubes", None)
+    if not tubes:
+        return []
+    positions = getattr(world, "_s300_launcher_positions", [])
+    ammo48 = int(getattr(world, "sam_ammo", 0))
+    ammo40 = int(getattr(world, "sam_ammo_40n6", 0))
+    pool_has_round = (ammo48 + ammo40) > 0
+    pool_text = f"48N6 {ammo48}  40N6 {ammo40}"
+    pool_col = ARMED_COL if pool_has_round else RELOAD_COL
+    # When BOTH pools are dry the shared refill timer is the longer of the two
+    # (each pool re-stocks on its own counter; the player reads the soonest the
+    # battery is loadable again, i.e. the max remaining wait until any round
+    # returns — surface the larger so the readout never under-promises).
+    refill_left = 0.0
+    if not pool_has_round:
+        refill_left = max(
+            float(getattr(world, "_s300_48n6_mag_reload_left", 0.0)),
+            float(getattr(world, "_s300_40n6_mag_reload_left", 0.0)))
+    rows = []
+    for i, slice_ in enumerate(_group_tubes(tubes, len(positions))):
+        cells = [(tube_state(t, pool_has_round=pool_has_round),
+                  float(t.get("reload_left", 0.0))) for t in slice_]
+        rows.append({"name": f"S-300 TEL {i + 1}", "tubes": cells,
+                     "pool_text": pool_text, "pool_col": pool_col,
+                     "refill_left": refill_left})
+    return rows
 
 
 def salvo_readout(sandbox):
@@ -825,6 +967,8 @@ class HUD:
         self._threat_strip(sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
         self._hint_flash(sandbox, w, h)
         self._corner_labels(sandbox, w, h)
+        if getattr(sandbox, "battery_panel_open", False):
+            self._battery_panel(sandbox, w, h)
         if sandbox.controls_overlay:
             self._controls_overlay(sandbox, w, h)
         self.text.flush(w, h)
@@ -1278,6 +1422,71 @@ class HUD:
         cw = self.text.text_width(cam, SMALL_SIZE)
         self.text.draw_text(w - CORNER_MARGIN - cw, y - CAM_LABEL_GAP, cam,
                             MUTED, SMALL_SIZE)
+
+    def _battery_panel(self, sandbox, w: int, h: int) -> None:
+        """O: the EXPANDED per-battery status board (M6) — a centered corner-
+        ticked panel (the F1-overlay chrome) listing every player battery as a
+        row of tube badges with the pooled magazine + refill timer.  Built from
+        the pure ``battery_status_rows`` helper, so it can never show stale or
+        enemy state (own-force only; the sim keeps running — overlay, not menu).
+        """
+        text = self.text
+        bats = battery_status_rows(sandbox.world)
+        head_h = text.line_height(HEADER_SIZE)
+        small_h = text.line_height(SMALL_SIZE)
+        n_rows = max(1, len(bats))           # an empty world still draws a note
+        content_h = n_rows * BPANEL_ROW_H
+        panel_h = (PANEL_PAD * 2 + head_h + 4 + HEADER_GAP + content_h
+                   + 8 + small_h)
+        x = (w - BPANEL_W) // 2
+        y = (h - panel_h) // 2
+        text.draw_rect(x - BPANEL_DIM, y - BPANEL_DIM,
+                       BPANEL_W + 2 * BPANEL_DIM, panel_h + 2 * BPANEL_DIM,
+                       (*BG0, 0.35))
+        draw_panel(text, x, y, BPANEL_W, panel_h, alpha=0.92, strip=True)
+        tx = x + PANEL_PAD
+        ty = y + PANEL_PAD
+        text.draw_text(tx, ty, BPANEL_TITLE, HEADER_COL, HEADER_SIZE)
+        ty += head_h + 4
+        draw_header_rule(text, tx, ty, BPANEL_W - 2 * PANEL_PAD)
+        ty += HEADER_GAP
+        if not bats:
+            # SANDBOX / infinite-magazine world: nothing per-battery to show.
+            text.draw_text(tx, ty + (BPANEL_ROW_H - small_h) // 2,
+                           BPANEL_EMPTY, MUTED, SMALL_SIZE)
+        for bat in bats:
+            self._battery_row(tx, ty, bat, BPANEL_W - 2 * PANEL_PAD)
+            ty += BPANEL_ROW_H
+        ty = y + panel_h - PANEL_PAD - small_h
+        fw = text.text_width(BPANEL_FOOTER, SMALL_SIZE)
+        text.draw_text(x + (BPANEL_W - fw) // 2, ty, BPANEL_FOOTER,
+                       ACCENT_DIM, SMALL_SIZE)
+
+    def _battery_row(self, x, y, bat, row_w) -> None:
+        """One battery row of the expanded board: the name + pooled magazine on
+        the left, the per-tube state badges (LOADED/RELOADING/EMPTY via
+        SEMANTIC_COLORS — the own-force idiom) on the right, with a thin reload
+        gauge under a RELOADING tube.  OWN-FORCE only; no contact reads."""
+        text = self.text
+        small_h = text.line_height(SMALL_SIZE)
+        text.draw_text(x, y, bat["name"], LABEL_COL, SMALL_SIZE)
+        pool = bat["pool_text"]
+        if pool is not None:
+            ptxt = pool
+            if bat["refill_left"] > 0.0:
+                ptxt += f"  RLDG {int(np.ceil(bat['refill_left'] - 1e-9))}s"
+            text.draw_text(x, y + small_h + TUBE_LABEL_GAP, ptxt,
+                           bat["pool_col"], SMALL_SIZE)
+        # Tube badges, right of the name column.
+        bx = x + BPANEL_NAME_W
+        for i, (state, _left) in enumerate(bat["tubes"]):
+            cx = bx + i * (TUBE_CELL_W + TUBE_GAP)
+            text.draw_text(cx, y, str(i + 1), MUTED, SMALL_SIZE)
+            ly = y + small_h + TUBE_LABEL_GAP
+            # READY is the own-force LOADED token in SEMANTIC_COLORS; map the
+            # LOADED state onto it so the badge reads green.
+            badge_state = "READY" if state == "LOADED" else state
+            _badge(text, badge_state, cx, ly, badge_state, size=SMALL_SIZE)
 
     def _controls_overlay(self, sandbox, w: int, h: int) -> None:
         """F1: centered corner-ticked panel listing every binding straight
