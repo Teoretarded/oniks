@@ -252,6 +252,28 @@ def tube_cells(world, platform):
     return []
 
 
+def salvo_readout(sandbox):
+    """SALVO HUD row (M6) — pure, GL-free, OWN-FORCE.  Shows the selected salvo
+    mode (RIPPLE / FAN / TOT) and, while a ripple is queued, the progress
+    'SALVO k/n' (rounds remaining).  Reads only the player's own salvo state on
+    the sandbox; returns None when the sandbox carries no salvo queue (the
+    legacy/smoke path) so the block is unchanged.
+
+    Returns ``(label, value, col)``: amber while a salvo is in progress (a
+    transient action cue), muted-green at rest (the resting mode selector)."""
+    queue = getattr(sandbox, "_salvo", None)
+    mode = getattr(sandbox, "salvo_mode", None)
+    if queue is None or mode is None:
+        return None
+    mode_txt = mode.upper()
+    if getattr(queue, "active", False):
+        # count_left is the rounds STILL to fire; the first round already flew
+        # through the single-fire path, so it is not counted in the queue total.
+        left = int(getattr(queue, "count_left", 0))
+        return ("SALVO", f"{mode_txt}  {left} QUEUED", RELOAD_COL)
+    return ("SALVO", mode_txt, LABEL_COL)
+
+
 def _ground_range(origin_xz, est) -> float:
     """Ground-plane (xz) distance from a friendly (x, z) asset to a 3D
     estimate ``est`` (x, y, z) — altitude is ignored (a TTI/threat is judged
@@ -1023,6 +1045,11 @@ class HUD:
             world, engaging=getattr(sandbox, "pantsir_engaging", False))
         if pantsir is not None:
             rows.append(pantsir)
+        # M6 salvo: mode selector + queued-rounds readout (own-force; None on
+        # the legacy/smoke path -> the block is unchanged).
+        salvo = salvo_readout(sandbox)
+        if salvo is not None:
+            rows.append(salvo)
         rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
@@ -1058,6 +1085,11 @@ class HUD:
             world, engaging=getattr(sandbox, "pantsir_engaging", False))
         if pantsir is not None:
             rows.append(pantsir)
+        # M6 salvo: mode selector + queued-rounds readout (own-force; None on
+        # the legacy/smoke path -> the block is unchanged).
+        salvo = salvo_readout(sandbox)
+        if salvo is not None:
+            rows.append(salvo)
         rows += [
             ("TIME", self._scale_text(sandbox), VALUE_COL),
             ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),

@@ -88,6 +88,13 @@ ACTIONS: tuple[ActionDef, ...] = (
     # the DRONE platform is active. G is unclaimed by every other default; in
     # SANDBOX / off the drone platform the action is a graceful no-op.
     ActionDef("jam", "DRONE EW POD", "ENGAGEMENT", pygame.K_g),
+    # M6 salvo / ripple-fire: F empties all currently-ready tubes of the active
+    # platform in a controlled ripple (the SM-2 saturation king move); Y cycles
+    # the salvo mode RIPPLE -> FAN -> TOT.  Both keys were unclaimed by every
+    # prior default.  Off a launch platform / with no aim point the action is a
+    # graceful no-op (it reuses the single-fire validation).
+    ActionDef("salvo_fire", "SALVO / RIPPLE FIRE", "ENGAGEMENT", pygame.K_f),
+    ActionDef("salvo_mode", "SALVO MODE", "ENGAGEMENT", pygame.K_y),
     ActionDef("pause", "PAUSE SIM", "SIMULATION", pygame.K_p),
     ActionDef("frame_step", "FRAME STEP", "SIMULATION", pygame.K_n),
     ActionDef("time_down", "TIME SCALE -", "SIMULATION", pygame.K_MINUS),

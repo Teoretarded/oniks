@@ -215,6 +215,10 @@ class SandboxControls:
             sandbox.toggle_swarm_arrival_mode()
         elif action == "jam":
             sandbox.toggle_jam()
+        elif action == "salvo_fire":
+            sandbox.request_salvo()
+        elif action == "salvo_mode":
+            sandbox.cycle_salvo_mode()
         elif action == "pause":
             app.paused = not app.paused
         elif action == "frame_step":

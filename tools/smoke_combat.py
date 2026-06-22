@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pygame
 
+from game.salvo import ready_tube_count
 from main import App, PHYS_DT
 from sim.a2a import IrMissile
 from sim.arsenal import JASSM, TOMAHAWK
@@ -586,6 +587,42 @@ def main() -> int:
     state.map_open = False
     state.followed = None
     check("TAB wraps back to bastion", state.cycle_platform() == "bastion")
+
+    # --- M6 SALVO (GL-state end-to-end on the live CombatState): F empties
+    # every ready Bastion tube over the ripple interval (the SM-2 saturation
+    # king move).  _tick_salvo runs in sim_step BEFORE world.step so queued
+    # rounds enter the frame; RIPPLE aims them all at the bare surface point.
+    # Run on the live ``state`` (re-cock its tubes for a clean ready count); the
+    # queue idles back to byte-identical after the ripple completes.
+    state.active_platform = "bastion"
+    state.target_point = np.array([0.0, 0.0, 150_000.0])
+    state.oniks_weapon = "oniks"
+    state.salvo_mode = "ripple"
+    for t in state.world._oniks_tubes:          # clean ready state for the count
+        t["loaded"] = True
+        t["reload_left"] = 0.0
+    ready0 = ready_tube_count(state.world, "bastion")
+    check("M6 salvo: a fresh battery has multiple ready Oniks tubes",
+          ready0 >= 2)
+    own0 = len([m for m in state.world.missiles
+                if not getattr(m, "is_hostile", False)])
+    state.request_salvo()                       # fires round 1 + queues the rest
+    check("M6 salvo: first round away, the rest queued", state._salvo.active)
+    check("M6 salvo: warp held at 1x while a salvo is queued",
+          state.effective_time_scale() == 1.0)
+    for _ in range(int((ready0 + 1) * 1.5 / PHYS_DT)):
+        state.sim_step(PHYS_DT)
+    own1 = len([m for m in state.world.missiles
+                if not getattr(m, "is_hostile", False)])
+    check("M6 salvo: every ready tube rippled out (no new outcome roll)",
+          own1 - own0 >= ready0 and not state._salvo.active)
+    check("M6 salvo: idle queue restores the requested time scale",
+          state.effective_time_scale() == state.controls.requested_scale)
+    check("M6 salvo: mode cycles RIPPLE -> FAN -> TOT",
+          state.cycle_salvo_mode() == "fan"
+          and state.cycle_salvo_mode() == "tot"
+          and state.cycle_salvo_mode() == "ripple")
+    state.followed = None
 
     state.render(PHYS_DT)
     print(f"[smoke] screenshot {app._save_screenshot()}")

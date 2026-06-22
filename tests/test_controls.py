@@ -69,6 +69,12 @@ class FakeSandbox:
         self.controls_overlay = not self.controls_overlay
         self.log.append("overlay")
 
+    def request_salvo(self):
+        self.log.append("salvo_fire")
+
+    def cycle_salvo_mode(self):
+        self.log.append("salvo_mode")
+
 
 @pytest.fixture
 def ctl(tmp_path):
@@ -143,3 +149,11 @@ def test_time_scale_steps_and_numpad_aliases(ctl):
 def test_screenshot_flag(ctl):
     ctl._handle_key(pygame.K_F2)
     assert ctl.sandbox.app.screenshot_requested
+
+
+def test_salvo_keys_dispatch(ctl):
+    # M6 salvo: F empties the ready tubes in a ripple; Y cycles the mode.
+    sb = ctl.sandbox
+    ctl._handle_key(pygame.K_f)
+    ctl._handle_key(pygame.K_y)
+    assert sb.log == ["salvo_fire", "salvo_mode"]

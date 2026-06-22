@@ -62,6 +62,10 @@ def test_defaults_match_current_bindings(kb):
     assert kb.key_for("controls_overlay") == pygame.K_F1
     assert kb.key_for("freecam_fwd") == pygame.K_w
     assert kb.key_for("freecam_down") == pygame.K_q
+    # M6 salvo / ripple-fire (spec 07): F empties the ready tubes, Y cycles the
+    # mode.  Both keys were unclaimed by every prior default.
+    assert kb.key_for("salvo_fire") == pygame.K_f
+    assert kb.key_for("salvo_mode") == pygame.K_y
 
 
 def test_reserved_rows_are_esc_and_f1_only():

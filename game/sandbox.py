@@ -45,6 +45,8 @@ from game.cameras import (LAUNCHER_LOOK_UP, CameraRig, StaticSubject,
 from game.controls import (PLATFORMS_SANDBOX, SandboxControls,
                            next_platform)
 from game.hud import HUD
+from game.salvo import (RIPPLE_INTERVAL_S, SALVO_MODES, SalvoQueue,
+                       next_salvo_mode, ready_tube_count, tot_delays)
 from game.states import GameState
 from game import tactical_map
 from game.tactical_map import TacticalMap
@@ -243,6 +245,21 @@ HINT_JAM_OFF = "DRONE EW POD: COLD"
 HINT_JAM_UNAVAILABLE = "DRONE EW POD: NOT FITTED"
 HINT_JAM_NO_DRONE = "DRONE EW POD: NO DRONE AIRBORNE"
 HINT_JAM_WRONG_PLATFORM = "DRONE EW POD: SELECT THE DRONE (TAB)"
+# M6 salvo / ripple-fire (F): empty every ready tube of the active platform in
+# a controlled ripple.  The hints flash the mode + the count fired; an empty
+# battery or no-target salvo flashes the single-fire reason via request_launch.
+HINT_SALVO_RIPPLE = "SALVO: RIPPLE %d TUBES"
+HINT_SALVO_FAN = "SALVO: FAN %d TUBES"
+HINT_SALVO_TOT = "SALVO: TIME-ON-TARGET %d TUBES"
+HINT_SALVO_NONE = "SALVO: NO READY TUBES"
+HINT_SALVO_MODE_RIPPLE = "SALVO MODE: RIPPLE"
+HINT_SALVO_MODE_FAN = "SALVO MODE: FAN (multi-axis)"
+HINT_SALVO_MODE_TOT = "SALVO MODE: TIME-ON-TARGET"
+# TOT flight-time estimate: a coarse sea-level cruise speed (m/s) for the loft
+# stagger.  Read per-weapon from the WeaponDef cruise Mach when available;
+# this is the conservative fallback (~Mach 2 at sea level) so a salvo on a world
+# without a resolvable speed still staggers sensibly instead of bundling.
+SALVO_TOT_FALLBACK_SPEED = 680.0
 HINT_DRONE_RECON = tactical_map.DRONE_RECON_HINT   # SPACE with the drone
 #                              platform active fires nothing (Phase 4);
 #                              one string, shared with the map's LMB hint
@@ -323,6 +340,14 @@ class SandboxState(GameState):
         # the saturation default) or "max" (plain max-speed bundle).  Toggled by
         # the swarm_arrival_mode key (game/keybinds.py).
         self.swarm_arrival_mode = "sync"
+        # M6 salvo / ripple-fire: a thin scheduler that empties the ready tubes
+        # of the active platform over the existing per-tube launch path.  Owned
+        # HERE (not the world — the world stays single-shot/deterministic) and
+        # ticked from sim_step BEFORE world.step so queued launches enter the
+        # frame.  Idle by default -> byte-identical (it never touches the world
+        # until the player presses the salvo key).
+        self.salvo_mode = "ripple"      # Y cycles RIPPLE -> FAN -> TOT
+        self._salvo = SalvoQueue()
         self.followed = None            # camera subject the cinematic rig
         #                                 tracks: a missile, a TEL
         #                                 StaticSubject or a contact entity
@@ -829,10 +854,123 @@ class SandboxState(GameState):
                 mouth_pos, np.array(kick, dtype=np.float64), fwd,
                 COVER_DRAG, COVER_TUMBLE_RATE * (1.0 + 0.2 * i), COVER_LIFE)))
 
+    # ----------------------------------------------------------------- salvo
+
+    def cycle_salvo_mode(self) -> str:
+        """Y (salvo_mode binding): cycle the salvo mode RIPPLE -> FAN -> TOT and
+        flash the selection.  Pure UI state — does not fire anything."""
+        self.salvo_mode = next_salvo_mode(self.salvo_mode)
+        hint = {"ripple": HINT_SALVO_MODE_RIPPLE,
+                "fan": HINT_SALVO_MODE_FAN,
+                "tot": HINT_SALVO_MODE_TOT}[self.salvo_mode]
+        self.show_hint(hint)
+        self.app.audio.ui_click()
+        return self.salvo_mode
+
+    def request_salvo(self):
+        """F (salvo_fire binding): empty every currently-ready tube of the
+        active platform in a controlled ripple (the SM-2 saturation king move).
+
+        Reuses request_launch's per-platform target validation by firing the
+        FIRST round through it (so an invalid selection flashes the SAME hint
+        and nothing queues) — then queues the REMAINING ready tubes on the salvo
+        scheduler.  A quick single press therefore still single-fires when only
+        one tube is ready; with N ready it ripples all N.  Only the Bastion
+        (Oniks/Zircon) and S-300 platforms salvo; other platforms (drone /
+        swarm / buk) fall back to a single request_launch."""
+        platform = self.active_platform
+        if platform not in ("bastion", "s300"):
+            return self.request_launch()        # no salvo for these platforms
+        ready = ready_tube_count(self.world, platform)
+        if ready <= 0:
+            # Let request_launch surface the precise empty/reload/no-target hint.
+            self.request_launch()
+            return None
+        # Fire the first round through the normal single-fire path so all the
+        # target-type validation, hints, effects and camera anchor are reused.
+        first = self.request_launch()
+        if first is None:
+            return None                          # validation failed: nothing queues
+        remaining = ready - 1
+        self._start_salvo(platform, remaining)
+        count_total = remaining + 1
+        hint = {"ripple": HINT_SALVO_RIPPLE,
+                "fan": HINT_SALVO_FAN,
+                "tot": HINT_SALVO_TOT}[self.salvo_mode]
+        self.show_hint(hint % count_total)
+        return first
+
+    def _start_salvo(self, platform: str, remaining: int) -> None:
+        """Arm the scheduler for the ``remaining`` tubes after the first round
+        already fired through request_launch.  No-op when nothing remains."""
+        if remaining <= 0:
+            return
+        seed = int(getattr(getattr(self.world, "_config", None), "seed", 0) or 0)
+        if platform == "s300":
+            self._salvo.start(
+                "s300", mode=self.salvo_mode, count=remaining,
+                interval=RIPPLE_INTERVAL_S,
+                target_id=self.tactical_map.selected_contact,
+                round_id=self.sam_round, seed=seed)
+            return
+        # Bastion Oniks/Zircon: queue the remaining tubes at the same aim point.
+        offsets = None
+        if self.salvo_mode == "tot" and self.target_point is not None:
+            # TOT stagger from a coarse per-round flight-time estimate: every
+            # remaining round flies the SAME aim point here (a single surface
+            # target), so the ranges are equal and the delays collapse to 0 —
+            # the stagger is meaningful once FAN spreads the aim (future) or for
+            # multiple aim points.  Computed deterministically all the same.
+            base = np.asarray(BASE_POS, dtype=np.float64)
+            rng = float(np.hypot(self.target_point[0] - base[0],
+                                 self.target_point[2] - base[2]))
+            offsets = tot_delays([rng] * remaining, SALVO_TOT_FALLBACK_SPEED)
+        self._salvo.start(
+            "bastion", mode=self.salvo_mode, count=remaining,
+            interval=RIPPLE_INTERVAL_S, profile=self.profile,
+            target_point=self.target_point, weapon_id=self.oniks_weapon,
+            seed=seed, offsets=offsets)
+
+    def _tick_salvo(self, dt: float) -> None:
+        """Advance the salvo BEFORE world.step so a due round enters this frame.
+        Each launched round gets the same launch effects + camera anchor as a
+        single fire (the queue calls world.launch / world.launch_sam, which
+        returns None for a tube that turned out RELOADING/EMPTY — a graceful
+        no-op beat)."""
+        if not self._salvo.active:
+            return
+        # The queue calls world.launch / world.launch_sam, which append the new
+        # round and return it (or return None for a tube that turned out
+        # RELOADING/EMPTY — a graceful no-op beat).  A returned round is always
+        # the player's OWN freshly-launched missile, so applying friendly launch
+        # effects to it reads no enemy state.
+        rnd = self._salvo.tick(dt, self.world)
+        if rnd is not None:
+            self._apply_launch_fx(rnd)
+
+    def _apply_launch_fx(self, m) -> None:
+        """The shared per-round launch presentation (camera anchor + muzzle /
+        cold-launch effects + audio + shake), reused by single-fire and salvo.
+        Oniks/Zircon/ASBM fire a hot muzzle blast; the S-300 a cold-launch puff
+        (no flame until the hang-apex ignition)."""
+        self.followed = m
+        self.rig.retarget()
+        if isinstance(m, SamMissile):
+            self._launch_puff(m.pos)
+            self._spawn_cover_debris(m.pos)
+            self.app.audio.play("launch", pos=m.pos)
+            return
+        self.effects.muzzle_blast(m.pos, ground_y=float(self._tel_pos[1]) + 1.5)
+        self._spawn_cover_debris(m.pos)
+        self.app.audio.play("launch", pos=m.pos)
+        self.rig.kick_shake(SHAKE_MUZZLE, pos=m.pos)
+
     def effective_time_scale(self) -> float:
         """Requested accel, forced to 1x through the launch cinematic
-        (IGNITION/RIDE-OUT/PITCH-OVER/BOOST)."""
-        if launch_realtime_lock(self.world.missiles):
+        (IGNITION/RIDE-OUT/PITCH-OVER/BOOST).  A queued salvo also holds 1x so
+        each round's launch window plays in real time (the ripple cadence is
+        gated by the cinematic length, not the warp)."""
+        if launch_realtime_lock(self.world.missiles) or self._salvo.active:
             return 1.0
         return self.controls.requested_scale
 
@@ -843,6 +981,9 @@ class SandboxState(GameState):
 
     def sim_step(self, dt: float) -> None:
         world = self.world
+        # M6 salvo: fire any queued ripple round BEFORE world.step so the new
+        # round enters this frame's physics (idle queue -> no-op, byte-identical).
+        self._tick_salvo(dt)
         prev = [(m, m.phase) for m in world.missiles]
         world.step(dt)
         self.tactical_map.record(world)     # map trails + tracked target

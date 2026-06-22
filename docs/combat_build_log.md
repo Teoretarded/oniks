@@ -1280,3 +1280,52 @@ self-gated, and ran ONE bounded independent review agent (PASS, no blockers).
 - **NOTE on test runner:** the suite is now ~1325 tests; serial `pytest -q` is
   ~22 min (1 core). `pytest-xdist` was installed 2026-06-22 — ALWAYS run
   `pytest -q -n auto` (~13 min). See memory `test-suite-parallel`.
+
+## M6 #1 — SALVO / ripple-fire key (2026-06-22) — first M6 meta-loop feature
+
+The M6 meta-loop opens (STATUS PANEL already shipped as M1-F4 tube_cells). SALVO
+is next in the recommended order: a single command that empties every READY tube
+of the active platform in a controlled ripple instead of one SPACE per round —
+the documented SM-2 `<=4 in flight` saturation king move.
+
+- **What it is:** a thin SCHEDULER over the EXISTING per-tube launch path. NEW pure
+  GL-free module `game/salvo.py`: `SalvoQueue` (started by the sandbox, ticked from
+  `sim_step` BEFORE `world.step` so queued rounds enter the frame) + pure helpers
+  `ready_tube_count`/`fan_offset`/`tot_delays`/`next_salvo_mode`. Three doctrine
+  modes (Y cycles): RIPPLE (fixed 1.5 s interval, gated by the launch cinematic),
+  FAN (RIPPLE + a small deterministic aim spread per round), TOT (time-on-target
+  launch stagger from a coarse flight-time estimate). F fires; the FIRST round goes
+  through the normal `request_launch` (so all target-type validation + hints +
+  effects + camera reuse), the remaining ready tubes queue.
+- **PHYSICS NOT DICE:** zero new outcome rolls — every round flies the same launch
+  path with the same per-round physics; the salvo just launches MORE. The only
+  stochastic element is the FAN aim spread, a SEEDED child stream
+  `default_rng([seed, FAN_TAG=9, ordinal])` (ROADMAP §5 salvo-FAN tag), reproducible
+  per seed+config+target.
+- **FOG / NO-CHEAT:** `ready_tube_count` reads ONLY the player's own `_oniks_tubes`/
+  `_s300_tubes`/`sam_ammo` (friendly own-force logistics, exempt from the radar gate
+  exactly like the battery panel) — never enemy truth. The salvo cannot fire at
+  anything the player could not already single-fire at (the launch path keeps its
+  sensor gating). The enemy commander is UNCHANGED — it observes a salvo as more
+  player-missile tracks (more back-plot fixes = the intended risk/reward of mass fire).
+- **DETERMINISM / NO WALL-CLOCK:** the schedule advances on the sim `dt`, never real
+  time, so it is scale-invariant under time-warp. A queued salvo holds the effective
+  warp at 1x (each launch window plays in real time).
+- **BYTE-IDENTICAL DEFAULT (the gate):** the queue is IDLE by default and never
+  touches the world until the player presses F. `tools/wf_m5_digest.py` bit-identical
+  pre/post: HEAD `7d571632…` == post-change `7d571632…`. Duel
+  (`test_sm2_statistics`) bit-identical.
+- **Files:** NEW `game/salvo.py`, `tests/test_salvo.py` (21); `game/sandbox.py`
+  (`SalvoQueue` state + `request_salvo`/`cycle_salvo_mode`/`_start_salvo`/
+  `_tick_salvo`/`_apply_launch_fx`; salvo holds 1x in `effective_time_scale`),
+  `game/combat.py` inherits it, `game/controls.py` (`salvo_fire`/`salvo_mode`
+  dispatch), `game/keybinds.py` (ActionDefs `salvo_fire`=F, `salvo_mode`=Y — both
+  unclaimed), `game/hud.py` (`salvo_readout` row in the bastion/s300 blocks),
+  `tests/test_controls.py`+`tests/test_keybinds.py`+`tests/test_hud.py` (shared-table
+  truth updates), `tools/smoke_combat.py` (+6 salvo end-to-end checks).
+- **Gate (self-verified):** targeted `pytest -q -n auto` 116 green (test_salvo 21,
+  test_controls/keybinds/hud/tube_panel/threat_strip/combat_config/sm2_statistics),
+  smoke 76/76 exit 0 (was 70 + 6 salvo), digest bit-identical, duel bit-identical.
+- **Deferred (per the spec, backlog):** FAN spread preview on the tactical map; KEYUP
+  early-release-stops-queuing (the queue exposes `cancel()` — wiring is a controls
+  pass); per-platform TOT speed from the live WeaponDef (uses a coarse fallback now).
