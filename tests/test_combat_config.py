@@ -33,6 +33,7 @@ from world.combat_config import (
     CLAMP_SWARM_PODS, CLAMP_SWARM_CELLS,
     CLAMP_BUK,
     CLAMP_CBR,
+    CLAMP_DECOYS, CLAMP_CORNER_REFLECTORS,
     CLAMP_FLAGSHIP, CLAMP_AAW, CLAMP_GROUND_ATTACK,
     CLAMP_MAP_PRESET, MAP_PRESET_NAMES,
     CLAMP_SUBS, CLAMP_SONOBUOYS, CLAMP_ASW_AMMO, CLAMP_SUB_KALIBR,
@@ -98,6 +99,11 @@ def test_defaults_match_locked_schema():
     # (OFF) so the out-of-the-box battle stays byte-identical (no CBR built -> not
     # in radar_net / the emitter feed -> the tracker never steps).
     assert c.n_cbr == 0
+    # M5 #5: ESM decoys + corner reflectors DEFAULT 0 (OFF) so the out-of-the-box
+    # battle stays byte-identical (no decoy emitter / reflector built -> absent
+    # from the enemy ESM feed + the back-plot bias hook).
+    assert c.n_decoys == 0
+    assert c.n_corner_reflectors == 0
     # M5 enemy ship classes: ALL DEFAULT 0 so the out-of-the-box fleet stays
     # byte-identical (the typed mixer draws today's 1 carrier + n_destroyers
     # general layout; _spawn_ships builds GeneralDestroyer == legacy Destroyer).
@@ -288,6 +294,40 @@ def test_clamp_config_cbr():
     assert clamp_config(n_cbr=1).n_cbr == 1
     # A default-config build (no edits) keeps the CBR OFF.
     assert clamp_config().n_cbr == 0
+
+
+# ---------------------------------------------------------------------------
+# M5 #5: n_decoys + n_corner_reflectors config fields, clamp (OFF survivable)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_decoys_and_reflectors():
+    """M5 #5 decoy + corner-reflector count clamp round-trip. LIKE every other M5
+    spoofer/launcher gate their floors are 0, so the OFF default survives the
+    default-through-setup path (clamp_config runs every field): clamping either
+    from 0 with a (1, ..) range would silently plant a spoofer and break the
+    byte-identical out-of-the-box battle. Two-sided: floor 0 preserved, ceiling
+    honoured, default unchanged."""
+    assert CLAMP_DECOYS[0] == 0, "decoy count floor must be 0 (OFF survivable)"
+    assert CLAMP_CORNER_REFLECTORS[0] == 0, "reflector floor must be 0"
+    assert CLAMP_DECOYS == (0, 4)
+    assert CLAMP_CORNER_REFLECTORS == (0, 4)
+    # A 0 count stays 0 through a clamp round-trip (byte-identical guarantee).
+    assert clamp_config(n_decoys=0).n_decoys == 0
+    assert clamp_config(n_corner_reflectors=0).n_corner_reflectors == 0
+    # Negative sliders clamp up to the 0 floor.
+    assert clamp_config(n_decoys=-5).n_decoys == CLAMP_DECOYS[0]
+    assert (clamp_config(n_corner_reflectors=-5).n_corner_reflectors
+            == CLAMP_CORNER_REFLECTORS[0])
+    # Ceilings honoured.
+    assert clamp_config(n_decoys=9999).n_decoys == CLAMP_DECOYS[1]
+    assert (clamp_config(n_corner_reflectors=9999).n_corner_reflectors
+            == CLAMP_CORNER_REFLECTORS[1])
+    # In-band values round-trip unchanged.
+    assert clamp_config(n_decoys=2).n_decoys == 2
+    assert clamp_config(n_corner_reflectors=3).n_corner_reflectors == 3
+    # A default-config build (no edits) keeps both spoofers OFF.
+    assert clamp_config().n_decoys == 0
+    assert clamp_config().n_corner_reflectors == 0
 
 
 # ---------------------------------------------------------------------------

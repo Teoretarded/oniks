@@ -108,6 +108,21 @@ class CombatConfig:
     # symmetric mirror of the enemy's trick); it EMITS (honest cost: ESM-locatable
     # + HARM-able) and does NOT auto-fire.
     n_cbr: int = 0
+    # M5 #5 ESM DECOYS + CORNER-REFLECTORS — two cheap player spoofers.  BOTH
+    # DEFAULT 0 (OFF) so the out-of-the-box battle stays BYTE-IDENTICAL: with
+    # n_decoys=0 NO decoy emitter is built (absent from _emitters() / the ELINT
+    # feed / the enemy EnemyPicture), and with n_corner_reflectors=0 NO reflector
+    # is built (the back-plot bias is never injected) — the enemy picture +
+    # back-plot clusters replay bit-for-bit.  A non-zero count plants the spoofer:
+    #   n_decoys            — radiating ESM decoys (a real emission the enemy hears
+    #                         -> it wastes a HARM package on worthless bait); the
+    #                         decoy NEVER detects anything (sim.decoys.DecoyEmitter)
+    #   n_corner_reflectors — passive false RF returns that bias a REAL launch's
+    #                         back-plot toward a fake coast point (an EXTRA biased
+    #                         BackPlotEntry through the SHARED back_plot_surface
+    #                         path) so the enemy salvo scatters onto empty dirt
+    n_decoys: int = 0
+    n_corner_reflectors: int = 0
     # M3-F4 seeded map preset (0 OPEN SEA / 1 ARCHIPELAGO / 2 NARROW STRAIT /
     # 3 FJORD COAST). DEFAULT 0 so the out-of-the-box battle map is
     # BYTE-IDENTICAL: world/generation.make_field(0, seed) returns the default
@@ -198,6 +213,13 @@ CLAMP_BUK:           tuple = (0, 2)
 # byte-identical out-of-the-box battle).  Ceiling 2 (a small early-warning fit,
 # mirroring CLAMP_BUK).
 CLAMP_CBR:           tuple = (0, 2)
+# M5 #5 ESM decoys + corner reflectors: both floors 0 (OFF default survives a
+# clamp_config round-trip — the setup-default path runs every field through
+# clamp_config; clamping either from 0 with a (1, ..) range would silently plant
+# a spoofer and break the byte-identical out-of-the-box battle).  Ceiling 4 (a
+# small spoofer loadout, mirroring CLAMP_SWARM_PODS).
+CLAMP_DECOYS:             tuple = (0, 4)
+CLAMP_CORNER_REFLECTORS:  tuple = (0, 4)
 CLAMP_DRONES:        tuple = (0, 3)
 CLAMP_ONIKS:         tuple = (1, 5)     # Oniks launchers (2 tubes each)
 CLAMP_S300:          tuple = (1, 2)     # S-300 launchers (4 tubes each)
@@ -304,6 +326,8 @@ def clamp_config(
     buk_9m338_ammo: int = CombatConfig.buk_9m338_ammo,
     buk_mag_reload_s: float = CombatConfig.buk_mag_reload_s,
     n_cbr: int = CombatConfig.n_cbr,
+    n_decoys: int = CombatConfig.n_decoys,
+    n_corner_reflectors: int = CombatConfig.n_corner_reflectors,
     map_preset: int = CombatConfig.map_preset,
     n_subs: int = CombatConfig.n_subs,
     sub_kalibr_ammo: int = CombatConfig.sub_kalibr_ammo,
@@ -339,6 +363,8 @@ def clamp_config(
     lo_sc, hi_sc = CLAMP_SWARM_CELLS
     lo_bk, hi_bk = CLAMP_BUK
     lo_cbr, hi_cbr = CLAMP_CBR
+    lo_dec, hi_dec = CLAMP_DECOYS
+    lo_cr, hi_cr = CLAMP_CORNER_REFLECTORS
     lo_su, hi_su = CLAMP_SUBS
     lo_sb, hi_sb = CLAMP_SONOBUOYS
     lo_asw, hi_asw_ammo = CLAMP_ASW_AMMO
@@ -381,6 +407,8 @@ def clamp_config(
         buk_9m338_ammo=clamp_field(int(buk_9m338_ammo), lo_am, hi_am),
         buk_mag_reload_s=clamp_field(float(buk_mag_reload_s), lo_re, hi_re),
         n_cbr=clamp_field(int(n_cbr), lo_cbr, hi_cbr),
+        n_decoys=clamp_field(int(n_decoys), lo_dec, hi_dec),
+        n_corner_reflectors=clamp_field(int(n_corner_reflectors), lo_cr, hi_cr),
         map_preset=clamp_field(int(map_preset), lo_mp, hi_mp),
         n_subs=clamp_field(int(n_subs), lo_su, hi_su),
         sub_kalibr_ammo=clamp_field(int(sub_kalibr_ammo), lo_sk, hi_sk),

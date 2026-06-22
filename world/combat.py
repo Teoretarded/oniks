@@ -144,9 +144,11 @@ from sim.arsenal import (BASTION_K, BUK_AGILE, BUK_LONG, BUK_TEL, KALIBR_PL,
 from sim.asbm import AsbmMissile
 from sim.bases import (DIMS_TEL as _BUK_STRUCT_DIMS, HP_S300_TEL as _BUK_STRUCT_HP,
                        Structure, apply_missile_hits_structures)
-from sim.commander import EnemyCommander
+from sim.commander import (EnemyCommander, BACKPLOT_ERR_FRAC,
+                           back_plot_surface)
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
 from sim.counter_battery import CBR_ANTENNA_M, CBR_RANGES, CbrTracker
+from sim.decoys import CornerReflector, DecoyEmitter, biased_back_plot
 import sim.ew as ew
 from sim.enemy_air import (FS_ON_STATION, FS_PARKED, FS_TAKEOFF, FS_TRANSIT,
                            LOADOUT_CAP, LOADOUT_SEAD, LOADOUT_STRIKE,
@@ -251,6 +253,28 @@ BUK_RADAR_RANGES = {            # size class -> max detection range (m)
 # NOTHING is built (byte-identical default battle).
 CBR_SITE_XZ = (8_000.0, -1_500.0)   # home coast, just inland of the z=0 waterline
 CBR_LAUNCHER_SPACING_M = 12.0       # side-by-side gap for multiple CBR masts
+
+# M5 #5 ESM decoy emitter + corner-reflector decoy placement (fixed home-coast
+# emplacements, like the radar-station / CBR / Buk sites — the player's static
+# spoofers, deterministic so a same-seed battle replays bit-for-bit; the reserved
+# [seed, 10] stream is therefore unused, mirroring the CBR's deterministic site).
+#   DECOY: its own coastal bait site, well clear of the real radar station + every
+#   firing TEL so a HARM drawn onto it is purely wasted (the enemy localizes the
+#   emission and the EXISTING _doctrine_blind sends a package at the decoy id).
+#   CORNER REFLECTOR: a few km EAST of the Bastion pad on the coast-setback line
+#   (z = HOME_COAST_Z - BACKPLOT_COAST_SETBACK_M = -300) where a real level-skimmer
+#   launch back-plots — close enough (< sim.decoys.CR_INFLUENCE_M = 8 km) to capture
+#   that launch's fix, but >> SEEKER_BASKET_M from every real firing TEL so the
+#   biased cluster scatters the salvo onto empty dirt.
+DECOY_SITE_XZ = (20_000.0, -1_500.0)   # isolated coastal bait emitter site
+DECOY_SPACING_M = 600.0                # gap between multiple decoy masts
+DECOY_STRUCT_DIMS = (3.0, 3.0, 8.0)    # a cheap mast/cab footprint
+DECOY_STRUCT_HP = 1                    # soft: one HARM/TLAM hit kills the bait
+CR_SITE_XZ = (5_000.0, -300.0)         # fake coastal battery point off the pad
+CR_SPACING_M = 1_500.0                 # gap between multiple reflector clusters
+CR_STRUCT_DIMS = (4.0, 4.0, 4.0)       # an inflatable corner-reflector cluster
+CR_STRUCT_HP = 1                       # soft: a round into it is a satisfying waste
+DECOY_RNG_TAG = 10                     # reserved determinism tag (placement is fixed)
 
 COMBAT_SITES = [
     {"id": "radar_player_00", "kind": "radar",
@@ -659,6 +683,23 @@ class CombatWorld(WorldState):
         self.cbr_cues: list = []
         self._build_cbr(self.n_cbr)
 
+        # M5 #5 ESM DECOYS + CORNER-REFLECTORS.  DEFAULT n_decoys=0 /
+        # n_corner_reflectors=0 -> both lists stay EMPTY: no decoy emitter is
+        # built (absent from the _feed_enemy_picture emitter accrual), no reflector
+        # is built (the back-plot bias hook is never reached), so the enemy picture
+        # (emitters + back-plots + clusters) is BYTE-IDENTICAL.  The decoy EMITTER
+        # is a DecoyEmitter (radar duck-type, EMPTY ranges -> bait, never detects)
+        # the enemy ESM hears on the SAME accrual as the radar station + CBR; the
+        # CORNER-REFLECTOR is a passive false RF return that biases a REAL launch's
+        # back-plot through the SHARED back_plot_surface path.  The destructible
+        # Structures are appended below with the other wrappers.  Placement is
+        # fixed/deterministic (the reserved [seed, DECOY_RNG_TAG=10] stream unused).
+        self.n_decoys = int(config.n_decoys)
+        self.n_corner_reflectors = int(config.n_corner_reflectors)
+        self._decoy_emitters: list = []
+        self._corner_reflectors: list = []
+        self._build_decoys(self.n_decoys, self.n_corner_reflectors)
+
         # M5 #1: a Transport subclasses Destroyer for the hull/damage/racetrack,
         # but it is NOT a combatant — it carries no radar (radar is None) and no
         # weapons, so it must be EXCLUDED from the fire-control / strike /
@@ -783,6 +824,32 @@ class CombatWorld(WorldState):
             self.structures.append(Structure(
                 f"cbr_{i:02d}", "radar_station", np.asarray(r.pos).copy(),
                 on_destroyed=lambda _s, _r=r: setattr(_r, "alive", False)))
+        # M5 #5: one destructible Structure per DECOY emitter.  Kind "decoy" is NOT
+        # in sim/bases.py's locked HP/dims tables, so dims + hp pass explicitly
+        # (soft: HP=1 so a HARM/TLAM kills the bait on the first hit).  on_destroyed
+        # clears the DecoyEmitter.alive so the _feed_enemy_picture decoy accrual
+        # goes ``heard`` False and the fix decays — the bait drops out of the enemy
+        # picture with its mast.  ``defeated`` checks only bastion_tel, so a decoy
+        # death never trips the lose condition.  Empty at n_decoys=0 (byte-id).
+        for d in self._decoy_emitters:
+            self.structures.append(Structure(
+                f"{d.radar_id}_struct", "decoy", np.asarray(d.pos).copy(),
+                dims=DECOY_STRUCT_DIMS, hp=DECOY_STRUCT_HP,
+                on_destroyed=lambda _s, _d=d: setattr(_d, "alive", False)))
+        # M5 #5: one destructible Structure per CORNER REFLECTOR (kind "corner_
+        # reflector", explicit dims + HP=1).  on_destroyed clears the reflector's
+        # ``alive`` so the back-plot bias hook stops planting biased fixes — the
+        # spoof dies with the decoy.  A round that aims at the reflector-biased
+        # cluster centroid finds THIS structure within the seeker basket (a
+        # satisfying waste) until it is rubble, then dirt.  ``defeated`` checks only
+        # bastion_tel, so a reflector death never trips the lose condition.  Empty
+        # at n_corner_reflectors=0 (byte-identical default).
+        for cr in self._corner_reflectors:
+            self.structures.append(Structure(
+                f"{cr.reflector_id}_struct", "corner_reflector",
+                np.asarray(cr.pos).copy(),
+                dims=CR_STRUCT_DIMS, hp=CR_STRUCT_HP,
+                on_destroyed=lambda _s, _c=cr: setattr(_c, "alive", False)))
         # ---- M5 #4 SHOOT-AND-SCOOT: relocatable firing-TEL registry ----
         # GENERIC over the THREE firing TELs the back-plot targets (Bastion /
         # S-300 / Buk): one descriptor per launcher binds its live pad position,
@@ -2179,6 +2246,22 @@ class CombatWorld(WorldState):
             if cbr_heard:
                 pic.mark_emitter_alive(cbr.radar_id)
 
+        # M5 #5 ESM DECOY EMITTERS: each live, emitting decoy is a PLAYER emitter
+        # the enemy ESM hears on the SAME functional-ESM accrual as the radar
+        # station + CBR (no range gate; gated on alive + emitting + an enemy
+        # platform surviving to hear it).  A matured fix is a real, located
+        # EmitterIntel the EXISTING _doctrine_blind will send a HARM package at
+        # (the bait is wasted) — NO commander decision code is touched, the AI is
+        # fooled only because its sensors genuinely heard the decoy.  Killing the
+        # decoy Structure clears decoy.alive (the wrapper's on_destroyed) -> heard
+        # goes False and the fix DECAYS.  At n_decoys=0 _decoy_emitters is empty ->
+        # this loop is a no-op (byte-identical default battle).
+        for d in self._decoy_emitters:
+            d_heard = (d.alive and d.emitting and any_enemy_alive)
+            pic.update_emitter(d.radar_id, d.pos, d_heard, dt_s, now)
+            if d_heard:
+                pic.mark_emitter_alive(d.radar_id)
+
         detectors = self._enemy_sensor_radars()
 
         # Player missiles -> track store + launch back-plot (first-seen
@@ -2231,10 +2314,24 @@ class CombatWorld(WorldState):
             # "kh31p" for a detected player ARM) — drives the ARM-EMCON counter
             # (M2-T3). Fog-honest: stamped only on a physical detection above,
             # never a truth read of the round's intent.
+            # M5 #5 corner-reflector bias hook: remember whether this launch was
+            # ALREADY back-plotted, then run the normal enemy back-plot.  If a
+            # REAL fix was planted THIS step (the enemy genuinely localized the
+            # launch) AND a live reflector lies within its influence of the honest
+            # plot, mirror an EXTRA biased BackPlotEntry (sim.decoys.biased_back_
+            # plot -> the SHARED back_plot_surface path) — a real false-return
+            # geometry, never a miss flag.  Gated on _corner_reflectors so
+            # n_corner_reflectors=0 leaves the back-plot pipeline byte-identical.
+            reflect = bool(self._corner_reflectors)
+            had_bp = reflect and any(
+                bp.track_id == rec["track_id"] for bp in pic._back_plots)
             self.commander.process_missile_track(
                 rec["track_id"], m.pos, m.vel, now, rec["first_t"],
                 rec["first_pos"], rec["first_vel"], rec["det_pos"],
                 kind=getattr(getattr(m, "weapon", None), "weapon_id", None))
+            if reflect and not had_bp and any(
+                    bp.track_id == rec["track_id"] for bp in pic._back_plots):
+                self._inject_reflector_backplots(rec, now)
         self._cmd_missile_intel = {
             k: v for k, v in self._cmd_missile_intel.items()
             if k in live_keys}
@@ -2457,11 +2554,18 @@ class CombatWorld(WorldState):
             if sead:
                 # The HARMs home on the actual EMITTER object — the
                 # seeker physically chases emissions and the silence
-                # degradation lives in sim/strike.py.  One child rng per
-                # jet seeds the deterministic miss offsets.
+                # degradation lives in sim/strike.py.  Resolve the order's
+                # emitter id to the live emitter the commander chose to blind
+                # (the radar station, a CBR mast, or an ESM DECOY) so the round
+                # physically chases THAT emission — a HARM drawn onto a decoy must
+                # fly at the decoy, not the real radar (else the M5 #5 bait is
+                # inert in real play).  Defaults to the radar station, so with no
+                # CBR/decoy built the only emitter id resolves to radar_station ->
+                # BYTE-IDENTICAL to the legacy hardcode.  One child rng per jet
+                # seeds the deterministic miss offsets.
                 f.execute_order({
                     "type": "sead",
-                    "target_radar": self.radar_station,
+                    "target_radar": self._emitter_by_id(order["target_id"]),
                     "rng": np.random.default_rng(
                         int(self._cmd_rng.integers(2 ** 63)))})
             else:
@@ -3281,6 +3385,84 @@ class CombatWorld(WorldState):
             out = tracker.step(inbound, self.structures, now)
             self.cbr_threats.extend(out["threats"])
             self.cbr_cues.extend(out["cues"])
+
+    # --------------------------------------------- M5 #5 ESM decoys + reflectors
+
+    def _build_decoys(self, n_decoys: int, n_reflectors: int) -> None:
+        """Build N decoy emitters + M corner reflectors at their fixed home-coast
+        sites (both 0 -> nothing built, byte-identical default).  Placement is
+        DETERMINISTIC (no RNG -> a same-seed battle replays bit-for-bit; the
+        reserved [seed, DECOY_RNG_TAG] stream is unused, mirroring the CBR site).
+        Each decoy is a DecoyEmitter (radar duck-type, EMPTY ranges -> heard by the
+        enemy ESM but NEVER detects anything); each reflector is a passive
+        CornerReflector.  Their destructible Structures are appended in __init__."""
+        dx0, dz = DECOY_SITE_XZ
+        for i in range(max(0, int(n_decoys))):
+            x = dx0 + i * DECOY_SPACING_M
+            y = float(terrain_height_scalar(x, dz))
+            self._decoy_emitters.append(
+                DecoyEmitter(f"decoy_{i:02d}",
+                             np.array([x, y, dz], dtype=np.float64)))
+        cx0, cz = CR_SITE_XZ
+        for i in range(max(0, int(n_reflectors))):
+            x = cx0 + i * CR_SPACING_M
+            y = float(terrain_height_scalar(x, cz))
+            self._corner_reflectors.append(
+                CornerReflector(f"corner_reflector_{i:02d}",
+                                np.array([x, y, cz], dtype=np.float64)))
+
+    def _inject_reflector_backplots(self, rec: dict, now: float) -> None:
+        """Plant ONE biased BackPlotEntry per live corner reflector that lies
+        within its influence of THIS launch's honest back-plot.
+
+        Called from _feed_enemy_picture ONLY when the enemy genuinely back-plotted
+        the launch this step (so the spoof always rides a REAL sensor event).  The
+        biased XZ comes from the SHARED back_plot_surface (via biased_back_plot),
+        and the EXTRA fix is added through the SAME add_back_plot path the enemy
+        uses — a real false-return geometry, NEVER a miss flag or truth edit.  A
+        reflector out of influence (biased == the honest plot) plants nothing, and
+        each reflector plants at most ONE fix per launch (a distinct track id), so
+        BACKPLOT_FIXES_NEEDED distinct launches form a normal cluster on the decoy
+        coast that the EXISTING commander targets like any other."""
+        pic = self.commander.picture
+        first_pos = rec["first_pos"]
+        first_vel = rec["first_vel"]
+        plain = back_plot_surface(first_pos, first_vel)
+        if plain is None:
+            return
+        det = rec["det_pos"]
+        det_range = float(np.hypot(float(first_pos[0]) - float(det[0]),
+                                   float(first_pos[2]) - float(det[2])))
+        error_m = det_range * BACKPLOT_ERR_FRAC
+        for cr in self._corner_reflectors:
+            if not cr.alive:
+                continue
+            biased = biased_back_plot(first_pos, first_vel, cr)
+            if biased is None or biased == plain:
+                continue                       # reflector out of influence
+            cr_track_id = f"{rec['track_id']}_cr_{cr.reflector_id}"
+            if any(bp.track_id == cr_track_id for bp in pic._back_plots):
+                continue                       # already planted for this launch
+            pic.add_back_plot(
+                estimated_xz=np.array([biased[0], biased[1]],
+                                      dtype=np.float64),
+                error_m=error_m, sim_time=now, track_id=cr_track_id)
+
+    def _emitter_by_id(self, emitter_id):
+        """Resolve an enemy-picture emitter id to the live PLAYER emitter object a
+        HARM seeker should home: the radar station, a CBR mast, or an ESM DECOY.
+        Defaults to the radar station, so with no CBR/decoy built the only emitter
+        id resolves to self.radar_station -> byte-identical to the legacy SEAD
+        hardcode (the resolver only ever diverges when a decoy/CBR is built)."""
+        if emitter_id == self.radar_station.radar_id:
+            return self.radar_station
+        for r in self._cbr_radars:
+            if r.radar_id == emitter_id:
+                return r
+        for d in self._decoy_emitters:
+            if d.radar_id == emitter_id:
+                return d
+        return self.radar_station
 
     @property
     def buk_9m317_launcher_armed(self) -> bool:

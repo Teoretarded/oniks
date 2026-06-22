@@ -1209,3 +1209,74 @@ playtested by hand.
   `bba4b1b5…`. The DUEL (`test_sm2_statistics`) is BIT-IDENTICAL (untouched path).
 - Tests: `tests/test_backplot_helper.py` (Task A), `tests/test_backplot_reliability.py`
   (Task B, two-sided + measured, slow real-world world-sim gates marked `slow`).
+
+## M5 #5 — ESM decoys + corner-reflector back-plot decoys (2026-06-22) — M5 COMPLETE
+
+The LAST M5 feature, finished in LEAN MODE: a prior agent workflow wrote the pure
+module + (red) integration tests but CRASHED after ~7.7 h (API ConnectionRefused
+overnight) before doing ANY world wiring — leaving uncommitted, unreviewed files.
+The orchestrator took over directly (config + world integration + test fixes),
+self-gated, and ran ONE bounded independent review agent (PASS, no blockers).
+
+- **What it is:** two cheap PLAYER spoofers. (1) a DECOY EMITTER
+  (`sim/decoys.DecoyEmitter` — a Radar duck-type with EMPTY ranges so it is HEARD
+  by the enemy ESM but NEVER detects anything) draws the enemy commander's HARM
+  package onto worthless bait. (2) a CORNER REFLECTOR
+  (`sim/decoys.CornerReflector` + the pure `biased_back_plot` helper) plants a
+  false RF return that biases a REAL launch's back-plot toward a fake coast point,
+  forming a decoy `LaunchCluster` so the enemy TLAM/JASSM salvo scatters onto
+  empty dirt while the real TEL survives.
+- **Honesty contract (the central one) — HELD:** the AI is fooled ONLY because its
+  SENSORS are fooled. `sim/commander.py` is BYTE-UNCHANGED (the commander already
+  iterates `picture.emitters` + clusters). The decoy rides the SAME
+  `_feed_enemy_picture` emitter accrual (`pic.update_emitter`) as the radar
+  station + CBR; the reflector bias is an EXTRA `BackPlotEntry` added through the
+  SAME `add_back_plot` path + the SHARED `back_plot_surface` (no truth read, no
+  "miss" flag, no decision edit). Independent reviewer grepped + confirmed.
+- **Inert-feature bug FIXED (the implementer's tests missed it):** SEAD launches
+  hardcoded `target_radar = self.radar_station`, so a HARM "at the decoy" would
+  have flown at the REAL radar (the M2-GATE "inert in real play" trap). Added
+  `_emitter_by_id(order["target_id"])` resolving the order's emitter id to the
+  live emitter the commander chose (radar station / CBR mast / decoy) — guarded
+  byte-identical (only the radar-station id exists at default, so it resolves to
+  `radar_station`). Reviewer confirmed it is a correct improvement (and now a
+  HARM-at-CBR also honestly homes the CBR), no regression.
+- **Test correction (implementer opinion → architecture):** the implementer's
+  `test_decoy_in_emitters_when_lit` checked `_emitters()` — the ENEMY-radar list
+  the PLAYER's drone ELINT hears; a player decoy there is a FOG LEAK. Rewrote it
+  to verify `_decoy_emitters` + assert NO leak into `_emitters()`. Also tightened
+  the reviewer-flagged weak `test_decoy_death_clears_emitter_via_structure`
+  (was a vacuous `fix_progress <= 1.0`) to be load-bearing: mature a fix → HARM
+  BDA + structure death → prove a dead decoy is NEVER re-lit and its fix decays.
+- **MEASURED (`tools/probe_decoys.py`):** decoy lit + real radar SILENT → commander
+  schedules a HARM at `target_id == decoy_00`; decoy `detects()` False for every
+  size class; a reflector (5 km off the Bastion pad, on the z=−300 coast-setback
+  line) pulls the back-plot **5,097 m off the real pad** → `_refine_strike_aim`
+  finds no real structure within `SEEKER_BASKET_M` → **empty dirt, TEL survives**;
+  symmetry drift (far reflector) 0.000 m. The biased fix lands ~4.3 km from the
+  real back-plot (> `BACKPLOT_CLUSTER_R_M` 3 km) so it forms a SEPARATE decoy
+  cluster — the reflector ADDS a false target, it does NOT make the player
+  invulnerable (spec balance: real fixes outvote if you keep firing from the pad).
+- **BYTE-IDENTICAL DEFAULT (the gate):** `n_decoys=0`/`n_corner_reflectors=0` (both
+  default 0, `CLAMP_*=(0,4)` floor 0 surviving a `clamp_config` round-trip) build
+  nothing, so every new loop/hook is a no-op. `tools/wf_decoy_digest.py` (hashes
+  ships+missiles+events AND `commander.picture.emitters+_back_plots+clusters` over
+  6000 steps) is bit-identical pre/post: HEAD `7fdfd6d1…` == post-change
+  `7fdfd6d1…`. Duel (`test_sm2_statistics`) bit-identical (7/7).
+- **Files:** NEW `sim/decoys.py`, `tests/test_decoy_emitter.py` (8),
+  `tests/test_corner_reflector.py` (13), `tools/probe_decoys.py`,
+  `tools/wf_decoy_digest.py`; `world/combat.py` (+decoy/reflector build, structures,
+  `_feed_enemy_picture` accrual + reflector bias hook, `_build_decoys`,
+  `_inject_reflector_backplots`, `_emitter_by_id`), `world/combat_config.py`
+  (`n_decoys`/`n_corner_reflectors` + CLAMPs + clamp_config), `tests/test_combat_config.py`.
+- **Known nuance (default-off, flag for playtest):** `PantsirDefenseController`
+  protects every player structure, so at `n_decoys>0` a Pantsir may also defend a
+  decoy — harmless (the enemy HARM is wasted either way; byte-identical at default).
+- **Gate (orchestrator-verified personally):** full suite `python -m pytest -q -n auto`
+  exit 0 (1325 collected, all green), smoke 70/70 exit 0, duel bit-identical,
+  byte-identical digest identical, probe measured. Bounded review agent: PASS, no
+  blockers/majors. Deferred per the handoff: tactical-map decoy/CR markers + HUD
+  decoy line + emit toggle (UI-wiring pass); dedicated meshes (model pass).
+- **NOTE on test runner:** the suite is now ~1325 tests; serial `pytest -q` is
+  ~22 min (1 core). `pytest-xdist` was installed 2026-06-22 — ALWAYS run
+  `pytest -q -n auto` (~13 min). See memory `test-suite-parallel`.
