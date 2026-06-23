@@ -20,7 +20,7 @@ roll (physics-not-dice):
 
   * DETERMINISM: :func:`compute_par` draws its small per-seed jitter from a
     FRESH standalone ``np.random.default_rng([seed, PAR_TAG])`` on a DEDICATED
-    free tag (tags 3-14 are taken by sim child streams; 15 is reserved here) so
+    free tag (tags 3-15 are taken by sim child streams; 16 is reserved here) so
     it never touches/interleaves with any sim RNG.  No wall-clock.
 
 The shell (game/combat.py) owns a telemetry dict (see :func:`new_telemetry`)
@@ -36,10 +36,12 @@ from typing import Optional
 
 import numpy as np
 
-# Dedicated free child-stream tag for the PAR jitter.  Tags 3-14 are consumed by
-# the sim's [seed, tag] child streams; 15 is reserved for scoring so the PAR rng
-# never interleaves with a sim stream (determinism contract).
-PAR_TAG: int = 15
+# Dedicated free child-stream tag for the PAR jitter.  Tags 3-15 are consumed by
+# the sim's [seed, tag] child streams (3 fleet / 4 recon / 5 commander / 6 pantsir
+# / 7 enemy-radars / 8 ARM-EW-Buk / 9 CBR-salvo / 10 decoys / 11 relocate / 12 map
+# / 13 sub / 14 sonar / 15 amphibious); 16 is reserved for scoring so the PAR rng
+# is a fresh standalone generator that never interleaves with a sim stream.
+PAR_TAG: int = 16
 
 
 # --------------------------------------------------------------- telemetry
