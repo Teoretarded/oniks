@@ -1,10 +1,12 @@
 """CAMPAIGN (M6) — chain of seeded battles with carried-forward attrition.
 
 Pure, GL-free, JSON-persistable.  Wraps the single-battle CombatConfig flow into
-a chain of N battles.  Between battles: the player's offensive magazines + base
-damage CARRY FORWARD (the finite-magazine economy becomes a campaign resource),
-a SCARCE resupply tranche (scaled by the battle grade) tops the ledger back up,
-and the enemy ESCALATES via the EXISTING CombatConfig counts.
+a chain of N battles.  Between battles: the player's offensive magazines CARRY
+FORWARD (the finite-magazine economy becomes a campaign resource), a SCARCE
+resupply tranche (scaled by the battle grade) tops the ledger back up, and the
+enemy ESCALATES via the EXISTING CombatConfig counts.  v1 carries AMMO ONLY;
+base-damage persistence is deferred to the campaign-loop pass (it needs an
+on_destroyed-aware ingest + defeat-ends-campaign semantics — see world_snapshot).
 
 NON-NEGOTIABLES honoured here:
   * LOCKED SCHEMA — campaign adds NO new frozen CombatConfig field.  Per-battle
@@ -134,37 +136,37 @@ def next_config(campaign: CampaignState,
 # --------------------------------------------------------------- snapshot
 
 def world_snapshot(world) -> dict:
-    """Capture the END-STATE offensive ledger + per-structure damage from a live
-    world (duck-typed: any object exposing the WEAPONS attrs + ``structures``).
+    """Capture the END-STATE offensive ledger from a live world (duck-typed: any
+    object exposing the WEAPONS attrs).
 
-    A ``None`` pool (the SANDBOX infinite Oniks) reads as 0 here, but campaigns
-    only ever run real CombatWorlds where every pool is an int."""
+    v1 carries AMMO ONLY: base-damage persistence is DEFERRED to the campaign-loop
+    pass, where it needs an on_destroyed-aware ingest (a carried-dead radar must
+    fire its kill closure, not merely flip a flag — else the live radar/Pantsir
+    desyncs) and defeat-ends-campaign semantics (a destroyed bastion = you LOST the
+    campaign, not a pre-defeated next battle).  Carrying it naively desynced the
+    sensor + started the next battle already defeated (critique F2/F16/F19), so
+    base_damage stays empty until that pass.  A ``None`` pool (SANDBOX infinite
+    Oniks) reads as 0, but campaigns only ever run real CombatWorlds (int pools)."""
     ledger: dict = {}
     for weapon, (attr, _cap) in WEAPONS.items():
         v = getattr(world, attr, None)
         ledger[weapon] = int(v) if v is not None else 0
-    base_damage: dict = {}
-    for s in getattr(world, "structures", ()):
-        sid = getattr(s, "structure_id", None)
-        if sid is not None:
-            base_damage[sid] = float(getattr(s, "hp", 0.0))
-    return {"ledger": ledger, "base_damage": base_damage}
+    return {"ledger": ledger, "base_damage": {}}
 
 
 def initial_state_for(campaign: CampaignState) -> Optional[dict]:
     """Build the ``initial_state`` dict the next battle's CombatWorld ingests
     (applied AFTER ``_arm_magazines``), keyed by the LIVE world attribute names
     so the world ingest is a flat setattr.  Returns ``None`` for a fresh battle 0
-    with no carry-forward (so the default arming path is byte-identical)."""
-    if not campaign.ledger and not campaign.base_damage:
+    with no carry-forward (so the default arming path is byte-identical).  v1
+    carries AMMO ONLY (see world_snapshot)."""
+    if not campaign.ledger:
         return None
     st: dict = {}
     for weapon, (attr, _cap) in WEAPONS.items():
         if weapon in campaign.ledger:
             st[attr] = int(campaign.ledger[weapon])
-    if campaign.base_damage:
-        st["structure_hp"] = {k: float(v) for k, v in campaign.base_damage.items()}
-    return st
+    return st or None
 
 
 # --------------------------------------------------------------- resupply

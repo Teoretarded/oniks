@@ -274,5 +274,16 @@ def test_s300_salvo_stops_when_battery_empties():
     assert len(w.sam_launches) == 1 and not q.active
 
 
-def test_fan_tag_is_a_named_constant():
-    assert isinstance(FAN_TAG, int)                   # the [seed, FAN_TAG, ...] tag
+def test_fan_tag_does_not_alias_an_allocated_sim_stream():
+    """The FAN child stream default_rng([seed, FAN_TAG, ordinal]) must NOT alias
+    any allocated sim stream default_rng([seed, tag]).  NumPy SeedSequence drops a
+    trailing-zero entry, so [s, t, 0] == [s, t]; with FAN_TAG inside the allocated
+    range (3-16) the ordinal-0 round would silently share a sim stream's draws
+    (the latent landmine the critique caught).  FAN_TAG owns a disjoint tag, and
+    its ordinal-0 draw differs from every allocated [seed, tag] stream."""
+    assert FAN_TAG not in range(3, 17), "FAN_TAG must be outside the allocated 3-16 sim tags"
+    s = 1337
+    fan0 = int(np.random.default_rng([s, FAN_TAG, 0]).integers(0, 2 ** 31))
+    for tag in range(3, 17):
+        other = int(np.random.default_rng([s, tag]).integers(0, 2 ** 31))
+        assert fan0 != other, f"FAN ordinal-0 stream aliases the [seed,{tag}] sim stream"

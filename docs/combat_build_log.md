@@ -1469,3 +1469,45 @@ end-overlay NEXT BATTLE are the deferred UI-wiring pass.
 - DEFERRED (UI-wiring pass): game/campaign_screen.py CampaignHubState (ladder +
   ledger + resupply + START), main.py CAMPAIGN menu wiring, game/states.py
   MAIN_ITEMS, game/combat_end.py campaign-aware NEXT BATTLE.
+
+## M6 critique close-out — adversarial council FIX-THEN-SHIP, 4 FIX-NOW resolved (2026-06-23)
+
+Ran the /critique council (4 INDEPENDENT critics — correctness / future-proofing /
+security-safety / fog-physics-determinism — + a rebuttal round + chair; script
+`tools/wf_critique_council.js`, dossier `docs/reviews/critique_dossier_m6.md`).
+Verdict: FIX-THEN-SHIP. The 4 FIX-NOW findings (all REPRODUCED by the critics,
+all fixed here):
+- **F9/F20 salvo FAN rng tag collision:** `default_rng([seed,9,0]) ==
+  default_rng([seed,9])` (NumPy SeedSequence drops a trailing-zero entry), so the
+  FAN ordinal-0 stream ALIASED the CBR-reserved `[seed,9]` tag — a latent
+  determinism landmine (CBR draws no rng yet). FAN_TAG 9 -> 17 (a dedicated tag
+  outside the allocated 3-16 range; 9 left free for CBR). The tautological
+  `test_fan_tag_is_a_named_constant` replaced by
+  `test_fan_tag_does_not_alias_an_allocated_sim_stream` (proves `[seed,17,0]`
+  differs from every `[seed,3..16]`).
+- **F2/F16/F19 campaign dead-structure ingest:** `apply_initial_state` set
+  `struct.alive=False` inline (bypassing the on_destroyed closures -> live
+  radar/Pantsir DESYNC) and a carried-dead bastion started the next battle
+  pre-defeated (`advance` has no won/lost guard). RESOLVED by scoping campaign
+  carry-forward to AMMO ONLY in v1: `world_snapshot`/`initial_state_for` no longer
+  capture/emit `structure_hp`, and `apply_initial_state` ignores it. Base-damage
+  persistence is DEFERRED to the campaign-loop pass (where the on_destroyed-aware
+  ingest + defeat-ends-campaign semantics belong).
+- **F-dual-maintenance clamp parity:** `next_config` does
+  `clamp_config(**asdict(base))`; a future CombatConfig field-add without the
+  matching `clamp_config` param would TypeError the WHOLE campaign launch. Pinned
+  by `test_clamp_config_accepts_every_combatconfig_field` (42==42 field/param
+  parity + the round-trip).
+- **OK-FOR-NOW (deferred, unreachable until the campaign UI / salvo UX land):**
+  `campaign.load()` fail-safe, ammo clamp, TOT single-aim stagger, salvo
+  `cancel()`/KEYUP, grade-A-on-defeat, a few docstring lies.
+- **UNVERIFIABLE:** the "shared-global RNG" root-cause hypothesis (no mechanism
+  found in sim/+world/), corner-reflector END-TO-END protection (no critic drove
+  a cluster targetable within the probe budget).
+- **CONTESTED:** the intermittent xdist failure at `test_phase5b_e2e.py:202` is the
+  KNOWN pre-existing order-flake (1/3 for one critic, 0/16 across three others) —
+  NOT an M5/M6 regression.
+- **SOLID (council):** byte-identical default + determinism + the fog/no-cheat
+  boundary held across every M5/M6 feature.
+Gate: 124 targeted green, default digest == HEAD 7d5716325a..., duel bit-identical,
+smoke 80/80, bug-hunt 6/6 (campaign chain clean under ammo-only carry).

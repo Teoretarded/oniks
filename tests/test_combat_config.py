@@ -331,6 +331,31 @@ def test_clamp_config_decoys_and_reflectors():
 
 
 # ---------------------------------------------------------------------------
+# M6 campaign: clamp_config <-> CombatConfig field parity (campaign launch guard)
+# ---------------------------------------------------------------------------
+
+def test_clamp_config_accepts_every_combatconfig_field():
+    """game.campaign.next_config does clamp_config(**dataclasses.asdict(base)).  If
+    a CombatConfig field is ever ADDED without the matching clamp_config keyword
+    param, that splat raises TypeError and kills the WHOLE campaign launch path
+    (critique F-dual-maintenance).  Pin the 1:1 parity so such an add fails HERE,
+    loudly, instead of silently breaking campaign."""
+    import dataclasses
+    import inspect
+    cfg_fields = {f.name for f in dataclasses.fields(CombatConfig)}
+    params = set(inspect.signature(clamp_config).parameters)
+    missing = cfg_fields - params
+    assert not missing, (
+        f"clamp_config is missing a keyword param for CombatConfig field(s): "
+        f"{sorted(missing)} — next_config's clamp_config(**asdict(base)) would "
+        f"TypeError and break the campaign launch.")
+    # the actual splat campaign relies on must not raise + must preserve values
+    base = CombatConfig()
+    rt = clamp_config(**dataclasses.asdict(base))
+    assert rt.seed == base.seed and rt.n_destroyers == base.n_destroyers
+
+
+# ---------------------------------------------------------------------------
 # M3-F4: map_preset config field, clamp and names table
 # ---------------------------------------------------------------------------
 

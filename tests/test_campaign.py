@@ -99,7 +99,7 @@ def test_world_snapshot_and_initial_state_shape():
     snap = world_snapshot(world)
     assert snap["ledger"]["oniks"] == 8           # a fresh world = full magazine
     assert set(WEAPONS).issubset(snap["ledger"])  # every tracked weapon present
-    assert snap["base_damage"]                    # captured the player structures
+    assert snap["base_damage"] == {}              # v1 ammo-only (base-damage deferred)
     # a fresh battle-0 campaign carries nothing -> the default arm path runs
     assert initial_state_for(new_campaign(1337)) is None
     camp = new_campaign(1337); camp.ledger = {"oniks": 2}
@@ -123,19 +123,20 @@ def test_ammo_carry_forward_and_none_is_byte_identical():
     assert w2._oniks_ammo == armed == 8
 
 
-def test_base_damage_carry_forward():
+def test_base_damage_not_carried_in_v1():
+    """v1 carries AMMO ONLY (critique F2/F16/F19).  A legacy structure_hp key is
+    IGNORED by apply_initial_state — structures keep their fresh hp/alive, so no
+    battle ever starts pre-defeated and no live radar/Pantsir desyncs.  Base-damage
+    carry is deferred to the campaign-loop pass."""
     cfg = CombatConfig(seed=1337)
     world = CombatWorld(cfg)
-    sid = world.structures[0].structure_id
-    world.apply_initial_state({"structure_hp": {sid: 0}})
-    s = next(s for s in world.structures if s.structure_id == sid)
-    assert s.hp == 0 and not s.alive               # entered the battle destroyed
-    # a positive carried hp is damage-but-alive
-    w2 = CombatWorld(cfg)
-    sid2 = w2.structures[0].structure_id
-    w2.apply_initial_state({"structure_hp": {sid2: 1}})
-    s2 = next(s for s in w2.structures if s.structure_id == sid2)
-    assert s2.hp == 1 and s2.alive
+    s = world.structures[0]
+    fresh_hp, fresh_alive = s.hp, s.alive
+    # even an explicit structure_hp=0 ingest must NOT touch the structure
+    world.apply_initial_state({"structure_hp": {s.structure_id: 0}})
+    assert s.hp == fresh_hp and s.alive == fresh_alive and s.alive
+    # world_snapshot does not capture base damage in v1
+    assert world_snapshot(world)["base_damage"] == {}
 
 
 def test_advance_snapshots_records_grade_and_steps():

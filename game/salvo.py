@@ -76,11 +76,13 @@ FAN_SPREAD_M = 600.0
 TOT_MARGIN_S = 2.0
 
 # Deterministic child-stream tag for the FAN aim spread: np.random.default_rng(
-# [seed, FAN_TAG, ordinal]).  Tag 9 is the spec-allocated salvo-FAN tag
-# (ROADMAP §5 determinism map: "salvo-FAN nested by ordinal"); battle_idx is
-# folded in by the caller's seed when campaign threading lands (battle_idx=0
-# collapses to today).
-FAN_TAG = 9
+# [seed, FAN_TAG, ordinal]).  Uses a DEDICATED tag (17) outside the allocated sim
+# range 3-16, NOT the contested tag 9: NumPy SeedSequence drops a trailing-zero
+# entry, so [seed, 9, 0] == [seed, 9] byte-for-byte — FAN's ordinal-0 stream would
+# alias the CBR-reserved [seed, 9] stream (ROADMAP §5 reserves 9 for CBR).  Tag 17
+# is FAN's own; 9 is left free for CBR.  (battle_idx is folded into the caller's
+# seed via campaign.derive_seed, never a tag dimension.)
+FAN_TAG = 17
 
 
 # --- Pure helpers -------------------------------------------------------------

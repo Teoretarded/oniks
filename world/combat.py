@@ -1092,32 +1092,29 @@ class CombatWorld(WorldState):
 
     # --- M6 campaign carry-forward -----------------------------------------
     def apply_initial_state(self, initial_state: dict | None) -> None:
-        """Overwrite the offensive magazine pools + per-structure damage from a
+        """Campaign carry-forward: overwrite the offensive magazine pools from a
         prior battle's snapshot (game/campaign.world_snapshot).
 
         Called by the CAMPAIGN launch path AFTER construction — exactly the way
-        ``_arm_magazines`` overrides the base counters, just one step later — so
-        a battle inherits the ammo it ended the previous battle with and any
-        structure damage it took.  The default single-battle path NEVER calls
-        this (a None/empty state is a no-op), so the out-of-the-box battle is
-        byte-identical.  Keys are LIVE world attribute names so the ingest is a
-        flat, schema-free setattr (campaign carries state OUTSIDE the locked
-        CombatConfig)."""
+        ``_arm_magazines`` overrides the base counters, one step later — so a
+        battle inherits the ammo it ended the previous battle with.  The default
+        single-battle path NEVER calls this (a None/empty state is a no-op), so
+        the out-of-the-box battle is byte-identical.  Keys are LIVE world
+        attribute names so the ingest is a flat, schema-free setattr (campaign
+        carries state OUTSIDE the locked CombatConfig).
+
+        v1 carries AMMO ONLY.  Base-damage carry-forward is deferred: a carried-
+        dead structure must fire its on_destroyed closure (else the live
+        radar/Pantsir desyncs) and a destroyed bastion means the campaign is LOST
+        (not a pre-defeated next battle) — both belong with the campaign-loop pass
+        (critique F2/F16/F19).  Any unrecognised key (e.g. a future structure_hp)
+        is ignored here, so it can never silently corrupt structure state."""
         if not initial_state:
             return
         for attr in ("_oniks_ammo", "_zircon_ammo", "_asbm_ammo", "_kh31p_ammo",
                      "sam_ammo", "sam_ammo_40n6"):
             if attr in initial_state:
                 setattr(self, attr, int(initial_state[attr]))
-        hp_map = initial_state.get("structure_hp")
-        if hp_map:
-            for s in self.structures:
-                sid = getattr(s, "structure_id", None)
-                if sid in hp_map:
-                    s.hp = int(hp_map[sid])
-                    if s.hp <= 0:
-                        s.hp = 0
-                        s.alive = False
 
     # --- terrain accessors (M3-terrain F3) --------------------------------
     # Override WorldState's module-shim accessors to read THIS world's active
