@@ -1433,3 +1433,39 @@ holds for a >=1 s real-time debounce DWELL, then EASES back toward the target ov
 - **Gate (self-verified):** targeted `pytest -q -n auto` green (test_timewarp 19 +
   controls/keybinds/sm2_statistics/hud/world_state/salvo/battery_panel), smoke 80/80
   exit 0, digest bit-identical, duel bit-identical.
+
+## M6 #5 — CAMPAIGN core (seeded battle chain + carry-forward) (2026-06-23)
+
+Last M6 feature, CORE built LEAN + verified directly (the agent workflows kept
+dying on the user's flaky wifi; the commits survived but the reviews died, so the
+orchestrator built + gated this one with durable tool calls). NEW pure module
+game/campaign.py + a world carry-forward ingest. The hub SCREEN + menu wiring +
+end-overlay NEXT BATTLE are the deferred UI-wiring pass.
+
+- DETERMINISM (the RECOMMENDED approach): each battle re-seeds via
+  derive_seed(base_seed, battle_idx) passed as config.seed — NO new tag dimension,
+  so every existing [seed, tag] sim child stream is UNTOUCHED. A standalone
+  Generator (salt 90001) picks a reproducible distinct 31-bit seed per battle.
+- LOCKED SCHEMA respected: NO new frozen CombatConfig field. Campaign state rides
+  CampaignState (seed/n_battles/battle_idx/ledger/base_damage/grades) + the world's
+  initial_state ingest. next_config(camp, base) = asdict(base) + escalated enemy
+  counts + the derived seed, ALWAYS through clamp_config (escalation monotonic, can
+  never exceed the spawnable ceiling).
+- CARRY-FORWARD: world_snapshot(world) captures the offensive ledger
+  (oniks/zircon/asbm/kh31p/s300_48n6/s300_40n6 world-level pools) + per-structure
+  hp; CombatWorld.apply_initial_state(st) overwrites those pools + structure hp
+  AFTER construction (a structure carried at hp<=0 enters dead). Pantsir per-unit +
+  the OFF exotics (Buk/swarm) rearm fresh in v1 (documented simplification).
+- RESUPPLY scaled by grade (S 60% / A 45% / B 30% / C 20% / D 10% of each cap,
+  capped), deterministic (no rng). advance() snapshots -> records grade ->
+  resupplies -> steps battle_idx.
+- BYTE-IDENTICAL: apply_initial_state is a NEW method the default path NEVER calls,
+  and nothing in sim/world imports game/campaign -> the default-battle digest
+  (tools/wf_m5_digest.py) == HEAD 7d5716325a..., duel bit-identical.
+- Tests: tests/test_campaign.py (12) — deterministic+distinct seeding, clamped+
+  monotonic escalation, JSON round-trip, grade-scaled capped resupply, snapshot
+  shape, ammo carry + None-is-no-op, base-damage carry, advance, completion. Gate:
+  campaign+duel green, digest == HEAD, smoke 80/80.
+- DEFERRED (UI-wiring pass): game/campaign_screen.py CampaignHubState (ladder +
+  ledger + resupply + START), main.py CAMPAIGN menu wiring, game/states.py
+  MAIN_ITEMS, game/combat_end.py campaign-aware NEXT BATTLE.
