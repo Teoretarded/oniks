@@ -110,6 +110,22 @@ EMITTER_DIAMOND_PX = 6.0
 EMITTER_RING_PX = 11.0                        # minimum on-screen ring radius
 EMITTER_RING_SEGMENTS = ELINT_CIRCLE_SEGMENTS
 
+# M5 ASW (UI-wiring pass) — sonobuoys are PLAYER-OWNED truth (cyan family,
+# like the drone); subsurface contacts (world.sub_contacts) are ACOUSTIC
+# BELIEF (estimate-violet family, like ELINT/SIGINT): an inverted chevron at
+# the est_pos + an uncertainty circle from the fix quality.  A 'datum' kind
+# (the launch-transient back-plot) draws dimmer than a buoy cross-fix.  ASW
+# rounds in flight are own-force truth (missile green, small).
+BUOY_COL = (0.50, 0.95, 1.00, 0.80)          # sonobuoy cross + ring
+BUOY_PX = 4.0
+SUB_FIX_COL = (0.85, 0.70, 0.95, 0.85)       # cross-fix chevron (belief)
+SUB_DATUM_COL = (0.85, 0.70, 0.95, 0.45)     # stale datum chevron, dimmed
+SUB_CHEVRON_PX = 7.0
+SUB_CIRCLE_MAX_M = 30_000.0                  # same clutter gate as ELINT
+ASW_ROUND_COL = (0.55, 1.00, 0.70, 0.95)     # own prosecution round
+ASW_ROUND_PX = 4.0
+BUOY_ARMED_TEXT = "BUOY DROP ARMED"          # chrome tag while modal
+
 # M3-F5 — the JAMMED corridor band + shrunken effective ring.  Drawn from the
 # SENSOR-BELIEVED jammer fix/bearing the sim publishes into world.ew_state
 # (FOG / NO CHEAT — never a real jammer's truth).  Reuses the existing belief
@@ -662,6 +678,12 @@ class TacticalMap:
         back to a plain coordinate target."""
         sandbox = self.sandbox
         world = sandbox.world
+        # M5 ASW: buoy-drop mode is MODAL — while armed (U) the click places
+        # a sonobuoy at the clicked world point and is consumed (no targeting).
+        if getattr(sandbox, "buoy_drop_armed", False):
+            wp = self.view.screen_to_world(pos)
+            if sandbox.map_drop_buoy((float(wp[0]), float(wp[1]))):
+                return
         m = pick_missile(self.view,
                          [mm for mm in world.missiles
                           if not getattr(mm, "is_hostile", False)], pos)
@@ -782,6 +804,7 @@ class TacticalMap:
         self._contacts()
         self._missiles()
         self._drone_overlay()
+        self._asw_overlay()
         self._chrome(w, h)
         if self.selected_missile is not None:    # Task RTG: live telemetry
             self.sandbox.hud.draw_flight_block(self.sandbox,
@@ -1149,6 +1172,64 @@ class TacticalMap:
             if dr.alive:
                 self.text.draw_text(sx + d + 4, sy - 9, "DRONE", col)
 
+    def _asw_overlay(self) -> None:
+        """M5 ASW picture (render-only, fog-honest):
+        - player sonobuoys at their TRUE drop points (player-owned hardware,
+          cyan family) — a small cross + ring;
+        - SUBSURFACE contacts (world.sub_contacts) at the acoustic BELIEF
+          est_pos (estimate-violet family): an inverted chevron + an
+          uncertainty circle from the fix quality; a stale launch DATUM draws
+          dimmed vs a live buoy cross-fix;
+        - own ASW rounds in flight (small green diamond).
+        Never reads world.subs (the boat's truth)."""
+        world = self.sandbox.world
+        # Sonobuoys (player truth)
+        for buoy in getattr(world, "sonobuoys", ()):
+            sx, sy = self.view.world_to_screen((buoy[0], buoy[-1]))
+            if not self._on_screen(sx, sy):
+                continue
+            b = BUOY_PX
+            self.text.draw_lines([(sx - b, sy), (sx + b, sy)], BUOY_COL, 1.5)
+            self.text.draw_lines([(sx, sy - b), (sx, sy + b)], BUOY_COL, 1.5)
+            ang = np.linspace(0.0, 2.0 * np.pi, 17)
+            self.text.draw_lines(
+                list(zip(sx + 2.0 * b * np.cos(ang), sy + 2.0 * b * np.sin(ang))),
+                (*BUOY_COL[:3], 0.35), 1.0)
+        # Subsurface contacts (acoustic belief)
+        for cid, c in getattr(world, "sub_contacts", {}).items():
+            est = c.get("pos")
+            if est is None:
+                continue
+            sx, sy = self.view.world_to_screen((float(est[0]), float(est[2])))
+            if not self._on_screen(sx, sy):
+                continue
+            col = SUB_DATUM_COL if c.get("kind") == "datum" else SUB_FIX_COL
+            d = SUB_CHEVRON_PX
+            # Inverted chevron (points DOWN: subsurface)
+            self.text.draw_lines([(sx - d, sy - d * 0.6), (sx, sy + d),
+                                  (sx + d, sy - d * 0.6)], col, 2.0)
+            label = "DATUM" if c.get("kind") == "datum" else "SSK FIX"
+            self.text.draw_text(sx + d + 4, sy - 9, label, col)
+            err = float(c.get("quality", float("inf")))
+            if err < SUB_CIRCLE_MAX_M:
+                ang = np.linspace(0.0, 2.0 * np.pi, ELINT_CIRCLE_SEGMENTS + 1)
+                self._poly_world(
+                    zip(float(est[0]) + err * np.sin(ang),
+                        float(est[2]) + err * np.cos(ang)),
+                    (*col[:3], 0.45), 1.0)
+        # Own ASW rounds (player truth)
+        for rnd in getattr(world, "asw_rounds", ()):
+            if not getattr(rnd, "alive", False):
+                continue
+            sx, sy = self.view.world_to_screen((rnd.pos[0], rnd.pos[2]))
+            if not self._on_screen(sx, sy):
+                continue
+            d = ASW_ROUND_PX
+            self.text.draw_lines([(sx, sy - d), (sx + d, sy), (sx, sy + d),
+                                  (sx - d, sy), (sx, sy - d)],
+                                 ASW_ROUND_COL, 1.5)
+            self.text.draw_text(sx + d + 3, sy - 9, "ASW", ASW_ROUND_COL)
+
     def _elint_overlay(self) -> None:
         """ELINT picture: faint bearing rays from the drone's latest
         intercept of each RECENTLY-heard emitter, and an uncertainty
@@ -1368,6 +1449,18 @@ class TacticalMap:
                     f"WPT {len(sandbox.waypoints)}   {self._target_text()}")
         lw = self.text.text_width(line)
         self.text.draw_text((w - lw) * 0.5, 16 + head_h, line, col)
+
+        # M5 ASW chrome: the finite buoy/ASW stocks (top-left, only when the
+        # battle HAS them) + a bright modal tag while buoy-drop is armed.
+        buoys = int(getattr(world, "sonobuoys_left", 0))
+        asw = int(getattr(world, "asw_ammo_left", 0))
+        if buoys > 0 or asw > 0 or getattr(world, "sonobuoys", None):
+            asw_line = f"BUOYS {buoys}   ASW {asw}"
+            self.text.draw_text(16, 16 + head_h, asw_line, STATUS_COL)
+        if getattr(sandbox, "buoy_drop_armed", False):
+            bw = self.text.text_width(BUOY_ARMED_TEXT)
+            self.text.draw_rect(12, 12, bw + 16, head_h + 8, PANEL_RGBA)
+            self.text.draw_text(20, 16, BUOY_ARMED_TEXT, HEADER_COL)
 
         lh = self.text.line_height(BODY_SIZE)
         hw = self.text.text_width(MAP_HINT)

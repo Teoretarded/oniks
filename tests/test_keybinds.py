@@ -69,6 +69,8 @@ def test_defaults_match_current_bindings(kb):
     # M6 AUTO-TIME-WARP (spec 07): T toggles event-aware auto pacing.  T was
     # unclaimed by every prior default.
     assert kb.key_for("auto_warp_toggle") == pygame.K_t
+    assert kb.key_for("buoy_drop") == pygame.K_u
+    assert kb.key_for("asw_launch") == pygame.K_k
 
 
 def test_reserved_rows_are_esc_and_f1_only():

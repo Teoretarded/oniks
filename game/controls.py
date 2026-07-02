@@ -245,6 +245,10 @@ class SandboxControls:
             sandbox.request_salvo()
         elif action == "salvo_mode":
             sandbox.cycle_salvo_mode()
+        elif action == "buoy_drop":
+            sandbox.toggle_buoy_drop()
+        elif action == "asw_launch":
+            sandbox.request_asw()
         elif action == "battery_panel":
             sandbox.toggle_battery_panel()
         elif action == "auto_warp_toggle":

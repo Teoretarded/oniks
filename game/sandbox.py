@@ -246,6 +246,16 @@ HINT_JAM_OFF = "DRONE EW POD: COLD"
 HINT_JAM_UNAVAILABLE = "DRONE EW POD: NOT FITTED"
 HINT_JAM_NO_DRONE = "DRONE EW POD: NO DRONE AIRBORNE"
 HINT_JAM_WRONG_PLATFORM = "DRONE EW POD: SELECT THE DRONE (TAB)"
+# M5 ASW UI (U buoy-drop mode / K ASW launch).  The buoy is dropped by the
+# NEXT LMB on the tactical map; the ASW round flies to the freshest LOCALIZED
+# subsurface fix (never blind — world.launch_asw refuses without one).
+HINT_BUOY_ARMED = "BUOY DROP ARMED - LMB ON MAP PLACES A SONOBUOY"
+HINT_BUOY_OFF = "BUOY DROP OFF"
+HINT_BUOY_EMPTY = "NO SONOBUOYS LEFT"
+HINT_BUOY_DROPPED = "SONOBUOY AWAY ({n} LEFT)"
+HINT_ASW_AWAY = "ASW ROUND AWAY - RUNNING TO THE FIX"
+HINT_ASW_EMPTY = "ASW MAGAZINE EMPTY"
+HINT_ASW_NO_FIX = "NO LOCALIZED SUBSURFACE FIX (CROSS-FIX WITH BUOYS)"
 # M6 salvo / ripple-fire (F): empty every ready tube of the active platform in
 # a controlled ripple.  The hints flash the mode + the count fired; an empty
 # battery or no-target salvo flashes the single-fire reason via request_launch.
@@ -354,6 +364,7 @@ class SandboxState(GameState):
         # until the player presses the salvo key).
         self.salvo_mode = "ripple"      # Y cycles RIPPLE -> FAN -> TOT
         self._salvo = SalvoQueue()
+        self.buoy_drop_armed = False    # U: next map LMB drops a sonobuoy
         self.followed = None            # camera subject the cinematic rig
         #                                 tracks: a missile, a TEL
         #                                 StaticSubject or a contact entity
@@ -561,6 +572,60 @@ class SandboxState(GameState):
             return
         drone.set_jam(not drone.jam_active)
         self.show_hint(HINT_JAM_ON if drone.jam_active else HINT_JAM_OFF)
+        self.app.audio.ui_click()
+
+    def toggle_buoy_drop(self) -> None:
+        """U (buoy_drop binding): arm/disarm BUOY-DROP mode — while armed the
+        next LMB on the tactical map places a passive sonobuoy at the clicked
+        point (M5 ASW).  Refuses (hint) with an empty stock; SANDBOX worlds
+        (no sonobuoys_left) are graceful no-ops."""
+        if self.buoy_drop_armed:
+            self.buoy_drop_armed = False
+            self.show_hint(HINT_BUOY_OFF)
+            self.app.audio.ui_click()
+            return
+        if int(getattr(self.world, "sonobuoys_left", 0)) <= 0:
+            self.show_hint(HINT_BUOY_EMPTY)
+            return
+        self.buoy_drop_armed = True
+        self.show_hint(HINT_BUOY_ARMED)
+        self.app.audio.ui_click()
+
+    def map_drop_buoy(self, world_xz) -> bool:
+        """A map LMB while buoy-drop is armed: place the buoy at the clicked
+        world point.  Disarms automatically when the stock runs out.  Returns
+        True when a buoy was placed (the click is consumed)."""
+        place = getattr(self.world, "place_sonobuoy", None)
+        if place is None or not self.buoy_drop_armed:
+            return False
+        buoy = place(world_xz)
+        if buoy is None:
+            self.buoy_drop_armed = False
+            self.show_hint(HINT_BUOY_EMPTY)
+            return True                    # the click was still a drop attempt
+        left = int(getattr(self.world, "sonobuoys_left", 0))
+        if left <= 0:
+            self.buoy_drop_armed = False
+        self.show_hint(HINT_BUOY_DROPPED.format(n=left))
+        self.app.audio.ui_click()
+        return True
+
+    def request_asw(self) -> None:
+        """K (asw_launch binding): fire an ASW round at the freshest LOCALIZED
+        subsurface fix (a buoy cross-fix or a fresh launch datum).  The world
+        verb refuses blind shots and empty magazines; hints say which.
+        SANDBOX worlds (no launch_asw) are graceful no-ops."""
+        launch = getattr(self.world, "launch_asw", None)
+        if launch is None:
+            return
+        if int(getattr(self.world, "asw_ammo_left", 0)) <= 0:
+            self.show_hint(HINT_ASW_EMPTY)
+            return
+        rnd = launch()
+        if rnd is None:
+            self.show_hint(HINT_ASW_NO_FIX)
+            return
+        self.show_hint(HINT_ASW_AWAY)
         self.app.audio.ui_click()
 
     def cycle_sam_round(self) -> str:

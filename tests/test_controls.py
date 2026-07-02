@@ -75,6 +75,12 @@ class FakeSandbox:
     def cycle_salvo_mode(self):
         self.log.append("salvo_mode")
 
+    def toggle_buoy_drop(self):
+        self.log.append("buoy_drop")
+
+    def request_asw(self):
+        self.log.append("asw_launch")
+
     def toggle_auto_warp(self):
         # M6 auto-time-warp: the key dispatches to the SandboxControls method
         # (the real sandbox forwards to it); record the dispatch here so the
@@ -164,6 +170,14 @@ def test_salvo_keys_dispatch(ctl):
     ctl._handle_key(pygame.K_f)
     ctl._handle_key(pygame.K_y)
     assert sb.log == ["salvo_fire", "salvo_mode"]
+
+
+def test_asw_keys_dispatch(ctl):
+    # M5 ASW UI: U arms buoy-drop mode; K fires an ASW round at the fix.
+    sb = ctl.sandbox
+    ctl._handle_key(pygame.K_u)
+    ctl._handle_key(pygame.K_k)
+    assert sb.log == ["buoy_drop", "asw_launch"]
 
 
 def test_extended_time_ladder_reaches_64x():

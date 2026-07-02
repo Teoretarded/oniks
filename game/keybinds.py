@@ -95,6 +95,14 @@ ACTIONS: tuple[ActionDef, ...] = (
     # graceful no-op (it reuses the single-fire validation).
     ActionDef("salvo_fire", "SALVO / RIPPLE FIRE", "ENGAGEMENT", pygame.K_f),
     ActionDef("salvo_mode", "SALVO MODE", "ENGAGEMENT", pygame.K_y),
+    # M5 ASW (UI-wiring pass): U arms BUOY-DROP mode — the next LMB on the
+    # tactical map drops a passive sonobuoy at the clicked point (finite
+    # n_sonobuoys stock); K fires an ASW round at the freshest LOCALIZED
+    # subsurface fix (world.launch_asw refuses blind shots).  U/K were
+    # unclaimed by every prior default; with no buoy stock / no ASW ammo /
+    # no fix the actions are graceful no-op hints (SANDBOX worlds too).
+    ActionDef("buoy_drop", "SONOBUOY DROP (MAP)", "ENGAGEMENT", pygame.K_u),
+    ActionDef("asw_launch", "ASW LAUNCH", "ENGAGEMENT", pygame.K_k),
     # M6 per-battery STATUS PANEL: toggles the EXPANDED full battery board
     # (every Oniks/S-300 tube's LOADED/RELOADING/EMPTY + the magazine pool +
     # refill timers), drawn like the F1 overlay.  Player-only own-force
