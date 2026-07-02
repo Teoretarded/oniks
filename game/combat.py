@@ -116,6 +116,7 @@ class CombatState(SandboxState):
         # keeps running underneath, dimmed, exactly as the spec asks; input
         # routes to it while it is up.  None until the battle ends.
         self._end_overlay: CombatEndOverlay | None = None
+        self._final_card = None      # the graded ScoreCard at battle end
         # M6 after-action scoring telemetry: a per-battle accumulator updated in
         # sim_step (round counts from the launch-wrapper returns, first-fix from
         # the PLAYER contact picture, leakers from own-round TERMINAL events).
@@ -256,14 +257,46 @@ class CombatState(SandboxState):
         no-stats overlay so a scoring edge case can never block the end screen."""
         app = self.app
         config = self._config
+        card = self._build_scorecard()
+        # M6 campaign wiring: a battle launched through the hub ends into
+        # CONTINUE CAMPAIGN (advance + save + back to the hub) instead of
+        # REMATCH/NEW BATTLE — and MAIN MENU also records first, so a decided
+        # battle is never grade-scummable.
+        in_campaign = (getattr(app, "campaign_battle", False)
+                       and getattr(app, "campaign", None) is not None)
+        self._final_card = card
         overlay = CombatEndOverlay(
             app, victory,
             rematch_cb=lambda: app.start_combat(config),
             new_battle_cb=app.open_combat_setup,
-            menu_cb=app.quit_to_menu,
-            scorecard=self._build_scorecard())
+            menu_cb=(self._campaign_quit if in_campaign
+                     else app.quit_to_menu),
+            scorecard=card,
+            campaign_cb=self._campaign_continue if in_campaign else None)
         overlay.enter()
         self._end_overlay = overlay
+
+    def _campaign_advance(self) -> None:
+        """Record the decided battle into the campaign: snapshot the ledger,
+        record the grade, resupply, step (or END the campaign on a defeat),
+        persist.  The campaign_battle flag flips False first so a second
+        overlay callback can never double-advance."""
+        import game.campaign as campaign
+        app = self.app
+        if not getattr(app, "campaign_battle", False):
+            return
+        app.campaign_battle = False
+        letter = getattr(self._final_card, "grade", "") or "D"
+        campaign.advance(app.campaign, self.world, letter)
+        campaign.save(app.campaign)
+
+    def _campaign_continue(self) -> None:
+        self._campaign_advance()
+        self.app.open_campaign()
+
+    def _campaign_quit(self) -> None:
+        self._campaign_advance()
+        self.app.quit_to_menu()
 
     def _build_scorecard(self):
         """Compose the end-of-battle ScoreCard from the world + telemetry and

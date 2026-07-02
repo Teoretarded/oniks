@@ -53,6 +53,9 @@ class FakeApp:
     def start_combat(self, config=None):
         self.combat_started = getattr(self, "combat_started", 0) + 1
 
+    def open_campaign(self):
+        self.campaign_opens = getattr(self, "campaign_opens", 0) + 1
+
     def open_combat_setup(self):
         self.combat_setup_opened = getattr(self, "combat_setup_opened", 0) + 1
 
@@ -82,7 +85,7 @@ def test_move_selection_wraps_both_ways():
 
 
 def test_menu_and_pause_items_per_spec():
-    assert MAIN_ITEMS == ("SANDBOX", "COMBAT", "SETTINGS", "QUIT")
+    assert MAIN_ITEMS == ("SANDBOX", "COMBAT", "CAMPAIGN", "SETTINGS", "QUIT")
     assert PAUSE_ITEMS == ("RESUME", "SETTINGS", "MAIN MENU")
 
 
@@ -168,7 +171,8 @@ def test_menu_settings_and_quit(kb):
     app = FakeApp(kb)
     menu = MenuState(app)
     menu.handle_event(key_event(pygame.K_DOWN))
-    menu.handle_event(key_event(pygame.K_DOWN))   # SANDBOX -> COMBAT -> SETTINGS
+    menu.handle_event(key_event(pygame.K_DOWN))   # SANDBOX -> COMBAT -> CAMPAIGN
+    menu.handle_event(key_event(pygame.K_DOWN))   # CAMPAIGN -> SETTINGS
     menu.handle_event(key_event(pygame.K_RETURN))
     menu._tick_pending(0.1)
     assert app.settings_from == [menu]

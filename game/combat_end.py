@@ -35,10 +35,10 @@ from game.states import (
 END_PANEL_W   = 480
 END_FOOTER    = "UP/DN SELECT  ENTER OK  ESC MENU"
 
-_ITEMS        = ("REMATCH", "NEW BATTLE", "MAIN MENU")
-_IDX_REMATCH  = 0
-_IDX_NEW      = 1
-_IDX_MENU     = 2
+_ITEMS          = ("REMATCH", "NEW BATTLE", "MAIN MENU")
+# Campaign-mode rows: the battle belongs to a chain, so REMATCH/NEW BATTLE
+# (grade-scum / off-ramp) are replaced by the single continue affordance.
+_CAMPAIGN_ITEMS = ("CONTINUE CAMPAIGN", "MAIN MENU")
 
 # Grade -> banner colour (S/A green, B amber, C/D red — same OK/WARN/DANGER
 # palette the rest of the HUD uses).
@@ -99,6 +99,11 @@ class CombatEndOverlay(GameState):
         When given, a stats block (grade + metric rows) renders above the
         option rows.  Defaults to ``None`` — the legacy / smoke path with no
         stats, so existing callers and tools are unchanged.
+    campaign_cb:
+        Optional CONTINUE CAMPAIGN callback (M6 campaign UI wiring).  When
+        given the option rows become CONTINUE CAMPAIGN / MAIN MENU — the
+        battle belongs to a chain, so REMATCH / NEW BATTLE are not offered.
+        ``None`` keeps the legacy three-row layout byte-for-byte.
     """
 
     def __init__(
@@ -109,6 +114,7 @@ class CombatEndOverlay(GameState):
         new_battle_cb: Callable[[], None],
         menu_cb:      Callable[[], None],
         scorecard=None,
+        campaign_cb=None,
     ):
         super().__init__(app)
         self._gl   = None
@@ -116,11 +122,19 @@ class CombatEndOverlay(GameState):
         self.victory = victory
         self.scorecard = scorecard
 
-        self._callbacks = {
-            "REMATCH":    rematch_cb,
-            "NEW BATTLE": new_battle_cb,
-            "MAIN MENU":  menu_cb,
-        }
+        if campaign_cb is not None:
+            self._items = _CAMPAIGN_ITEMS
+            self._callbacks = {
+                "CONTINUE CAMPAIGN": campaign_cb,
+                "MAIN MENU":         menu_cb,
+            }
+        else:
+            self._items = _ITEMS
+            self._callbacks = {
+                "REMATCH":    rematch_cb,
+                "NEW BATTLE": new_battle_cb,
+                "MAIN MENU":  menu_cb,
+            }
 
         self._sel:          int   = 0
         self._pending:      str | None = None
@@ -152,13 +166,13 @@ class CombatEndOverlay(GameState):
         if ev.type == pygame.KEYDOWN:
             key = ev.key
             if key == pygame.K_UP:
-                self._sel = move_selection(self._sel, -1, len(_ITEMS))
+                self._sel = move_selection(self._sel, -1, len(self._items))
                 self.app.audio.ui_click()
             elif key == pygame.K_DOWN:
-                self._sel = move_selection(self._sel, 1, len(_ITEMS))
+                self._sel = move_selection(self._sel, 1, len(self._items))
                 self.app.audio.ui_click()
             elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                self._activate(_ITEMS[self._sel])
+                self._activate(self._items[self._sel])
             elif key == pygame.K_ESCAPE:
                 self._activate("MAIN MENU")
         elif ev.type == pygame.MOUSEMOTION:
@@ -170,7 +184,7 @@ class CombatEndOverlay(GameState):
             hit = self._hit(ev.pos)
             if hit is not None:
                 self._sel = hit
-                self._activate(_ITEMS[hit])
+                self._activate(self._items[hit])
 
     def _activate(self, name: str) -> None:
         self.app.audio.ui_click()
@@ -225,7 +239,7 @@ class CombatEndOverlay(GameState):
             stats_h = 0
 
         panel_h  = (PAD + head_lh + 2 + small_lh + 10 + stats_h + 10
-                    + len(_ITEMS) * ROW_H + PAD)
+                    + len(self._items) * ROW_H + PAD)
         px = (w - END_PANEL_W) // 2
         py = (h - panel_h)     // 2 - 40
         draw_panel(text, px, py, END_PANEL_W, panel_h, strip=True)
@@ -272,7 +286,7 @@ class CombatEndOverlay(GameState):
         # --- Option rows -----------------------------------------------------
         row_x = px + PAD
         ry    = block_y
-        for i, name in enumerate(_ITEMS):
+        for i, name in enumerate(self._items):
             selected = (i == self._sel)
             col = MUTED
             if selected:
@@ -297,6 +311,7 @@ class CombatEndOverlay(GameState):
 
     @property
     def options(self) -> tuple:
-        """The three option labels, in order (REMATCH / NEW BATTLE / MAIN MENU).
-        Exposed for tests so they can verify the set without hardcoding strings."""
-        return _ITEMS
+        """The option labels, in order (legacy: REMATCH / NEW BATTLE /
+        MAIN MENU; campaign: CONTINUE CAMPAIGN / MAIN MENU).  Exposed for
+        tests so they can verify the set without hardcoding strings."""
+        return self._items

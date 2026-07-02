@@ -65,7 +65,7 @@ SUBTITLE_TEXT = "ANTI-SHIP MISSILE SIMULATION"
 FOOTER_LEFT = f"ONIKS PROTO {GAME_VERSION} - {BUILD_DATE}"
 FOOTER_HINTS = "UP/DN SELECT  ENTER OK"
 
-MAIN_ITEMS = ("SANDBOX", "COMBAT", "SETTINGS", "QUIT")
+MAIN_ITEMS = ("SANDBOX", "COMBAT", "CAMPAIGN", "SETTINGS", "QUIT")
 PAUSE_ITEMS = ("RESUME", "SETTINGS", "MAIN MENU")
 CONFIRM_MAIN_MENU = "MAIN MENU - ENTER AGAIN TO CONFIRM"
 CONFIRM_RESET = "ENTER AGAIN TO CONFIRM"
@@ -569,6 +569,8 @@ class MenuState(_ListScreen):
             self.app.start_sandbox()    # fresh world
         elif name == "COMBAT":
             self.app.open_combat_setup()  # setup screen, then the battle
+        elif name == "CAMPAIGN":
+            self.app.open_campaign()    # hub: resume the save or start fresh
         elif name == "SETTINGS":
             self.app.open_settings(self)
 

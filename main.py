@@ -59,6 +59,8 @@ class App:
         self.keybinds = Keybinds()          # persisted action->key table
         self.states = StateMachine()
         self.sandbox = None                 # live game session (RESUME target)
+        self.campaign = None                # CampaignState (lazily loaded)
+        self.campaign_battle = False        # True while playing a campaign battle
         self.menu = MenuState(self)
         self.pause_menu = PauseState(self)
         self.settings = SettingsState(self)
@@ -111,8 +113,33 @@ class App:
         if self.sandbox is not None:
             self.sandbox.dispose()
         self.paused = False
-        self.sandbox = CombatState(self, config=config)
-        self.states.switch(self.sandbox)
+        self.campaign_battle = False        # a plain battle, unless the
+        self.sandbox = CombatState(self, config=config)   # campaign path
+        self.states.switch(self.sandbox)                  # re-flags below
+
+    def open_campaign(self) -> None:
+        """Menu CAMPAIGN item: the between-battles hub (fresh / in-progress /
+        complete — game/campaign_screen.py decides from the save)."""
+        from game.campaign_screen import CampaignHubState
+        hub = CampaignHubState(self)
+        self._campaign_hub = hub          # held so it is not GC'd mid-session
+        self.states.switch(hub)
+
+    def start_campaign_battle(self) -> None:
+        """Hub START: build the campaign's CURRENT battle (escalated, derived
+        seed via game/campaign.next_config) and ingest the carried ammo ledger
+        (initial_state_for; None on battle 0 = the byte-identical fresh
+        path)."""
+        import game.campaign as campaign
+        camp = self.campaign
+        if camp is None or camp.complete:
+            return
+        cfg = campaign.next_config(camp)
+        st = campaign.initial_state_for(camp)
+        self.start_combat(cfg)
+        if st:
+            self.sandbox.world.apply_initial_state(st)
+        self.campaign_battle = True
 
     def _draw_loading_frame(self) -> None:
         """One immediate 'BUILDING WORLD...' frame so the SANDBOX click never
