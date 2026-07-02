@@ -906,9 +906,31 @@ class ElintReceiver:
         # Range-observability gate (ELINT_RANGE_TEST_SCALES doc): each
         # scaled alternative must FAIL the consistency band the estimate
         # passed, or the range is not actually pinned by the data.
+        #
+        # SURROUND EXCEPTION (M5 ASW): the range ridge this gate hunts exists
+        # only when every observer sees the source from ONE SIDE (all of them
+        # inside a half-plane through the estimate).  A sonobuoy field that
+        # BRACKETS the boat — the textbook ASW pattern — puts the estimate
+        # near the observer centroid, so the scaled alternatives barely move,
+        # trivially re-fit the bearings, and the gate false-kills the BEST
+        # geometry (measured: 4-buoy box, est error ~1 km, killed to inf).
+        # When the estimate->observer directions leave no circular gap of
+        # half a turn or more, no half-plane contains them all: range is
+        # pinned by construction and the scale test is skipped (the CRLB
+        # below still reports the honest error).  One-sided arcs always have
+        # a gap >= pi, so ELINT drone-loiter geometry is untouched.
         cx = cx_sum / n
         cz = cz_sum / n
-        for scale in ELINT_RANGE_TEST_SCALES:
+        surrounded = False
+        if n >= 3:
+            phis = sorted(math.atan2(float(dxz[0]) - float(x[0]),
+                                     float(dxz[1]) - float(x[1]))
+                          for dxz, _theta in pairs)
+            max_gap = 2.0 * math.pi + phis[0] - phis[-1]
+            for i in range(1, n):
+                max_gap = max(max_gap, phis[i] - phis[i - 1])
+            surrounded = max_gap < math.pi
+        for scale in (() if surrounded else ELINT_RANGE_TEST_SCALES):
             ax = cx + (float(x[0]) - cx) * scale
             az = cz + (float(x[1]) - cz) * scale
             alt_sq = 0.0

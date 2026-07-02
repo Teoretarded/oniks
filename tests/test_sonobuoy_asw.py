@@ -206,3 +206,54 @@ def test_buoy_field_forms_subsurface_track_in_world():
             formed = True
             break
     assert formed, "a tight buoy field on a loud boat must form a subsurface track"
+
+
+# ---------------------------------------------------------------------------
+# range-observability gate vs a SURROUNDING buoy field (regression)
+# ---------------------------------------------------------------------------
+
+def test_surrounding_buoy_box_yields_actionable_fix():
+    """4 buoys BRACKETING the boat — the textbook ASW pattern — must localize
+    it.  REGRESSION: the shared solver's range-observability gate assumed
+    one-sided observers; with the estimate near the buoy-field centroid the
+    scaled range alternatives barely moved, trivially re-fit the bearings, and
+    the gate false-killed a fix whose measured error was ~1 km (probe
+    tools/probe_acoustic_asw.py '4 buoys box' -> NO actionable fix)."""
+    sub = _sub_at((0.0, 100_000.0), SUB_LAUNCH, transient=True)
+    truth = (float(sub.pos[0]), float(sub.pos[2]))
+    ar = AcousticReceiver(rng=np.random.default_rng([1337, 14]))
+    for _ in range(30):
+        ar.update([sub], [_buoy(-15_000.0, 85_000.0), _buoy(15_000.0, 85_000.0),
+                          _buoy(-12_000.0, 110_000.0), _buoy(12_000.0, 110_000.0)],
+                  sim_time=0.0)
+    assert ar.hearing_count(sub.sub_id) == 4, "all four buoys must hear the launch"
+    assert ar.is_actionable(sub.sub_id), (
+        "a surrounding 4-buoy box must produce an actionable cross-fix "
+        "(range is pinned by construction when observers bracket the source)")
+    est = ar.est_pos(sub.sub_id)
+    err = float(np.hypot(est[0] - truth[0], est[2] - truth[1]))
+    assert err < ACOUSTIC_FIX_ACTIONABLE_M, (
+        f"the box fix must land near truth (err {err:.0f} m)")
+
+
+def test_one_sided_far_ridge_still_not_actionable():
+    """Two-sided guard on the surround exception: observers clustered on ONE
+    side of a far source (the classic ELINT drone-arc ridge) must STILL be
+    rejected — the exception only fires when no half-plane contains every
+    observer as seen from the estimate.  Zero-noise bearings make the check
+    deterministic and prove the kill is the gate, not noise."""
+    import math as _math
+    from sim.recon import ElintReceiver
+
+    er = ElintReceiver(rng=np.random.default_rng([1337, 4]),
+                       height_fn=lambda x, z: 0.0)
+    emitter = (0.0, 150_000.0)
+    pairs = []
+    for ox, oz in ((-10_000.0, 0.0), (-5_000.0, 500.0), (0.0, 0.0),
+                   (5_000.0, 500.0), (10_000.0, 0.0)):
+        theta = _math.atan2(emitter[0] - ox, emitter[1] - oz)
+        pairs.append((np.array([ox, oz]), theta))
+    _est, q = er._solve_triangulation(pairs)
+    assert not math.isfinite(q), (
+        "a one-sided short-baseline arc against a far emitter must stay "
+        "unactionable (the range/geometry defenses are not weakened)")
