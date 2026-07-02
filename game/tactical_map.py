@@ -787,6 +787,7 @@ class TacticalMap:
             self.view.resize(w, h)
 
         # 1) dim the 3D scene, 2) terrain texture quad, 3) vector overlays.
+        self._label_rects = []      # per-frame site/star label collision list
         self.text.draw_rect(0, 0, w, h, BACKDROP_RGBA)
         self.text.flush(w, h)
         self._draw_terrain_quad(w, h)
@@ -944,6 +945,25 @@ class TacticalMap:
         for lane in LANES:
             self._poly_world(lane, LANE_COL, 1.5)
 
+    def _label_text(self, lx: float, ly: float, name: str, col) -> None:
+        """Site/star label with per-frame collision nudging: clustered
+        base-area installations (BASE / RADAR STN / SAM SITE) used to draw
+        on top of each other into an unreadable garble at map zoom; each
+        label now shifts down a row until it finds clear air."""
+        if not hasattr(self, "_label_rects"):
+            self._label_rects = []
+        lw = self.text.text_width(name)
+        y = ly
+        for _ in range(6):
+            rect = (lx, y, lx + lw, y + 16.0)
+            if all(not (rect[0] < r[2] and rect[2] > r[0]
+                        and rect[1] < r[3] and rect[3] > r[1])
+                   for r in self._label_rects):
+                break
+            y += 16.0
+        self._label_rects.append((lx, y, lx + lw, y + 16.0))
+        self.text.draw_text(lx, y, name, col)
+
     def _sites(self) -> None:
         """Land-site squares: the world's own sites plus any DISCOVERED
         enemy installations (COMBAT Phase 5a fog of war for structures —
@@ -960,7 +980,7 @@ class TacticalMap:
             self.text.draw_lines([(sx - s, sy - s), (sx + s, sy - s),
                                   (sx + s, sy + s), (sx - s, sy + s),
                                   (sx - s, sy - s)], SITE_COL, 1.5)
-            self.text.draw_text(sx + s + 4, sy - 9, site["name"], SITE_COL)
+            self._label_text(sx + s + 4, sy - 9, site["name"], SITE_COL)
 
     def _platform_stars(self) -> None:
         """Both friendly platforms (Task S4): the active one full strength,
@@ -980,7 +1000,7 @@ class TacticalMap:
                                    (-d, -d, d, d), (-d, d, d, -d)):
                 self.text.draw_lines([(sx + ax, sy + ay), (sx + bx, sy + by)],
                                      col, 1.5)
-            self.text.draw_text(sx + r + 4, sy - 9, label, col)
+            self._label_text(sx + r + 4, sy - 9, label, col)
 
     def _pantsir_markers(self) -> None:
         """Friendly Pantsir-S1 point-defense units near the base (COMBAT
