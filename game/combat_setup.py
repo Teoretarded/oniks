@@ -1,12 +1,17 @@
-"""CombatSetupState: the two-page setup screen before a COMBAT session (Phase 7).
+"""CombatSetupState: the four-page setup screen before a COMBAT session (Phase 7).
 
 Visual language matches SettingsState/MenuState (game/states.py): corner-tick
 panel, amber header rule, 40 px rows with label-left/value-right, selected-row
 highlight with 3 px left focus bar, 80 ms press-flash on START, footer hints.
 
-Two pages toggled with TAB:
-    World  -- SEED + force-count steppers + CARRIER (fixed) display.
-    Armory -- per-weapon ammo + reload steppers.
+Four pages cycled with TAB (every built CombatConfig feature is reachable here
+-- a feature the setup screen hides is dead content):
+    World   -- SEED/MAP + the player's force mix (radars, drones, EW pod,
+               TELs, CBR, decoys).
+    Enemy   -- the opposing force mix (fleet classes, transports, submarines,
+               AWACS, escort jammers, coastal radars).
+    Armory  -- offensive ammo: Oniks/Zircon/ASBM/Kh-31P pools + swarm pods.
+    Defense -- defensive ammo: S-300 / Pantsir / Buk pools + sonobuoys + ASW.
 
 Navigation:
     UP/DN   move selection
@@ -38,9 +43,14 @@ from game.states import (
 )
 from world.combat_config import (
     CombatConfig,
-    CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_BUK, CLAMP_DESTROYERS,
-    CLAMP_ENEMY_RADARS, CLAMP_GUN_AMMO, CLAMP_MAP_PRESET, CLAMP_ONIKS,
-    CLAMP_PANTSIR, CLAMP_RELOAD_S, CLAMP_S300, MAP_PRESET_NAMES, clamp_config,
+    CLAMP_AAW, CLAMP_AMMO, CLAMP_ARM_AMMO, CLAMP_ASBM_AMMO, CLAMP_ASW_AMMO,
+    CLAMP_AWACS, CLAMP_BUK, CLAMP_CBR, CLAMP_CORNER_REFLECTORS,
+    CLAMP_DECOYS, CLAMP_DESTROYERS, CLAMP_DRONES, CLAMP_ENEMY_RADARS,
+    CLAMP_FLAGSHIP, CLAMP_GROUND_ATTACK, CLAMP_GUN_AMMO, CLAMP_JAMMERS,
+    CLAMP_MAP_PRESET, CLAMP_ONIKS, CLAMP_PANTSIR, CLAMP_PLAYER_JAMMER,
+    CLAMP_PLAYER_RADARS, CLAMP_RELOAD_S, CLAMP_S300, CLAMP_SONOBUOYS,
+    CLAMP_SUB_KALIBR, CLAMP_SUBS, CLAMP_SWARM_CELLS, CLAMP_SWARM_PODS,
+    CLAMP_TRANSPORTS, MAP_PRESET_NAMES, clamp_config,
 )
 
 # --- Layout -------------------------------------------------------------------
@@ -56,10 +66,12 @@ _LCG_C   = 1013904223
 _LCG_MOD = 2 ** 32
 _SEED_MAX = 2 ** 31 - 1
 
-# Page indices
-_PAGE_WORLD  = 0
-_PAGE_ARMORY = 1
-_PAGE_NAMES  = ("WORLD", "ARMORY")
+# Page indices (TAB cycles 0 -> 1 -> 2 -> 3 -> 0)
+_PAGE_WORLD   = 0
+_PAGE_ENEMY   = 1
+_PAGE_ARMORY  = 2
+_PAGE_DEFENSE = 3
+_PAGE_NAMES   = ("WORLD", "ENEMY", "ARMORY", "DEFENSE")
 
 # Sentinel string: selecting this row fires START.
 _START = "START"
@@ -87,23 +99,17 @@ _WORLD_ROWS = [
     {"kind": "stepper", "label": "MAP",           "field": "map_preset",
      "step": 1, "lo": CLAMP_MAP_PRESET[0], "hi": CLAMP_MAP_PRESET[1],
      "names": MAP_PRESET_NAMES},
-    {"kind": "fixed",   "label": "CARRIER",       "value": "1  (FIXED)"},
-    {"kind": "stepper", "label": "DESTROYERS",    "field": "n_destroyers",
-     "step": 1, "lo": CLAMP_DESTROYERS[0],    "hi": CLAMP_DESTROYERS[1]},
-    # AWACS / PLAYER RADARS / DRONES are FIXED at 1 for now: the simulation
-    # fields a single unit of each (world/combat.py builds one self.awacs, one
-    # self.radar_station, one self.drone). Multi-unit is real future work (it
-    # cascades into the enemy datalink/ESM model and the drone control UX), so
-    # the setup shows them fixed rather than offering steppers that silently do
-    # nothing. The CombatConfig fields + clamp_config keep their full ranges so
-    # the wiring can land later without a schema change.
-    {"kind": "fixed",   "label": "AWACS (enemy)",  "value": "1  (FIXED)"},
-    {"kind": "stepper", "label": "ENEMY RADARS",  "field": "n_enemy_radars",
-     "step": 1, "lo": CLAMP_ENEMY_RADARS[0],  "hi": CLAMP_ENEMY_RADARS[1]},
-    {"kind": "fixed",   "label": "PLAYER RADARS", "value": "1  (FIXED)"},
+    {"kind": "stepper", "label": "PLAYER RADARS", "field": "n_player_radars",
+     "step": 1, "lo": CLAMP_PLAYER_RADARS[0], "hi": CLAMP_PLAYER_RADARS[1]},
+    {"kind": "stepper", "label": "RECON DRONES",  "field": "n_drones",
+     "step": 1, "lo": CLAMP_DRONES[0],        "hi": CLAMP_DRONES[1]},
+    # M3-F4 drone EW pod: 0 = no pod (byte-identical default), 1 = the drone
+    # carries the self-protect/escort jammer the JAM key toggles.
+    {"kind": "stepper", "label": "DRONE EW POD",  "field": "player_jammer",
+     "step": 1, "lo": CLAMP_PLAYER_JAMMER[0], "hi": CLAMP_PLAYER_JAMMER[1],
+     "names": ("NONE", "FITTED")},
     {"kind": "stepper", "label": "PANTSIR TELs",  "field": "n_pantsir",
      "step": 1, "lo": CLAMP_PANTSIR[0],       "hi": CLAMP_PANTSIR[1]},
-    {"kind": "fixed",   "label": "DRONES",        "value": "1  (FIXED)"},
     {"kind": "stepper", "label": "ONIKS TELs",    "field": "n_oniks",
      "step": 1, "lo": CLAMP_ONIKS[0],         "hi": CLAMP_ONIKS[1]},
     {"kind": "stepper", "label": "S-300 TELs",    "field": "n_s300",
@@ -113,6 +119,48 @@ _WORLD_ROWS = [
     # gap-filler battery + its 9S36 radar and unlocks the buk TAB platform.
     {"kind": "stepper", "label": "BUK TELs",      "field": "n_buk",
      "step": 1, "lo": CLAMP_BUK[0],           "hi": CLAMP_BUK[1]},
+    # M5 counter-battery radar + ESM decoys + corner reflectors: the player's
+    # survivability toys vs the enemy back-plot (all 0/OFF by default).
+    {"kind": "stepper", "label": "CB RADARS",     "field": "n_cbr",
+     "step": 1, "lo": CLAMP_CBR[0],           "hi": CLAMP_CBR[1]},
+    {"kind": "stepper", "label": "ESM DECOYS",    "field": "n_decoys",
+     "step": 1, "lo": CLAMP_DECOYS[0],        "hi": CLAMP_DECOYS[1]},
+    {"kind": "stepper", "label": "CORNER REFLECTORS", "field": "n_corner_reflectors",
+     "step": 1, "lo": CLAMP_CORNER_REFLECTORS[0],
+     "hi": CLAMP_CORNER_REFLECTORS[1]},
+    {"kind": "action",  "label": _START},
+]
+
+_ENEMY_ROWS = [
+    {"kind": "fixed",   "label": "CARRIER",       "value": "1  (FIXED)"},
+    {"kind": "stepper", "label": "DESTROYERS",    "field": "n_destroyers",
+     "step": 1, "lo": CLAMP_DESTROYERS[0],    "hi": CLAMP_DESTROYERS[1]},
+    # M5 ship classes (0/OFF default): the CEC flagship datalink hub, the
+    # dedicated AAW screen and the ground-attack (land-strike magazine) hulls.
+    {"kind": "stepper", "label": "FLAGSHIP (CEC)", "field": "n_flagship",
+     "step": 1, "lo": CLAMP_FLAGSHIP[0],      "hi": CLAMP_FLAGSHIP[1]},
+    {"kind": "stepper", "label": "AAW DESTROYERS", "field": "n_aaw",
+     "step": 1, "lo": CLAMP_AAW[0],           "hi": CLAMP_AAW[1]},
+    {"kind": "stepper", "label": "GROUND-ATTACK",  "field": "n_ground_attack",
+     "step": 1, "lo": CLAMP_GROUND_ATTACK[0], "hi": CLAMP_GROUND_ATTACK[1]},
+    # M5 amphibious group: transports + LCACs; a landed beachhead starts the
+    # TIMED second lose-path (beachhead grace clock).
+    {"kind": "stepper", "label": "TRANSPORTS",    "field": "n_transports",
+     "step": 1, "lo": CLAMP_TRANSPORTS[0],    "hi": CLAMP_TRANSPORTS[1]},
+    # M5 submarines: the acoustic-only threat (find with sonobuoys on the
+    # DEFENSE page, kill with ASW rounds).
+    {"kind": "stepper", "label": "SUBMARINES",    "field": "n_subs",
+     "step": 1, "lo": CLAMP_SUBS[0],          "hi": CLAMP_SUBS[1]},
+    {"kind": "stepper", "label": "SUB KALIBR AMMO", "field": "sub_kalibr_ammo",
+     "step": 1, "lo": CLAMP_SUB_KALIBR[0],    "hi": CLAMP_SUB_KALIBR[1]},
+    {"kind": "stepper", "label": "AWACS",         "field": "n_awacs",
+     "step": 1, "lo": CLAMP_AWACS[0],         "hi": CLAMP_AWACS[1]},
+    # M3-F2 escort jammers (Growlers): stand-off emitters that collapse the
+    # player radar rings (counter: ELINT still hears them; burn-through).
+    {"kind": "stepper", "label": "ESCORT JAMMERS", "field": "n_jammers",
+     "step": 1, "lo": CLAMP_JAMMERS[0],       "hi": CLAMP_JAMMERS[1]},
+    {"kind": "stepper", "label": "ENEMY RADARS",  "field": "n_enemy_radars",
+     "step": 1, "lo": CLAMP_ENEMY_RADARS[0],  "hi": CLAMP_ENEMY_RADARS[1]},
     {"kind": "action",  "label": _START},
 ]
 
@@ -123,6 +171,16 @@ _ARMORY_ROWS = [
     {"kind": "stepper", "label": "ONIKS  RELOAD (s)",
      "field": "oniks_mag_reload_s",
      "step": 5,  "lo": CLAMP_RELOAD_S[0], "hi": CLAMP_RELOAD_S[1]},
+    # Zircon: the scarce hypersonic pool the B key cycles to (floor 1 via the
+    # shared missile clamp -- it has always shipped >= 1).
+    {"kind": "stepper", "label": "ZIRCON AMMO",
+     "field": "zircon_ammo",
+     "step": 1,  "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
+    # M4 Bastion-K ASBM (0/OFF default): lofted top-attack rounds that beat
+    # the SAM ceiling instead of the horizon.
+    {"kind": "stepper", "label": "ASBM AMMO",
+     "field": "asbm_ammo",
+     "step": 1,  "lo": CLAMP_ASBM_AMMO[0], "hi": CLAMP_ASBM_AMMO[1]},
     # M2-T4: the player Kh-31P anti-radiation pool. Floor is 0 (CLAMP_ARM_AMMO,
     # NOT CLAMP_AMMO) so leaving it at 0 keeps the ARM OFF and the default
     # battle byte-identical; a non-zero stock unlocks launch_arm() + the 3-way
@@ -130,6 +188,18 @@ _ARMORY_ROWS = [
     {"kind": "stepper", "label": "KH-31P AMMO",
      "field": "kh31p_ammo",
      "step": 1,  "lo": CLAMP_ARM_AMMO[0], "hi": CLAMP_ARM_AMMO[1]},
+    # M4 loitering swarm (0/OFF default): pods of slow loiterers with a
+    # simultaneous time-on-target arrival solver (H cycles arrival mode).
+    {"kind": "stepper", "label": "SWARM PODS",
+     "field": "n_swarm_pods",
+     "step": 1,  "lo": CLAMP_SWARM_PODS[0], "hi": CLAMP_SWARM_PODS[1]},
+    {"kind": "stepper", "label": "SWARM CELLS/POD",
+     "field": "swarm_cells_per_pod",
+     "step": 1,  "lo": CLAMP_SWARM_CELLS[0], "hi": CLAMP_SWARM_CELLS[1]},
+    {"kind": "action",  "label": _START},
+]
+
+_DEFENSE_ROWS = [
     {"kind": "stepper", "label": "S-300  48N6 AMMO",
      "field": "s300_48n6_ammo",
      "step": 1,  "lo": CLAMP_AMMO[0],    "hi": CLAMP_AMMO[1]},
@@ -159,10 +229,18 @@ _ARMORY_ROWS = [
     {"kind": "stepper", "label": "BUK  RELOAD (s)",
      "field": "buk_mag_reload_s",
      "step": 5,  "lo": CLAMP_RELOAD_S[0], "hi": CLAMP_RELOAD_S[1]},
+    # M5 ASW: passive sonobuoys (LMB-drop once the UI pass lands; the world
+    # verb place_sonobuoy already consumes this stock) + ASROC-class rounds.
+    {"kind": "stepper", "label": "SONOBUOYS",
+     "field": "n_sonobuoys",
+     "step": 1,  "lo": CLAMP_SONOBUOYS[0], "hi": CLAMP_SONOBUOYS[1]},
+    {"kind": "stepper", "label": "ASW ROUNDS",
+     "field": "asw_ammo",
+     "step": 1,  "lo": CLAMP_ASW_AMMO[0], "hi": CLAMP_ASW_AMMO[1]},
     {"kind": "action",  "label": _START},
 ]
 
-_PAGES = (_WORLD_ROWS, _ARMORY_ROWS)
+_PAGES = (_WORLD_ROWS, _ENEMY_ROWS, _ARMORY_ROWS, _DEFENSE_ROWS)
 
 
 class CombatSetupState(GameState):
@@ -181,32 +259,14 @@ class CombatSetupState(GameState):
         self.text = None
         self.start_cb = start_cb
 
-        # Mutable mirror of CombatConfig fields; floats stay float.
+        # Mutable mirror of CombatConfig fields; floats stay float.  Derived
+        # from the row tables so a page row can never reference a field this
+        # dict (or build_config) forgot -- one source of truth, no drift.
         defaults = CombatConfig()
         self._fields: dict[str, int | float] = {
-            "seed":               defaults.seed,
-            "map_preset":         defaults.map_preset,
-            "n_destroyers":       defaults.n_destroyers,
-            "n_awacs":            defaults.n_awacs,
-            "n_enemy_radars":     defaults.n_enemy_radars,
-            "n_player_radars":    defaults.n_player_radars,
-            "n_pantsir":          defaults.n_pantsir,
-            "n_drones":           defaults.n_drones,
-            "n_oniks":            defaults.n_oniks,
-            "n_s300":             defaults.n_s300,
-            "n_buk":              defaults.n_buk,
-            "buk_9m317_ammo":     defaults.buk_9m317_ammo,
-            "buk_9m338_ammo":     defaults.buk_9m338_ammo,
-            "buk_mag_reload_s":   defaults.buk_mag_reload_s,
-            "oniks_ammo":         defaults.oniks_ammo,
-            "oniks_mag_reload_s": defaults.oniks_mag_reload_s,
-            "kh31p_ammo":         defaults.kh31p_ammo,
-            "s300_48n6_ammo":     defaults.s300_48n6_ammo,
-            "s300_40n6_ammo":     defaults.s300_40n6_ammo,
-            "s300_mag_reload_s":  defaults.s300_mag_reload_s,
-            "pantsir_57e6_ammo":  defaults.pantsir_57e6_ammo,
-            "pantsir_gun_ammo":   defaults.pantsir_gun_ammo,
-            "pantsir_mag_reload_s": defaults.pantsir_mag_reload_s,
+            row["field"]: getattr(defaults, row["field"])
+            for page in _PAGES for row in page
+            if row.get("kind") in ("stepper", "seed")
         }
 
         self._page: int = _PAGE_WORLD
@@ -310,7 +370,7 @@ class CombatSetupState(GameState):
             self._cancel_seed_edit()
             self.app.audio.ui_click()
         elif key == pygame.K_TAB:
-            self._page = _PAGE_ARMORY if self._page == _PAGE_WORLD else _PAGE_WORLD
+            self._page = (self._page + 1) % len(_PAGES)
             self._sel = 0
             self._cancel_seed_edit()
             self.app.audio.ui_click()
@@ -398,33 +458,18 @@ class CombatSetupState(GameState):
     # ------------------------------------------------------------------ config
 
     def build_config(self) -> CombatConfig:
-        """Return a clamped CombatConfig from the current field state."""
-        f = self._fields
-        return clamp_config(
-            seed               = int(f["seed"]),
-            map_preset         = int(f["map_preset"]),
-            n_destroyers       = int(f["n_destroyers"]),
-            n_awacs            = int(f["n_awacs"]),
-            n_enemy_radars     = int(f["n_enemy_radars"]),
-            n_player_radars    = int(f["n_player_radars"]),
-            n_pantsir          = int(f["n_pantsir"]),
-            n_drones           = int(f["n_drones"]),
-            n_oniks            = int(f["n_oniks"]),
-            n_s300             = int(f["n_s300"]),
-            n_buk              = int(f["n_buk"]),
-            buk_9m317_ammo     = int(f["buk_9m317_ammo"]),
-            buk_9m338_ammo     = int(f["buk_9m338_ammo"]),
-            buk_mag_reload_s   = float(f["buk_mag_reload_s"]),
-            oniks_ammo         = int(f["oniks_ammo"]),
-            oniks_mag_reload_s = float(f["oniks_mag_reload_s"]),
-            kh31p_ammo         = int(f["kh31p_ammo"]),
-            s300_48n6_ammo     = int(f["s300_48n6_ammo"]),
-            s300_40n6_ammo     = int(f["s300_40n6_ammo"]),
-            s300_mag_reload_s  = float(f["s300_mag_reload_s"]),
-            pantsir_57e6_ammo  = int(f["pantsir_57e6_ammo"]),
-            pantsir_gun_ammo   = int(f["pantsir_gun_ammo"]),
-            pantsir_mag_reload_s = float(f["pantsir_mag_reload_s"]),
-        )
+        """Return a clamped CombatConfig from the current field state.
+
+        Every screen-managed field is forwarded (float fields stay float --
+        the CombatConfig default declares each field's type); unmanaged
+        fields keep their CombatConfig defaults via clamp_config."""
+        defaults = CombatConfig()
+        kwargs = {}
+        for field, v in self._fields.items():
+            kwargs[field] = (float(v)
+                             if isinstance(getattr(defaults, field), float)
+                             else int(v))
+        return clamp_config(**kwargs)
 
     # ------------------------------------------------------------------ render
 

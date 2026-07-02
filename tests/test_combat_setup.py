@@ -20,7 +20,8 @@ from game.combat_end import CombatEndOverlay
 from game.combat_setup import (
     CombatSetupState,
     _LCG_A, _LCG_C, _LCG_MOD, _SEED_MAX,
-    _PAGE_WORLD, _PAGE_ARMORY, _PAGE_NAMES,
+    _PAGE_WORLD, _PAGE_ENEMY, _PAGE_ARMORY, _PAGE_DEFENSE, _PAGE_NAMES,
+    _PAGES,
 )
 from world.combat_config import CombatConfig
 
@@ -105,11 +106,11 @@ def end_defeat(app):
 # ---------------------------------------------------------------- page toggle
 
 def test_page_toggle_tab_key(setup):
+    """TAB cycles WORLD -> ENEMY -> ARMORY -> DEFENSE -> WORLD."""
     assert setup._page == _PAGE_WORLD
-    setup.handle_event(key_event(pygame.K_TAB))
-    assert setup._page == _PAGE_ARMORY
-    setup.handle_event(key_event(pygame.K_TAB))
-    assert setup._page == _PAGE_WORLD
+    for expected in (_PAGE_ENEMY, _PAGE_ARMORY, _PAGE_DEFENSE, _PAGE_WORLD):
+        setup.handle_event(key_event(pygame.K_TAB))
+        assert setup._page == expected
 
 
 def test_page_toggle_resets_selection(setup):
@@ -127,11 +128,72 @@ def test_page_world_has_seed_row(setup):
 
 
 def test_page_armory_has_only_steppers_and_action(setup):
-    setup.handle_event(key_event(pygame.K_TAB))
-    assert setup._page == _PAGE_ARMORY
+    setup._page = _PAGE_ARMORY
     rows = setup._rows()
     for r in rows:
         assert r["kind"] in ("stepper", "action")
+
+
+# ------------------------------------------------- four-page feature exposure
+
+def test_every_stepper_row_maps_to_a_real_config_field():
+    """Parity guard: every stepper/seed row on every page names a REAL
+    CombatConfig field with bounds inside the legal clamp (a row referencing
+    a phantom field would silently do nothing)."""
+    defaults = CombatConfig()
+    for page in _PAGES:
+        for row in page:
+            if row.get("kind") not in ("stepper", "seed"):
+                continue
+            assert hasattr(defaults, row["field"]), row
+            if row.get("kind") == "stepper":
+                assert row["lo"] <= row["hi"], row
+
+
+def test_setup_exposes_every_built_feature(setup):
+    """The reachability contract: every M2-M6 feature knob is on SOME page --
+    a feature the setup screen hides is dead content (tonight's audit found
+    subs/amphibious/ship-classes/jammers/swarm/ASBM/CBR/decoys all built,
+    tested and unreachable)."""
+    exposed = {row["field"] for page in _PAGES for row in page
+               if row.get("kind") in ("stepper", "seed")}
+    for field in ("n_flagship", "n_aaw", "n_ground_attack",      # ship classes
+                  "n_transports",                                 # amphibious
+                  "n_subs", "sub_kalibr_ammo",                    # submarine
+                  "n_sonobuoys", "asw_ammo",                      # ASW counter
+                  "n_jammers", "player_jammer",                   # EW both ways
+                  "n_swarm_pods", "swarm_cells_per_pod",          # swarm
+                  "zircon_ammo", "asbm_ammo",                     # deep strike
+                  "n_cbr", "n_decoys", "n_corner_reflectors",     # survivability
+                  "n_awacs", "n_drones", "n_player_radars"):      # force counts
+        assert field in exposed, f"built feature not reachable: {field}"
+
+
+def test_build_config_carries_new_feature_fields(setup):
+    """New-page values survive build_config() onto the emitted config."""
+    setup._fields["n_subs"] = 2
+    setup._fields["n_transports"] = 1
+    setup._fields["n_flagship"] = 1
+    setup._fields["n_sonobuoys"] = 12
+    setup._fields["asw_ammo"] = 4
+    setup._fields["asbm_ammo"] = 6
+    setup._fields["n_swarm_pods"] = 2
+    cfg = setup.build_config()
+    assert cfg.n_subs == 2
+    assert cfg.n_transports == 1
+    assert cfg.n_flagship == 1
+    assert cfg.n_sonobuoys == 12
+    assert cfg.asw_ammo == 4
+    assert cfg.asbm_ammo == 6
+    assert cfg.n_swarm_pods == 2
+
+
+def test_build_config_preserves_float_reload_type(setup):
+    """Float fields (reloads) stay float through the generic build_config."""
+    setup._fields["oniks_mag_reload_s"] = 45
+    cfg = setup.build_config()
+    assert isinstance(cfg.oniks_mag_reload_s, float)
+    assert cfg.oniks_mag_reload_s == 45.0
 
 
 # ---------------------------------------------------------------- seed: digit editing
@@ -221,7 +283,8 @@ def test_seed_clamp_min(setup):
 # ---------------------------------------------------------------- steppers
 
 def test_stepper_increments_by_step(setup):
-    """DESTROYERS step=1: RIGHT increases by 1."""
+    """DESTROYERS step=1: RIGHT increases by 1 (ENEMY page)."""
+    setup._page = _PAGE_ENEMY
     row_idx = next(i for i, r in enumerate(setup._rows())
                    if r.get("field") == "n_destroyers")
     setup._sel = row_idx
@@ -232,6 +295,7 @@ def test_stepper_increments_by_step(setup):
 
 def test_stepper_clamp_at_max(setup):
     """Stepper stops at hi and does not wrap."""
+    setup._page = _PAGE_ENEMY
     row_idx = next(i for i, r in enumerate(setup._rows())
                    if r.get("field") == "n_destroyers")
     row = setup._rows()[row_idx]
@@ -243,6 +307,7 @@ def test_stepper_clamp_at_max(setup):
 
 def test_stepper_clamp_at_min(setup):
     """Stepper stops at lo and does not wrap."""
+    setup._page = _PAGE_ENEMY
     row_idx = next(i for i, r in enumerate(setup._rows())
                    if r.get("field") == "n_destroyers")
     row = setup._rows()[row_idx]
@@ -254,7 +319,7 @@ def test_stepper_clamp_at_min(setup):
 
 def test_reload_stepper_step_5(setup):
     """Reload rows step by 5 s per press."""
-    setup.handle_event(key_event(pygame.K_TAB))    # armory page
+    setup._page = _PAGE_ARMORY
     row_idx = next(i for i, r in enumerate(setup._rows())
                    if r.get("field") == "oniks_mag_reload_s")
     setup._sel = row_idx
@@ -268,7 +333,7 @@ def test_armory_has_kh31p_ammo_stepper(setup):
     bounded by CLAMP_ARM_AMMO, step 1, so the player can stock the player ARM.
     OFF (0) by default keeps the byte-identical out-of-the-box battle."""
     from world.combat_config import CLAMP_ARM_AMMO
-    setup.handle_event(key_event(pygame.K_TAB))     # armory page
+    setup._page = _PAGE_ARMORY
     row = next(r for r in setup._rows() if r.get("field") == "kh31p_ammo")
     assert row["kind"] == "stepper"
     assert row["step"] == 1
