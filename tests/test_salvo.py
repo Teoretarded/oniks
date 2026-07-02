@@ -287,3 +287,28 @@ def test_fan_tag_does_not_alias_an_allocated_sim_stream():
     for tag in range(3, 17):
         other = int(np.random.default_rng([s, tag]).integers(0, 2 ** 31))
         assert fan0 != other, f"FAN ordinal-0 stream aliases the [seed,{tag}] sim stream"
+
+
+def test_tot_offsets_sorted_on_ingest_so_stagger_survives_range_order():
+    """REGRESSION: tot_delays returns delays in the CALLER's ranges order
+    (nearest-first input -> DECREASING delays), but _beat_gap differences
+    consecutive offsets and clamps negatives to 0 — an unsorted list bunched
+    the whole stagger into one tick.  start() now sorts on ingest (tubes are
+    fungible), so the schedule preserves the true gaps for any input order."""
+    q = SalvoQueue()
+    # Nearest-first ranges: tot_delays yields DECREASING delays.
+    delays = tot_delays([80_000.0, 120_000.0, 160_000.0], 700.0, margin=0.0)
+    assert delays[0] > delays[1] > delays[2]      # the trap: unsorted input
+    ok = q.start("bastion", mode="tot", count=3,
+                 target_point=(0.0, 0.0, 100_000.0), offsets=list(delays))
+    assert ok
+    assert q._offsets == sorted(delays)
+    # The inter-beat gaps reproduce the true stagger (no 0-bunching).
+    q._ordinal = 1
+    gap1 = q._beat_gap()
+    q._ordinal = 2
+    gap2 = q._beat_gap()
+    expect = sorted(delays)
+    assert gap1 == pytest.approx(expect[1] - expect[0])
+    assert gap2 == pytest.approx(expect[2] - expect[1])
+    assert gap1 > 0.0 and gap2 > 0.0

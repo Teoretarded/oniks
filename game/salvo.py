@@ -195,7 +195,13 @@ class SalvoQueue:
         """Arm a salvo of ``count`` rounds on ``platform``.  Returns False (and
         does not arm) when there is nothing to fire (count <= 0).  ``offsets``,
         when given (TOT), are the per-round launch delays from :func:`tot_delays`
-        (longest-flight first); otherwise rounds are spaced by ``interval``."""
+        (longest-flight first); otherwise rounds are spaced by ``interval``.
+
+        Offsets are SORTED on ingest: tot_delays returns delays in the
+        caller's ``ranges`` order, but tubes are fungible, so the schedule
+        fires the earliest delay first — an unsorted list would clamp
+        negative gaps to 0 in _beat_gap and bunch the stagger (latent until
+        a multi-aim-point TOT feeds differing ranges)."""
         if count <= 0:
             self._reset()
             return False
@@ -212,7 +218,8 @@ class SalvoQueue:
         self.round_id = round_id
         self.weapon_id = weapon_id
         self._seed = int(seed)
-        self._offsets = list(offsets) if offsets is not None else None
+        self._offsets = (sorted(float(o) for o in offsets)
+                         if offsets is not None else None)
         self._next_t = 0.0             # the first round fires on the next tick
         return True
 

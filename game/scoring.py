@@ -250,9 +250,9 @@ _GRADE_BANDS = ((4.5, "S"), (3.5, "A"), (2.5, "B"), (1.5, "C"))
 def grade(scorecard: ScoreCard, par: Par) -> str:
     """Map (ScoreCard vs Par) -> letter S/A/B/C/D.
 
-    Each of the five axes scores in [0, 1]; the banded sum picks the letter.
-    A lost battle (no victory) is capped below A regardless (you cannot ace a
-    battle you did not win)."""
+    Each of the five axes scores in [0, 1]; the banded sum picks the letter,
+    then the OBJECTIVE tiers it: a win grades in {S,A,B,C}, a loss in {C,D},
+    so a lost battle can never outrank a won one."""
     sc = scorecard
     score = 0.0
 
@@ -276,9 +276,17 @@ def grade(scorecard: ScoreCard, par: Par) -> str:
             letter = name
             break
 
-    # Cap: you cannot earn A/S without the win (the AAR honours the objective).
-    if not sc.victory and letter in ("S", "A"):
-        letter = "B"
+    # The AAR honours the objective: victory and defeat live in SEPARATE
+    # grade tiers so a lost battle can never OUTRANK a won one (found by
+    # review: a strong loss graded B while a messy win graded C — and the
+    # campaign pays resupply by grade, so losing could out-earn winning).
+    # A win's merit floors at C (you did win); a loss's merit caps at C
+    # (you did lose).  The only overlap is C.
+    if sc.victory:
+        if letter == "D":
+            letter = "C"
+    elif letter in ("S", "A", "B"):
+        letter = "C"
     return letter
 
 

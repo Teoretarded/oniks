@@ -172,8 +172,11 @@ def test_bad_world_grades_D():
     assert grade(card, par) == "D"
 
 
-def test_lost_battle_cannot_grade_above_B():
-    card = ScoreCard(
+def test_lost_battle_caps_at_C_and_never_outranks_a_win():
+    """Objective tiers: a loss grades in {C,D}, a win in {S,A,B,C} — a lost
+    battle can never OUTRANK a won one (review finding: a strong loss graded
+    B while a messy win graded C, and campaign resupply pays by grade)."""
+    perfect_axes_loss = ScoreCard(
         kills=10,
         enemy_total=10,
         rounds_fired=1,
@@ -185,7 +188,24 @@ def test_lost_battle_cannot_grade_above_B():
         victory=False,
     )
     par = compute_par(1337, CombatConfig(seed=1337))
-    assert grade(card, par) == "B"
+    assert grade(perfect_axes_loss, par) == "C"
+
+    terrible_axes_win = ScoreCard(
+        kills=1,
+        enemy_total=10,
+        rounds_fired=20,
+        efficiency=0.05,
+        leak_rate=0.0,
+        first_fix_t=None,
+        was_back_plotted=True,
+        base_intact_pct=0.0,
+        victory=True,
+    )
+    win_letter = grade(terrible_axes_win, par)
+    loss_letter = grade(perfect_axes_loss, par)
+    order = "SABCD"
+    assert win_letter == "C"                       # merit floors at C on a win
+    assert order.index(win_letter) <= order.index(loss_letter)
 
 
 # ------------------------------------------------- (c) was_back_plotted read

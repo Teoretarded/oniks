@@ -182,7 +182,10 @@ def apply_resupply(campaign: CampaignState, grade: str,
     frac = _RESUPPLY_BY_GRADE.get(grade, _RESUPPLY_BY_GRADE["D"])
     for weapon, (_attr, cap_field) in WEAPONS.items():
         cap = int(getattr(base, cap_field))
-        cur = int(campaign.ledger.get(weapon, cap))
+        # A key missing from the ledger reads as EMPTY (0), never as a free
+        # full magazine — a hand-edited / older save with a dropped key must
+        # not out-earn a played battle.
+        cur = int(campaign.ledger.get(weapon, 0))
         grant = int(round(cap * frac))
         campaign.ledger[weapon] = max(0, min(cap, cur + grant))
 
