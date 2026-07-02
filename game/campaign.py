@@ -109,13 +109,40 @@ def derive_seed(base_seed: int, battle_idx: int) -> int:
 def _escalated_counts(base: CombatConfig, battle_idx: int) -> dict:
     """Monotonic enemy escalation by battle index, built on the EXISTING base
     counts.  ``clamp_config`` bounds every value downstream, so escalation can
-    never exceed the spawnable ceiling.  battle_idx 0 -> base counts unchanged."""
+    never exceed the spawnable ceiling.  battle_idx 0 -> base counts unchanged.
+
+    The curve stages the M5 threat AXES, not just more of the same hull —
+    each battle band introduces a new doctrinal problem (all playable/
+    counterable through the setup-screen features, all += on the base so a
+    player-configured loadout escalates FROM its own numbers):
+      b>=1  screen thickens (destroyers, then AAW hulls every 2nd battle)
+      b>=2  a CEC flagship datalink hub joins the group
+      b>=2  submarines (the acoustic axis; counter = sonobuoys + ASW)
+      b>=3  escort jammers (the EW axis) + ground-attack hulls
+      b>=4  amphibious transports (the TIMED beachhead lose-path)
+    """
     b = int(battle_idx)
-    return {
-        "n_destroyers":  int(base.n_destroyers) + b,
+    subs = int(base.n_subs) + (b // 2 if b >= 2 else 0)
+    counts = {
+        "n_destroyers":   int(base.n_destroyers) + b,
         "n_enemy_radars": int(base.n_enemy_radars) + b // 2,
-        "n_awacs":       int(base.n_awacs) + b // 3,
+        "n_awacs":        int(base.n_awacs) + b // 3,
+        "n_aaw":          int(base.n_aaw) + b // 2,
+        "n_flagship":     max(int(base.n_flagship), 1 if b >= 2 else 0),
+        "n_subs":         subs,
+        "n_jammers":      int(base.n_jammers) + (b // 3),
+        "n_ground_attack": int(base.n_ground_attack) + b // 3,
+        "n_transports":   (int(base.n_transports) + 1 + (b - 4) // 3
+                           if b >= 4 else int(base.n_transports)),
     }
+    # FAIRNESS: the acoustic axis only escalates WITH its counter — a sub
+    # battle with zero buoys/ASW is an uncounterable lose-path.  The kit
+    # arrives as campaign reinforcements (never below the player's own base
+    # loadout; fresh each battle, not part of the carry ledger).
+    if subs > 0:
+        counts["n_sonobuoys"] = max(int(base.n_sonobuoys), 8 * subs)
+        counts["asw_ammo"] = max(int(base.asw_ammo), 2 * subs)
+    return counts
 
 
 def next_config(campaign: CampaignState,

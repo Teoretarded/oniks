@@ -60,6 +60,69 @@ def test_escalation_monotonic_to_the_clamp_ceiling():
     assert next_config(camp, base).n_destroyers == CLAMP_DESTROYERS[1]
 
 
+def test_escalation_stages_the_m5_threat_axes():
+    """The curve introduces the M5 axes on a schedule (not just more of the
+    same hull): flagship+subs from battle 2, jammers/ground-attack from 3,
+    transports from 4 — every count still clamp-bounded downstream."""
+    camp = new_campaign(1337, n_battles=12)
+    base = CombatConfig(seed=1337)
+
+    camp.battle_idx = 0
+    cfg0 = next_config(camp, base)
+    assert (cfg0.n_flagship, cfg0.n_subs, cfg0.n_jammers,
+            cfg0.n_transports) == (0, 0, 0, 0)     # battle 0 = the base battle
+
+    camp.battle_idx = 2
+    cfg2 = next_config(camp, base)
+    assert cfg2.n_flagship == 1
+    assert cfg2.n_subs == 1
+
+    camp.battle_idx = 3
+    cfg3 = next_config(camp, base)
+    assert cfg3.n_jammers == 1
+    assert cfg3.n_ground_attack == 1
+
+    camp.battle_idx = 4
+    cfg4 = next_config(camp, base)
+    assert cfg4.n_transports == 1
+
+    # Monotonic per axis across the whole ladder
+    prev = {}
+    for idx in range(12):
+        camp.battle_idx = idx
+        cfg = next_config(camp, base)
+        for f in ("n_destroyers", "n_aaw", "n_subs", "n_jammers",
+                  "n_ground_attack", "n_transports"):
+            v = getattr(cfg, f)
+            assert v >= prev.get(f, 0), (f, idx)
+            prev[f] = v
+
+
+def test_escalation_subs_arrive_with_their_counter():
+    """FAIRNESS: whenever the curve fields a submarine the player gets the
+    acoustic kit to fight it (buoys + ASW rounds) — a sub battle with zero
+    counters is an uncounterable lose-path."""
+    camp = new_campaign(1337, n_battles=12)
+    base = CombatConfig(seed=1337)          # base has NO sub / NO ASW kit
+    for idx in range(2, 12):
+        camp.battle_idx = idx
+        cfg = next_config(camp, base)
+        if cfg.n_subs > 0:
+            assert cfg.n_sonobuoys >= 8, idx
+            assert cfg.asw_ammo >= 2, idx
+
+
+def test_escalation_never_lowers_a_player_configured_kit():
+    """A player who ALREADY configured a big buoy stock keeps it — the
+    reinforcement is a floor, never a cut."""
+    camp = new_campaign(1337, n_battles=12)
+    base = CombatConfig(seed=1337, n_subs=1, n_sonobuoys=40, asw_ammo=10)
+    camp.battle_idx = 2
+    cfg = next_config(camp, base)
+    assert cfg.n_sonobuoys == 40
+    assert cfg.asw_ammo == 10
+
+
 # --------------------------------------------------------------- persistence
 
 def test_save_load_round_trip(tmp_path):
