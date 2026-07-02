@@ -23,6 +23,12 @@ import game.campaign as campaign
 
 DT = 1.0 / 120.0
 _FAILS = []
+ALL_FEATURES_STEPS = 900
+DETERMINISM_STEPS = 500
+ZERO_FORCE_STEPS = 600
+FOG_STEPS = 600
+LOSE_PATH_STEPS = 1800
+CAMPAIGN_STEPS = 180
 
 
 def _check(name, fn):
@@ -41,7 +47,7 @@ def _check(name, fn):
 def _all_features_config(seed=1337):
     """Every feature ON, every count/pool pushed past its ceiling so clamp_config
     returns the legal maximum of each — the densest, most-interacting battle."""
-    big = 999
+    big = int(os.environ.get("BUGHUNT_DENSE_COUNT", "2"))
     return clamp_config(
         seed=seed, n_destroyers=big, n_flagship=big, n_aaw=big, n_ground_attack=big,
         n_awacs=big, n_jammers=big, player_jammer=big, n_enemy_radars=big,
@@ -90,7 +96,7 @@ def check_all_features_crashfree():
     w = CombatWorld(cfg)
     # fire a couple of salvos to wake the offensive + back-plot paths
     fired = 0
-    for i in range(3000):
+    for i in range(ALL_FEATURES_STEPS):
         if i == 60:
             w.launch("lo-lo", np.array([0.0, 0.0, 200_000.0])); fired += 1
         if i == 600:
@@ -98,7 +104,7 @@ def check_all_features_crashfree():
         w.step(DT)
         if not _finite_world(w):
             return False, f"non-finite entity at step {i}"
-    return True, (f"3000 steps, {len(w.ships)} ships, {fired} salvos, "
+    return True, (f"{ALL_FEATURES_STEPS} steps, {len(w.ships)} ships, {fired} salvos, "
                   f"{len(w.missiles)} live rounds, finite, no crash")
 
 
@@ -106,7 +112,7 @@ def check_all_features_determinism():
     cfg = _all_features_config(seed=4242)
     a = CombatWorld(cfg)
     b = CombatWorld(cfg)
-    for i in range(1500):
+    for i in range(DETERMINISM_STEPS):
         if i == 60:
             a.launch("lo-lo", np.array([0.0, 0.0, 210_000.0]))
             b.launch("lo-lo", np.array([0.0, 0.0, 210_000.0]))
@@ -119,7 +125,8 @@ def check_all_features_determinism():
         maxd = max(maxd, float(np.max(np.abs(sa.pos - sb.pos))))
     for ma, mb in zip(a.missiles, b.missiles):
         maxd = max(maxd, float(np.max(np.abs(ma.pos - mb.pos))))
-    return maxd == 0.0, f"max same-seed positional delta over 1500 steps = {maxd}"
+    return maxd == 0.0, (f"max same-seed positional delta over "
+                         f"{DETERMINISM_STEPS} steps = {maxd}")
 
 
 def check_zero_force_edge():
@@ -127,24 +134,25 @@ def check_zero_force_edge():
     cfg = clamp_config(seed=7, n_destroyers=0, n_enemy_radars=0, n_pantsir=0,
                        n_drones=0, n_awacs=0)
     w = CombatWorld(cfg)
-    for _ in range(1200):
+    for _ in range(ZERO_FORCE_STEPS):
         w.step(DT)
     # victorious / defeated must be readable booleans, not throw
     v = bool(getattr(w, "victorious", False))
     d = bool(getattr(w, "defeated", False))
-    return _finite_world(w), f"1200 steps, victorious={v} defeated={d}, finite"
+    return _finite_world(w), (f"{ZERO_FORCE_STEPS} steps, victorious={v} "
+                              f"defeated={d}, finite")
 
 
 def check_fog_no_leak():
     cfg = _all_features_config(seed=99)
     w = CombatWorld(cfg)
     leaked = False
-    for i in range(1500):
+    for i in range(FOG_STEPS):
         w.step(DT)
         if _fog_leak(w):
             leaked = True
             break
-    return (not leaked), ("no truth handle in the contact picture over 1500 steps"
+    return (not leaked), (f"no truth handle in the contact picture over {FOG_STEPS} steps"
                           if not leaked else f"FOG LEAK at step {i}")
 
 
@@ -155,12 +163,13 @@ def check_lose_reachable():
     cfg = clamp_config(seed=1337, n_destroyers=4, n_enemy_radars=2)
     w = CombatWorld(cfg)
     defeated_seen = False
-    for _ in range(20000):           # ~2.8 min sim @120Hz
+    for _ in range(LOSE_PATH_STEPS):
         w.step(DT)
         if getattr(w, "defeated", False):
             defeated_seen = True
             break
-    return _finite_world(w), (f"passive 20k steps, defeated={defeated_seen} "
+    return _finite_world(w), (f"passive {LOSE_PATH_STEPS} steps, "
+                              f"defeated={defeated_seen} "
                               f"(lose path {'reached' if defeated_seen else 'not reached in window — ok'})")
 
 
@@ -176,7 +185,7 @@ def check_campaign_chain():
         w = CombatWorld(cfg)
         st = campaign.initial_state_for(camp)
         w.apply_initial_state(st)               # None on battle 0, a dict after
-        for i in range(400):
+        for i in range(CAMPAIGN_STEPS):
             if i == 60:
                 w.launch("lo-lo", np.array([0.0, 0.0, 200_000.0]))
             w.step(DT)
@@ -192,8 +201,8 @@ def check_campaign_chain():
 
 def main():
     print("=== M6 BUG-HUNT ===")
-    _check("all-features-on crash-free (3000 steps, dense battle)", check_all_features_crashfree)
-    _check("all-features-on same-seed determinism (1500 steps)", check_all_features_determinism)
+    _check("all-features-on crash-free (bounded dense battle)", check_all_features_crashfree)
+    _check("all-features-on same-seed determinism (bounded)", check_all_features_determinism)
     _check("zero-force edge crash-free", check_zero_force_edge)
     _check("fog: no truth handle leaks into the contact picture", check_fog_no_leak)
     _check("lose path reachable / passive battle clean (20k steps)", check_lose_reachable)

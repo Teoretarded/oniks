@@ -182,6 +182,7 @@ from world.world import (CANISTER_MOUTH_OFFSET, SAM_MOUTH_OFFSETS, SAM_TEL_POS,
 # raised cliff band that carries the S-300 pad; the on-land pin is LOCKED
 # by tests/test_combat_world.py — nudge z south if generation ever changes).
 RADAR_STATION_XZ = (40_000.0, -6_000.0)
+PLAYER_RADAR_SPACING_M = 28_000.0
 RADAR_ANTENNA_M = 18.0          # radome center above the slab
 ONIKS_LAUNCHER_SPACING_M = 6.0  # side-by-side gap between Oniks TELs (~2.9 m wide)
 S300_LAUNCHER_SPACING_M = 8.0   # side-by-side gap between S-300 TELs (~3.05 m wide)
@@ -894,13 +895,16 @@ class CombatWorld(WorldState):
         # byte-identical.  When set, a freshly spawned drone starts STARTS COLD
         # (jam_active False) — the player toggles it loud with the JAM key.
         self._player_jammer = bool(config.player_jammer)
-        self.drone = self._spawn_drone(recon_rng)
+        self._drone_count = int(config.n_drones)
+        self.drone = (self._spawn_drone(recon_rng)
+                      if self._drone_count > 0 else None)
         self.drone_wrecks: list[ReconDrone] = []   # falling airframes
         self.elint = ElintReceiver(
             rng=recon_rng, height_fn=self._height_fn)
         self.sar = SarSensor()
         self.rwr = RwrReceiver(
-            drone_id=self.drone.aircraft_id,
+            drone_id=(self.drone.aircraft_id if self.drone is not None
+                      else None),
             height_fn=self._height_fn)
         self._drone_respawn_left = 0.0
         self._elint_next_t = 0.0
@@ -980,9 +984,17 @@ class CombatWorld(WorldState):
                               height_fn=self._height_fn)
             base.parked.append(fighter)
             self.enemy_air.append(fighter)
-        self.awacs = Awacs("awacs_00", AWACS_ANCHOR_A_XZ, AWACS_ANCHOR_B_XZ,
-                           height_fn=self._height_fn)
-        self.enemy_air.append(self.awacs)
+        self.awacs_units: list[Awacs] = []
+        for i in range(int(config.n_awacs)):
+            dx = i * 25_000.0
+            awacs = Awacs(
+                f"awacs_{i:02d}",
+                (AWACS_ANCHOR_A_XZ[0] + dx, AWACS_ANCHOR_A_XZ[1]),
+                (AWACS_ANCHOR_B_XZ[0] + dx, AWACS_ANCHOR_B_XZ[1]),
+                height_fn=self._height_fn)
+            self.awacs_units.append(awacs)
+            self.enemy_air.append(awacs)
+        self.awacs = self.awacs_units[0] if self.awacs_units else None
         # ---- M3-F2 escort jammers (config.n_jammers, DEFAULT 0) ----
         # Each is enemy_air (NOT a Ship): a standoff Growler whose always-on
         # emitter collapses the player radar via sim/ew.py. n_jammers=0 builds
@@ -1299,7 +1311,7 @@ class CombatWorld(WorldState):
 
             r = Radar(
                 radar_id=radar_id,
-                pos=(xpos, ypos + _ENEMY_RADAR_ANTENNA_M, zpos),
+                pos=(xpos, ypos, zpos),
                 antenna_m=_ENEMY_RADAR_ANTENNA_M,
                 ranges=_ENEMY_RADAR_RANGES,
                 height_fn=self._height_fn,
@@ -1320,16 +1332,39 @@ class CombatWorld(WorldState):
     def _spawn_aircraft(self):
         return []
 
+    def _player_radar_xz(self, idx: int) -> tuple[float, float]:
+        if idx <= 0:
+            return RADAR_STATION_XZ
+        x, z = RADAR_STATION_XZ
+        sign = -1.0 if idx % 2 else 1.0
+        step = (idx + 1) // 2
+        return (x + sign * PLAYER_RADAR_SPACING_M * step,
+                z - PLAYER_RADAR_SPACING_M * step)
+
     def _spawn_sites(self):
-        return COMBAT_SITES
+        n = int(getattr(self._config, "n_player_radars", 1))
+        if n <= 1:
+            return COMBAT_SITES
+        sites = []
+        for i in range(n):
+            xz = self._player_radar_xz(i)
+            sites.append({"id": f"radar_player_{i:02d}", "kind": "radar",
+                          "pos": xz, "name": "RADAR STN (FRIENDLY)"})
+        return sites
 
     def _build_contacts(self) -> ContactBoard:
-        x, z = RADAR_STATION_XZ
-        self.radar_station = Radar(
-            "radar_player_00", (x, terrain_height_scalar(x, z), z),
-            RADAR_ANTENNA_M, PLAYER_RADAR_RANGES,
-            height_fn=self._height_fn)
-        self.radar_net = RadarNetwork([self.radar_station])
+        n = int(getattr(self._config, "n_player_radars", 1))
+        self.player_radars: list[Radar] = []
+        for i in range(max(1, n)):
+            x, z = self._player_radar_xz(i)
+            radar = Radar(
+                f"radar_player_{i:02d}",
+                (x, terrain_height_scalar(x, z), z),
+                RADAR_ANTENNA_M, PLAYER_RADAR_RANGES,
+                height_fn=self._height_fn)
+            self.player_radars.append(radar)
+        self.radar_station = self.player_radars[0]
+        self.radar_net = RadarNetwork(list(self.player_radars))
         return ContactBoard((BASE_POS[0], BASE_POS[2]),
                             visible_fn=self._player_visible)
 
@@ -2031,9 +2066,8 @@ class CombatWorld(WorldState):
         Resolved lazily — the defense controller is built before the AWACS and
         before _spawn_enemy_radars in __init__."""
         cues = []
-        awacs = getattr(self, "awacs", None)
-        if awacs is not None and awacs.alive:
-            cues.append(awacs.radar)
+        cues.extend(a.radar for a in getattr(self, "awacs_units", [])
+                    if a.alive)
         for r in getattr(self, "_enemy_ground_radars", []):
             if r.alive:
                 cues.append(r)
@@ -2216,8 +2250,8 @@ class CombatWorld(WorldState):
         radars = [s.radar for s in self.ships
                   if s.alive and not isinstance(s, Carrier)
                   and getattr(s, "radar", None) is not None]
-        if self.awacs.alive:
-            radars.append(self.awacs.radar)
+        radars.extend(a.radar for a in getattr(self, "awacs_units", [])
+                      if a.alive)
         radars.extend(f.radar for f in self._fighter_list if f.alive)
         return radars
 
@@ -2245,9 +2279,10 @@ class CombatWorld(WorldState):
         physically passes (range class + horizon + terrain LOS)."""
         pic = self.commander.picture
         radar = self.radar_station
+        any_awacs_alive = any(a.alive for a in getattr(self, "awacs_units", []))
         heard = (radar.alive and radar.emitting
                  and (any(s.alive for s in self.ships)
-                      or self.awacs.alive
+                      or any_awacs_alive
                       or any(f.alive for f in self._fighter_list)))
         pic.update_emitter(radar.radar_id, radar.pos, heard, dt_s, now)
         if heard:
@@ -2264,7 +2299,7 @@ class CombatWorld(WorldState):
         # and the fix DECAYS — the node drops out of the picture with its mast.
         # At n_cbr=0 _cbr_radars is empty -> this loop is a no-op (byte-identical).
         any_enemy_alive = (any(s.alive for s in self.ships)
-                           or self.awacs.alive
+                           or any_awacs_alive
                            or any(f.alive for f in self._fighter_list))
         for cbr in self._cbr_radars:
             cbr_heard = (cbr.alive and cbr.emitting and any_enemy_alive)
@@ -2429,7 +2464,7 @@ class CombatWorld(WorldState):
         elif kind == "vector_to_drone":
             self._vector_fighter_to_drone(order)
         elif kind == "awacs_flee":
-            if self.awacs.alive:
+            if self.awacs is not None and self.awacs.alive:
                 self.awacs.flee(order["threat_pos"])
                 # EMCON: a fleeing AWACS runs SILENT — emitting while bugging
                 # out only refines the player's ELINT fix and feeds a
@@ -2437,7 +2472,7 @@ class CombatWorld(WorldState):
                 # cueing during the silent window (Phase 8 smarter AWACS).
                 self.awacs.radar.emitting = False
         elif kind == "awacs_resume":
-            if self.awacs.alive:
+            if self.awacs is not None and self.awacs.alive:
                 self.awacs.stop_flee()
                 self.awacs.radar.emitting = True   # threat clear: sensor back up
         elif kind in ("ship_silent", "ship_emit"):

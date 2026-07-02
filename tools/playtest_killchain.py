@@ -43,6 +43,18 @@ def click(state, xz, button=1):
                                               pos=(int(sx), int(sy))))
 
 
+def fast_step_plan(seconds, max_dt=0.25):
+    """Coarse chunks for non-ballistic waits; exact total, bounded count."""
+    total = float(seconds)
+    dt = float(max_dt)
+    chunks = []
+    while total > 1e-9:
+        step = min(dt, total)
+        chunks.append(step)
+        total -= step
+    return chunks
+
+
 def step(state, seconds):
     for _ in range(int(seconds / PHYS_DT)):
         state.sim_step(PHYS_DT)
@@ -80,8 +92,8 @@ def main() -> int:
 
     # Fast-forward until a SURFACE track forms (SAR) or the drone dies / times out.
     surf_cid = None
-    for _ in range(int(2400.0 / PHYS_DT)):       # up to 40 min sim
-        state.sim_step(PHYS_DT)
+    for dt in fast_step_plan(2400.0):            # up to 40 min sim
+        state.sim_step(dt)
         surf = [c for c, t in world.contacts.tracks.items()
                 if not t.get("is_air")]
         if surf:

@@ -123,13 +123,15 @@ def next_config(campaign: CampaignState,
     """The CombatConfig for the campaign's CURRENT battle.
 
     Starts from the base config (preserving the player's loadout caps + map),
-    re-seeds via :func:`derive_seed`, escalates the enemy counts, and runs the
-    whole thing through ``clamp_config`` (NEVER a hand-built frozen config that
-    bypasses the legal ranges)."""
+    keeps battle 0 on the selected seed, re-seeds later battles via
+    :func:`derive_seed`, escalates the enemy counts, and runs the whole thing
+    through ``clamp_config`` (NEVER a hand-built frozen config that bypasses the
+    legal ranges)."""
     base = base_config or CombatConfig(seed=campaign.seed)
     fields = dataclasses.asdict(base)
     fields.update(_escalated_counts(base, campaign.battle_idx))
-    fields["seed"] = derive_seed(campaign.seed, campaign.battle_idx)
+    fields["seed"] = (int(base.seed) if campaign.battle_idx == 0
+                      else derive_seed(campaign.seed, campaign.battle_idx))
     return clamp_config(**fields)
 
 
@@ -195,6 +197,9 @@ def advance(campaign: CampaignState, world, grade: str,
     campaign.ledger = snap["ledger"]
     campaign.base_damage = snap["base_damage"]
     campaign.grades.append(str(grade))
+    if bool(getattr(world, "defeated", False)):
+        campaign.battle_idx = campaign.n_battles
+        return
     apply_resupply(campaign, grade, base_config)
     campaign.battle_idx += 1
 

@@ -58,6 +58,11 @@ def main() -> int:
     print(f"[probe] clicked map at ({int(sx)}, {int(sy)}); "
           f"selected={state.tactical_map.selected_missile is sam}, "
           f"followed={state.followed is sam}")
+    if state.followed is not sam:
+        state.tactical_map.selected_missile = sam
+        state.followed = sam
+        state.rig.retarget()
+        print("[probe] direct-selected hostile SM-2 for camera coverage")
     keep_map_open = os.environ.get("PROBE_MAP_OPEN") == "1"
     for _ in range(240):                     # 2 s with the map open
         state.sim_step(PHYS_DT)

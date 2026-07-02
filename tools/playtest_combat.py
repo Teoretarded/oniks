@@ -40,6 +40,14 @@ def key(state, k):
     state.handle_event(pygame.event.Event(pygame.KEYUP, key=k, mod=0))
 
 
+def tab_to(state, platform, max_tabs=10):
+    for _ in range(max_tabs):
+        if state.active_platform == platform:
+            return True
+        key(state, pygame.K_TAB)
+    return state.active_platform == platform
+
+
 def click(state, world_xz, button=1):
     sx, sy = state.tactical_map.view.world_to_screen(
         (float(world_xz[0]), float(world_xz[1])))
@@ -111,8 +119,7 @@ def main() -> int:
     print("[beat2]", picture(world))
 
     # ---- Beat 3: task the recon drone toward the fleet ----
-    key(state, pygame.K_TAB)          # bastion -> s300
-    key(state, pygame.K_TAB)          # s300 -> drone
+    tab_to(state, "drone")
     print("[beat3] active platform:", state.active_platform)
     # Route the drone out toward the believed fleet bearing (+z, toward enemy).
     for wp in ((20_000.0, 120_000.0), (0.0, 220_000.0), (-30_000.0, 300_000.0)):
@@ -132,8 +139,7 @@ def main() -> int:
         print("[beat4] actionable ELINT fixes:", fixes)
 
     # ---- Beat 5: launch a lo-lo Oniks at a surface track ----
-    key(state, pygame.K_TAB)          # drone -> bastion
-    key(state, pygame.K_TAB)          # ... wrap: bastion? confirm below
+    tab_to(state, "bastion")
     print("[beat5] active platform:", state.active_platform)
     surf_tracks = [(cid, t) for cid, t in world.contacts.tracks.items()
                    if not t.get("is_air")]

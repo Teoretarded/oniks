@@ -28,7 +28,7 @@ def test_derive_seed_deterministic_and_distinct():
 
 # --------------------------------------------------------------- escalation
 
-def test_next_config_clamped_and_reseeded_at_any_battle_idx():
+def test_next_config_battle_zero_keeps_selected_seed_then_reseeds():
     camp = new_campaign(1337, n_battles=60)
     base = CombatConfig(seed=1337)
     for idx in (0, 1, 5, 20, 59):
@@ -41,8 +41,10 @@ def test_next_config_clamped_and_reseeded_at_any_battle_idx():
         # player loadout caps preserved from the base config
         assert cfg.oniks_ammo == base.oniks_ammo
         assert cfg.s300_48n6_ammo == base.s300_48n6_ammo
-        # re-seeded deterministically per battle (NOT the raw base seed)
-        assert cfg.seed == derive_seed(1337, idx)
+        # Battle 0 must reproduce the selected one-off battle exactly; later
+        # campaign battles get fresh deterministic seeds.
+        expected = base.seed if idx == 0 else derive_seed(1337, idx)
+        assert cfg.seed == expected
 
 
 def test_escalation_monotonic_to_the_clamp_ceiling():
@@ -150,6 +152,24 @@ def test_advance_snapshots_records_grade_and_steps():
     # snapshotted 3, then B-grade resupply (+30% of 8 = +2) -> 5, capped at 8
     assert camp.ledger["oniks"] == min(8, 3 + round(0.30 * 8))
     assert not camp.complete
+
+
+def test_advance_after_defeat_ends_campaign_without_next_battle():
+    cfg = CombatConfig(seed=1337, oniks_ammo=8)
+    world = CombatWorld(cfg)
+    world._oniks_ammo = 3
+    for s in world.structures:
+        if s.kind == "bastion_tel":
+            s.alive = False
+    assert world.defeated
+
+    camp = new_campaign(1337, n_battles=5)
+    advance(camp, world, "D", cfg)
+
+    assert camp.complete
+    assert camp.battle_idx == camp.n_battles
+    assert camp.grades == ["D"]
+    assert camp.ledger["oniks"] == 3
 
 
 def test_campaign_completes_after_n_battles():

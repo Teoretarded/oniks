@@ -172,6 +172,22 @@ def test_bad_world_grades_D():
     assert grade(card, par) == "D"
 
 
+def test_lost_battle_cannot_grade_above_B():
+    card = ScoreCard(
+        kills=10,
+        enemy_total=10,
+        rounds_fired=1,
+        efficiency=10.0,
+        leak_rate=1.0,
+        first_fix_t=1.0,
+        was_back_plotted=False,
+        base_intact_pct=1.0,
+        victory=False,
+    )
+    par = compute_par(1337, CombatConfig(seed=1337))
+    assert grade(card, par) == "B"
+
+
 # ------------------------------------------------- (c) was_back_plotted read
 
 def test_was_back_plotted_yes_when_targetable_cluster():

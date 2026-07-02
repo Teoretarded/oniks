@@ -127,6 +127,46 @@ def test_defaults_match_locked_schema():
     assert c.beachhead_grace_s == 180.0
 
 
+def test_world_honors_awacs_drone_and_player_radar_counts():
+    from world.combat import CombatWorld
+
+    zero = CombatWorld(CombatConfig(seed=1337, n_awacs=0, n_drones=0))
+    assert [e for e in zero.enemy_air
+            if e.__class__.__name__ == "Awacs"] == []
+    assert zero.drone is None
+
+    many = CombatWorld(CombatConfig(seed=1337, n_awacs=3, n_player_radars=4))
+    assert len([e for e in many.enemy_air
+                if e.__class__.__name__ == "Awacs"]) == 3
+    assert len([r for r in many.radar_net.radars
+                if r.radar_id.startswith("radar_player_")]) == 4
+
+
+def test_world_uses_every_awacs_as_enemy_cue_radar():
+    from world.combat import CombatWorld
+
+    world = CombatWorld(CombatConfig(seed=1337, n_awacs=3,
+                                     n_enemy_radars=0))
+    awacs_radars = [e.radar for e in world.enemy_air
+                    if e.__class__.__name__ == "Awacs"]
+    cues = world._enemy_cue_radars()
+
+    assert len(awacs_radars) == 3
+    assert all(r in cues for r in awacs_radars)
+
+
+def test_enemy_ground_radar_antenna_height_not_double_counted():
+    from world.combat import CombatWorld, _ENEMY_RADAR_ANTENNA_M
+    from world.generation import terrain_height_scalar
+
+    world = CombatWorld(CombatConfig(seed=1337, n_enemy_radars=1))
+    _struct, radar = world.enemy_radars[0]
+    terrain = terrain_height_scalar(float(radar.pos[0]), float(radar.pos[2]))
+
+    assert radar.pos[1] == terrain
+    assert radar.antenna_alt - terrain == _ENEMY_RADAR_ANTENNA_M
+
+
 # ---------------------------------------------------------------------------
 # M5 #1: amphibious config fields, clamp (OFF default survivable)
 # ---------------------------------------------------------------------------

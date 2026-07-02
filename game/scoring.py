@@ -251,7 +251,7 @@ def grade(scorecard: ScoreCard, par: Par) -> str:
     """Map (ScoreCard vs Par) -> letter S/A/B/C/D.
 
     Each of the five axes scores in [0, 1]; the banded sum picks the letter.
-    A lost battle (no victory) is capped below S regardless (you cannot ace a
+    A lost battle (no victory) is capped below A regardless (you cannot ace a
     battle you did not win)."""
     sc = scorecard
     score = 0.0
@@ -276,9 +276,9 @@ def grade(scorecard: ScoreCard, par: Par) -> str:
             letter = name
             break
 
-    # Cap: you cannot earn S without the win (the AAR honours the objective).
-    if not sc.victory and letter == "S":
-        letter = "A"
+    # Cap: you cannot earn A/S without the win (the AAR honours the objective).
+    if not sc.victory and letter in ("S", "A"):
+        letter = "B"
     return letter
 
 

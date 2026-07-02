@@ -397,14 +397,17 @@ def pick_contact(view: MapView, board, sim_time: float, mouse_px,
     return best
 
 
-def pick_missile(view: MapView, missiles, mouse_px):
-    """The live own missile whose diamond is nearest to ``mouse_px`` within
-    PICK_RADIUS_PX, else None (Task RTG selection). Pick PRIORITY over
+def pick_missile(view: MapView, missiles, mouse_px, include_hostile=False):
+    """The live missile whose diamond is nearest to ``mouse_px`` within
+    PICK_RADIUS_PX, else None (Task RTG selection). By default only own rounds
+    are pickable; probe code can opt into hostile rounds explicitly. Pick PRIORITY over
     contacts is structural: ``TacticalMap._click_target`` tries missiles
     before the contact/coordinate flow."""
     best, best_d = None, PICK_RADIUS_PX
     for m in missiles:
         if not getattr(m, "alive", True):
+            continue
+        if getattr(m, "is_hostile", False) and not include_hostile:
             continue
         sx, sy = view.world_to_screen((m.pos[0], m.pos[2]))
         d = float(np.hypot(sx - float(mouse_px[0]), sy - float(mouse_px[1])))

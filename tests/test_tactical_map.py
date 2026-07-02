@@ -155,9 +155,10 @@ def test_air_symbol_selection_and_altitude_text():
 # ------------------------------------------------------- missile pick (RTG)
 
 class _FakeMissile:
-    def __init__(self, x, z, alive=True):
+    def __init__(self, x, z, alive=True, is_hostile=False):
         self.pos = np.array([x, 100.0, z])
         self.alive = alive
+        self.is_hostile = is_hostile
 
 
 def test_pick_missile_nearest_within_14px_else_none():
@@ -174,6 +175,15 @@ def test_pick_missile_nearest_within_14px_else_none():
     assert pick_missile(v, missiles, (pa[0] + 8.0, pa[1])) is b   # nearer b
     assert pick_missile(v, missiles, (pa[0], pa[1] + 15.0)) is None
     assert pick_missile(v, [dead], (pa[0], pa[1])) is None        # dead: never
+
+
+def test_pick_missile_can_select_hostile_round_for_camera_probe():
+    v = view(center=(0.0, 200_000.0), mpp=400.0)
+    hostile = _FakeMissile(10_000.0, 205_000.0, is_hostile=True)
+    px = v.world_to_screen((10_000.0, 205_000.0))
+
+    assert pick_missile(v, [hostile], px, include_hostile=True) is hostile
+    assert pick_missile(v, [hostile], px) is None
 
 
 # -------------------------------------------------- waypoint append/clear
