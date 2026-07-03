@@ -28,20 +28,39 @@ from typing import Optional
 
 import pygame
 
+import dataclasses
+
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.states import (
-    ACCENT, ACCENT_DIM, BG0, BG2, DANGER, DISABLED, FOCUS_BAR_W,
-    FOOTER_MARGIN, MUTED, OK_COL, PAD, PRESS_FLASH_A, PRESS_FLASH_S, ROW_H,
-    TEXT_COL, WARN, GameState, draw_header_rule, draw_panel, move_selection,
+    ACCENT, BG0, BG2, DANGER, DISABLED, FAINT, GRADE_COLS, GRADE_TINTS,
+    LINE_COL, MUTED, OK_COL, PAD, PRESS_FILL, PRESS_FLASH_S, ROW_DIVIDER,
+    ROW_H, TEXT_COL, WARN, GameState, draw_hint_bar, draw_panel,
+    draw_plate_header, gauge_bar, move_selection,
 )
 import game.campaign as campaign
 from world.combat_config import CombatConfig
 
-# --- Layout -------------------------------------------------------------------
+# --- Layout (Wardroom Dusk, mock 05: ladder chips + ledger bars + intel) --------
 
-HUB_PANEL_W = 680
+HUB_CONTENT_W = 1160
+GRID_GAP = 20
+LADDER_CHIP = 30             # px, grade-ladder slot box size
+LEDGER_LABEL_W = 130         # px, ledger weapon-name column
+LEDGER_VALUE_W = 56          # px, right-aligned cur/cap column
 HUB_FOOTER = ("UP/DN SELECT   LT/RT ADJUST   ENTER OK   "
               "R RANDOMIZE SEED   ESC BACK")
+# HONEST carry-over caption: game/campaign.py resupplies a grade-scaled
+# fraction between battles (_RESUPPLY_BY_GRADE S 60% .. D 10%) — the mock's
+# 'NO RESUPPLY' placeholder copy contradicted the sim and is corrected here.
+CARRY_CAPTION = "CARRY-OVER AMMO - RESUPPLY SCALES WITH GRADE"
+
+# Ledger display names + bar family: offense = own-strike green, the SAM
+# pools = amber (mock 05's two-family ledger).
+_LEDGER_NAMES = {
+    "oniks": "ONIKS", "zircon": "ZIRCON", "asbm": "ASBM", "kh31p": "KH-31P",
+    "s300_48n6": "S-300 48N6", "s300_40n6": "S-300 40N6",
+}
+_LEDGER_DEFENSIVE = frozenset({"s300_48n6", "s300_40n6"})
 
 # Fresh-mode steppers
 _BATTLES_LO, _BATTLES_HI = 3, 12
@@ -60,9 +79,6 @@ ABANDON        = "ABANDON CAMPAIGN"
 NEW_CAMPAIGN   = "NEW CAMPAIGN"
 BACK           = "BACK"
 
-_GRADE_COLS = {"S": OK_COL, "A": OK_COL, "B": WARN, "C": DANGER, "D": DANGER}
-
-
 def ladder_text(camp) -> str:
     """Pure: the grade ladder line -- one letter per finished battle, '-' for
     the battles still ahead ('S A B - - -')."""
@@ -71,15 +87,16 @@ def ladder_text(camp) -> str:
 
 
 def ledger_rows(camp, base: Optional[CombatConfig] = None) -> list:
-    """Pure: (label, 'cur/cap') per carried weapon for the info block.  An
-    EMPTY ledger (fresh battle 0) reads the caps themselves -- battle 0 arms
-    from the config, so cap/cap is the truth."""
+    """Pure: (label, cur, cap) per carried weapon for the ammo-ledger bars.
+    An EMPTY ledger (fresh battle 0) reads the caps themselves -- battle 0
+    arms from the config, so cap/cap is the truth.  Labels use the display
+    names (mock 05); the ints feed the 5px bar meters directly."""
     base = base or CombatConfig(seed=camp.seed)
     rows = []
     for weapon, (_attr, cap_field) in campaign.WEAPONS.items():
         cap = int(getattr(base, cap_field))
         cur = int(camp.ledger.get(weapon, cap))
-        rows.append((weapon.upper().replace("_", " "), f"{cur}/{cap}"))
+        rows.append((_LEDGER_NAMES.get(weapon, weapon.upper()), cur, cap))
     return rows
 
 
@@ -93,6 +110,35 @@ def next_battle_preview(camp, base: Optional[CombatConfig] = None) -> list:
         ("AWACS", str(cfg.n_awacs)),
         ("SEED", str(cfg.seed)),
     ]
+
+
+# The escalation axes the caption can name, in display order.
+_ESCALATION_AXES = (
+    ("DDG", "n_destroyers"), ("AAW", "n_aaw"), ("FLAGSHIP", "n_flagship"),
+    ("GA", "n_ground_attack"), ("TRANSPORT", "n_transports"),
+    ("SUB", "n_subs"), ("JAMMER", "n_jammers"), ("RADAR", "n_enemy_radars"),
+    ("AWACS", "n_awacs"),
+)
+
+
+def escalation_caption(camp, base: Optional[CombatConfig] = None) -> str:
+    """Pure: 'ESCALATION: +2 DDG  +1 RADAR VS BATTLE n' — the REAL delta
+    between this battle's escalated counts and the previous battle's (both
+    from campaign.next_config, so the caption can never drift from the sim).
+    Empty for battle 0 or when nothing escalated."""
+    if camp.battle_idx <= 0:
+        return ""
+    cur = campaign.next_config(camp, base)
+    prev = campaign.next_config(
+        dataclasses.replace(camp, battle_idx=camp.battle_idx - 1), base)
+    parts = []
+    for label, fieldname in _ESCALATION_AXES:
+        d = int(getattr(cur, fieldname)) - int(getattr(prev, fieldname))
+        if d > 0:
+            parts.append(f"+{d} {label}")
+    if not parts:
+        return ""
+    return "ESCALATION: " + "  ".join(parts) + f" VS BATTLE {camp.battle_idx}"
 
 
 class CampaignHubState(GameState):
@@ -290,101 +336,203 @@ class CampaignHubState(GameState):
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         w, h = self.app.window.size()
         text = self.text
-        x = (w - HUB_PANEL_W) // 2
+        x = (w - HUB_CONTENT_W) // 2
         self._hit_rects = []
 
         head_lh  = text.line_height(HEADER_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
         body_lh  = text.line_height(BODY_SIZE)
 
-        # --- Header ----------------------------------------------------------
+        # --- Header (mock 05): cream 'CAMPAIGN' + dim slash + brass state ----
         m = self.mode
         if m == "fresh":
             sub = "NEW CAMPAIGN"
         elif m == "in_progress":
-            sub = f"BATTLE {self.camp.battle_idx + 1} / {self.camp.n_battles}"
+            sub = f"BATTLE {self.camp.battle_idx + 1} OF {self.camp.n_battles}"
         else:
             sub = "CAMPAIGN COMPLETE"
-        text.draw_text(x, 40, f"CAMPAIGN  /  {sub}", ACCENT, HEADER_SIZE)
-        rule_y = 40 + head_lh + 8
-        draw_header_rule(text, x, rule_y, HUB_PANEL_W)
+        hx = x
+        text.draw_text(hx, 40, "CAMPAIGN", TEXT_COL, HEADER_SIZE)
+        hx += text.text_width("CAMPAIGN", HEADER_SIZE) + 12
+        text.draw_text(hx, 40, "/", DISABLED, HEADER_SIZE)
+        hx += text.text_width("/", HEADER_SIZE) + 12
+        text.draw_text(hx, 40, sub, ACCENT, HEADER_SIZE)
 
-        # --- Info block (in_progress / complete) ------------------------------
-        iy = rule_y + 14
+        iy = 40 + head_lh + 16
         if m != "fresh":
-            camp = self.camp
-            # Grade ladder
-            text.draw_text(x, iy, "LADDER", MUTED, SMALL_SIZE)
-            lx = x + 110
-            for g in ladder_text(camp).split(" "):
-                col = _GRADE_COLS.get(g, DISABLED)
-                text.draw_text(lx, iy, g, col, SMALL_SIZE)
-                lx += text.text_width(g, SMALL_SIZE) + 10
-            iy += small_lh + 6
-            # Carried ammo ledger (two columns)
-            rows = ledger_rows(camp)
-            col_w = HUB_PANEL_W // 2
-            for i, (label, val) in enumerate(rows):
-                cx = x + (i % 2) * col_w
-                text.draw_text(cx, iy, label, MUTED, SMALL_SIZE)
-                vw = text.text_width(val, SMALL_SIZE)
-                text.draw_text(cx + col_w - vw - 24, iy, val,
-                               TEXT_COL, SMALL_SIZE)
-                if i % 2 == 1:
-                    iy += small_lh + 2
-            if len(rows) % 2 == 1:
-                iy += small_lh + 2
-            iy += 6
-            # Upcoming battle preview (in_progress only)
+            iy = self._ladder_strip(x, iy, small_lh)
+            col_w = (HUB_CONTENT_W - GRID_GAP) // 2
+            b1 = self._ammo_plate(x, iy, col_w, small_lh)
             if m == "in_progress":
-                text.draw_text(x, iy, "NEXT BATTLE", MUTED, SMALL_SIZE)
-                iy += small_lh + 2
-                for label, val in next_battle_preview(camp):
-                    text.draw_text(x + 16, iy, label, MUTED, SMALL_SIZE)
-                    vw = text.text_width(val, SMALL_SIZE)
-                    text.draw_text(x + HUB_PANEL_W - vw, iy, val,
-                                   TEXT_COL, SMALL_SIZE)
-                    iy += small_lh + 2
-            iy += 8
+                b2 = self._intel_plate(x + col_w + GRID_GAP, iy, col_w,
+                                       small_lh, body_lh)
+            else:
+                b2 = iy
+            iy = max(b1, b2) + GRID_GAP
 
-        # --- Rows panel --------------------------------------------------------
+        # --- Rows plate: fresh-mode steppers + the action rows ----------------
         rows = self._rows()
         panel_y = iy
-        panel_h = len(rows) * ROW_H + 2 * PAD
-        draw_panel(text, x, panel_y, HUB_PANEL_W, panel_h, strip=True)
-        row_x = x + PAD
-        row_w = HUB_PANEL_W - 2 * PAD
-        ry = panel_y + PAD
+        panel_h = len(rows) * ROW_H + 2 * 8
+        draw_panel(text, x, panel_y, HUB_CONTENT_W, panel_h, ticks=False)
+        ry = panel_y + 8
+        rx = x + 1
+        rw = HUB_CONTENT_W - 2
         for i, row in enumerate(rows):
             selected = (i == self._sel)
             label = row["label"]
             if selected:
                 col = DANGER if row.get("danger") else ACCENT
-                text.draw_rect(row_x, ry, row_w, ROW_H, (*BG2, 1.0))
-                text.draw_rect(row_x, ry, FOCUS_BAR_W, ROW_H, (*col, 1.0))
+                text.draw_rect(rx, ry, rw, ROW_H, (*BG2, 1.0))
+                text.draw_rect(rx, ry, 4, ROW_H, (*col, 1.0))
             if self._pending == label:
-                text.draw_rect(row_x, ry, row_w, ROW_H,
-                               (*ACCENT, PRESS_FLASH_A))
+                text.draw_rect(rx, ry, rw, ROW_H, (*PRESS_FILL, 1.0))
             ty = ry + (ROW_H - body_lh) // 2
             if row["kind"] == "stepper":
                 lab_col = ACCENT if selected else MUTED
-                text.draw_text(row_x + PAD, ty, label, lab_col)
+                text.draw_text(rx + PAD, ty, label, lab_col)
                 v = self._seed if row["field"] == "seed" else self._battles
                 display = f"< {v} >" if selected else str(v)
                 vw = text.text_width(display)
-                text.draw_text(row_x + row_w - vw, ty, display,
-                               TEXT_COL if selected else MUTED)
+                text.draw_text(rx + rw - PAD - vw, ty, display,
+                               ACCENT if selected else TEXT_COL)
             else:
                 col = (DANGER if row.get("danger") and selected
                        else ACCENT if selected else MUTED)
                 tw = text.text_width(label)
-                text.draw_text(row_x + (row_w - tw) // 2, ty, label, col)
-            self._hit_rects.append((i, (row_x, ry, row_x + row_w,
-                                        ry + ROW_H)))
+                text.draw_text(rx + (rw - tw) // 2, ty, label, col)
+            self._hit_rects.append((i, (rx, ry, rx + rw, ry + ROW_H)))
             ry += ROW_H
 
-        # --- Footer ------------------------------------------------------------
-        fy = h - FOOTER_MARGIN - small_lh
-        fw = text.text_width(HUB_FOOTER, SMALL_SIZE)
-        text.draw_text((w - fw) // 2, fy, HUB_FOOTER, ACCENT_DIM, SMALL_SIZE)
+        # --- Hint bar ----------------------------------------------------------
+        draw_hint_bar(text, w, h, HUB_FOOTER)
         text.flush(w, h)
+
+    # ------------------------------------------------------------ hub plates
+
+    def _ladder_strip(self, x, y, small_lh) -> float:
+        """The grade-ladder strip (mock 05): LADDER label, one boxed slot per
+        battle (finished = family-tinted grade letter, current = brass-boxed
+        battle number, ahead = hairline number), the honest carry-over
+        caption right-aligned.  Returns the y below the strip."""
+        text = self.text
+        camp = self.camp
+        strip_h = LADDER_CHIP + 2 * 13
+        draw_panel(text, x, y, HUB_CONTENT_W, strip_h, ticks=False)
+        text.draw_text(x + PAD, y + (strip_h - small_lh) // 2, "LADDER",
+                       MUTED, SMALL_SIZE)
+        cx = x + PAD + text.text_width("LADDER", SMALL_SIZE) + 24
+        cy = y + (strip_h - LADDER_CHIP) // 2
+        done = list(camp.grades)
+        for i in range(camp.n_battles):
+            if i < len(done):
+                g = done[i]
+                bg, border = GRADE_TINTS.get(g, (None, None))
+                gcol = GRADE_COLS.get(g, TEXT_COL)
+                if bg is not None:
+                    text.draw_rect(cx, cy, LADDER_CHIP, LADDER_CHIP,
+                                   (*bg, 1.0))
+                lab = g
+            elif i == camp.battle_idx and not camp.complete:
+                border, gcol = ACCENT, ACCENT           # the CURRENT slot
+                lab = str(i + 1)
+            else:
+                border, gcol = LINE_COL, DISABLED       # still ahead
+                lab = str(i + 1)
+            text.draw_lines([(cx, cy), (cx + LADDER_CHIP, cy),
+                             (cx + LADDER_CHIP, cy + LADDER_CHIP),
+                             (cx, cy + LADDER_CHIP), (cx, cy)],
+                            (*(border or LINE_COL), 1.0), 1.0)
+            lw = text.text_width(lab, SMALL_SIZE)
+            text.draw_text(round(cx + (LADDER_CHIP - lw) / 2),
+                           round(cy + (LADDER_CHIP - small_lh) / 2),
+                           lab, gcol, SMALL_SIZE)
+            cx += LADDER_CHIP + 8
+        cap_w = text.text_width(CARRY_CAPTION, SMALL_SIZE)
+        text.draw_text(x + HUB_CONTENT_W - PAD - cap_w,
+                       y + (strip_h - small_lh) // 2, CARRY_CAPTION,
+                       FAINT, SMALL_SIZE)
+        return y + strip_h + GRID_GAP
+
+    def _ammo_plate(self, x, y, w, small_lh) -> float:
+        """AMMO LEDGER plate (mock 05): one 5px bar meter per carried weapon —
+        own-strike pools fill green, the SAM pools amber; an unconfigured
+        (0-cap) pool renders at 40%.  Returns the plate's bottom y."""
+        text = self.text
+        rows = ledger_rows(self.camp)
+        # Configured pools first, unfitted (0-cap) pools sink dim to the
+        # bottom (mock 05's reading order); stable within each band.
+        rows.sort(key=lambda r: r[2] == 0)
+        head_band = 12 + small_lh + 7
+        row_h = 34
+        plate_h = head_band + len(rows) * row_h + 10
+        draw_panel(text, x, y, w, plate_h, ticks=False)
+        draw_plate_header(text, x + PAD, y + 12, w - 2 * PAD,
+                          "AMMO LEDGER", OK_COL)
+        ry = y + head_band + 4
+        bar_x = x + PAD + LEDGER_LABEL_W
+        bar_w = w - 2 * PAD - LEDGER_LABEL_W - LEDGER_VALUE_W - 12
+        for label, cur, cap in rows:
+            configured = cap > 0
+            a = 1.0 if configured else 0.4
+            fam = WARN if label.startswith("S-300") else OK_COL
+            text.draw_text(x + PAD, ry + (row_h - small_lh) // 2, label,
+                           (*MUTED[:3], a), SMALL_SIZE)
+            gauge_bar(text, bar_x, ry + (row_h - 5) // 2, bar_w, 5,
+                      (cur / cap) if configured else 0.0, (*fam, a))
+            val = f"{cur}/{cap}"
+            vw = text.text_width(val, SMALL_SIZE)
+            text.draw_text(x + w - PAD - vw, ry + (row_h - small_lh) // 2,
+                           val, (*TEXT_COL[:3], a), SMALL_SIZE)
+            ry += row_h
+        return y + plate_h
+
+    def _intel_plate(self, x, y, w, small_lh, body_lh) -> float:
+        """NEXT BATTLE - INTEL plate (mock 05): the upcoming battle's
+        escalated enemy counts in the hostile family, the seed in faint,
+        and the derived escalation caption under a hairline.  Returns the
+        plate's bottom y."""
+        text = self.text
+        rows = next_battle_preview(self.camp)
+        cap = escalation_caption(self.camp)
+        inner_w = w - 2 * PAD
+        # Measured greedy wrap of the caption into <=2 lines (a heavy
+        # escalation band names many axes; clipping would lie by omission).
+        cap_lines = []
+        if cap:
+            line = ""
+            for word in cap.split(" "):
+                cand = (line + " " + word).strip()
+                if line and text.text_width(cand, SMALL_SIZE) > inner_w:
+                    cap_lines.append(line)
+                    line = word
+                else:
+                    line = cand
+            if line:
+                cap_lines.append(line)
+            cap_lines = cap_lines[:2]
+        cap_h = (len(cap_lines) * (small_lh + 2) + 12) if cap_lines else 0
+        head_band = 12 + small_lh + 7
+        plate_h = head_band + len(rows) * ROW_H + cap_h + 10
+        draw_panel(text, x, y, w, plate_h, ticks=False)
+        draw_plate_header(text, x + PAD, y + 12, w - 2 * PAD,
+                          "NEXT BATTLE - INTEL", DANGER)
+        ry = y + head_band
+        for i, (label, val) in enumerate(rows):
+            if i:
+                text.draw_lines([(x + PAD, ry), (x + w - PAD, ry)],
+                                (*ROW_DIVIDER, 1.0), 1.0)
+            ty = ry + (ROW_H - body_lh) // 2
+            text.draw_text(x + PAD, ty, label, MUTED)
+            vcol = FAINT if label == "SEED" else DANGER
+            vw = text.text_width(val)
+            text.draw_text(x + w - PAD - vw, ty, val, vcol)
+            ry += ROW_H
+        if cap_lines:
+            text.draw_lines([(x + PAD, ry + 2), (x + w - PAD, ry + 2)],
+                            (*LINE_COL, 1.0), 1.0)
+            cy = ry + 8
+            for ln in cap_lines:
+                text.draw_text(x + PAD, cy, ln, FAINT, SMALL_SIZE)
+                cy += small_lh + 2
+        return y + plate_h

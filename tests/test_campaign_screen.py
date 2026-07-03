@@ -181,16 +181,19 @@ def test_ladder_text_pads_unplayed_battles():
 
 
 def test_ledger_rows_read_caps_for_fresh_ledger():
+    # Wardroom Dusk ledger bars consume (label, cur, cap) ints directly.
     camp = campaign.new_campaign(1)
-    rows = dict(ledger_rows(camp, CombatConfig(seed=1)))
-    assert rows["ONIKS"] == "8/8"          # empty ledger reads cap/cap
+    rows = {label: (cur, cap)
+            for label, cur, cap in ledger_rows(camp, CombatConfig(seed=1))}
+    assert rows["ONIKS"] == (8, 8)         # empty ledger reads cap/cap
 
 
 def test_ledger_rows_show_carried_counts():
     camp = campaign.new_campaign(1)
     camp.ledger = {"oniks": 3}
-    rows = dict(ledger_rows(camp, CombatConfig(seed=1)))
-    assert rows["ONIKS"] == "3/8"
+    rows = {label: (cur, cap)
+            for label, cur, cap in ledger_rows(camp, CombatConfig(seed=1))}
+    assert rows["ONIKS"] == (3, 8)
 
 
 def test_next_battle_preview_escalates_with_battle_idx():
