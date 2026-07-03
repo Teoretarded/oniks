@@ -224,6 +224,7 @@ HARBOR_SEAWARD_OFFSET = -260.0
 HINT_SECONDS = 2.5             # HUD flash time for invalid-launch hints
 HINT_S300_AIR = "S-300: SELECT AIR TARGET"
 HINT_S300_EMPTY = "S-300: BATTERY EMPTY"
+HINT_S300_NO_TUBE = "S-300: NO READY TUBE / TARGET LOST"
 # Phase 5b round select (V): the 40N6 very-long-range round shares the TEL
 # with the 48N6 (sim/arsenal.py N40N6; separate 2-round stock).
 HINT_ROUND_48N6 = "S-300: 48N6 SELECTED"
@@ -928,7 +929,7 @@ class SandboxState(GameState):
             return None
         m = self.world.launch_sam(self.tactical_map.selected_contact,
                                   round_id=self.sam_round)
-        if m is not None:                   # None while the tube reloads
+        if m is not None:
             self.followed = m
             self.rig.retarget()             # smooth swing onto the new round
             # True cold launch t = 0: tube cover shot off + a grey-white gas
@@ -936,6 +937,12 @@ class SandboxState(GameState):
             self._launch_puff(m.pos)
             self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)
+        else:
+            # A refused launch must never be a dead key (live playtest:
+            # SPACE at a Tomahawk track did nothing, silently) — every
+            # pre-gate above already hinted, so what remains is a cycling
+            # tube or a track whose entity just died.
+            self.show_hint(HINT_S300_NO_TUBE)
         return m
 
     def _request_buk_launch(self):

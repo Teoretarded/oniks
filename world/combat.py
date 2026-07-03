@@ -2183,12 +2183,26 @@ class CombatWorld(WorldState):
         """world.world hook override: air contacts in COMBAT are enemy
         air (fighters/AWACS) or hostile strike rounds — the S-300 launch/
         retarget lookups and the sandbox camera find them here.  The
-        legacy aircraft list stays empty in COMBAT."""
+        legacy aircraft list stays empty in COMBAT.
+
+        Hostile STRIKE ROUNDS (Tomahawk/JASSM/HARM/Kalibr) live in
+        self.missiles keyed by the same aircraft_id their track carries —
+        this docstring always promised them as S-300 targets, but the
+        lookup never searched the missile list, so launch_sam returned a
+        silent None for EVERY anti-missile shot (live playtest 2026-07-03:
+        'I can't intercept the missiles').  Anti-cruise-missile defense is
+        the real S-300's bread and butter; now it resolves."""
         ent = super()._find_air_entity(aircraft_id)
         if ent is not None:
             return ent
-        return next((e for e in self.enemy_air
-                     if e.aircraft_id == aircraft_id), None)
+        ent = next((e for e in self.enemy_air
+                    if e.aircraft_id == aircraft_id), None)
+        if ent is not None:
+            return ent
+        return next((m for m in self.missiles
+                     if m.alive and getattr(m, "is_hostile", False)
+                     and getattr(m, "aircraft_id", None) == aircraft_id),
+                    None)
 
     @property
     def known_enemy_sites(self) -> list:
