@@ -257,3 +257,39 @@ Format: `[timestamp] LABEL — role / model — task — verdict`
   from this report + the last commit. Future new models (ASBM/swarm/Buk/etc.) get
   the build-mesh + reference-photo treatment (task #7) when their milestones land.
 
+
+---
+
+## SESSION 2026-07-03 — overnight autonomous playtest + UI-unlock (Fable 5, lean mode)
+
+**Headline:** the game's built content is now REACHABLE. Nine commits: the
+inherited WIP verified+checkpointed, 6 real bugs fixed (each probe-measured,
+each regression-locked), and the three biggest deferred UI passes shipped —
+the four-page setup screen (every M2-M6 feature exposed), the CAMPAIGN mode
+(hub + menu + CONTINUE CAMPAIGN), and the submarine/ASW player UI (U buoy-drop
+mode, K ASW launch, map glyphs). Campaign escalation now stages the M5 threat
+axes with their counters. Full suite green (known phase5b order-flake passes
+in isolation), smoke 84 PASS, default-battle digest byte-identical through
+every commit (`7d5716325a..06add`).
+
+Commits (oldest first): `61c9d7e` WIP checkpoint (multi-AWACS/radar/drone
+counts, campaign battle-0 seed, defeat-ends-campaign, antenna double-count
+fix) -> `bce0f48` ASW surround-gate fix -> `5711e69` four-page setup ->
+`a69ee81` grade-tier/resupply/TOT fixes -> `846a546` campaign UI ->
+`8f19b2e` sub/ASW UI -> `38c3cc2` staged escalation -> `1ea6771` map label
+collision -> `da9c762` render stand-ins + mesh aliases.
+
+**Probe sweep (all PASS):** playtest_combat (core loop, storyboard),
+playtest_killchain (SAR find -> hi-lo -> SM-2 intercept @165.8 km),
+acoustic ASW (detection bands + cross-fix quality; found+fixed the 4-buoy-box
+false-kill), amphibious (transit/LCAC/OBB kills), scoot (0.00 m errors,
+stale-strike misses / fresh-strike hits), CBR (back-plot symmetry exact),
+decoys (reflector pulls strikes to dirt), bughunt 6/6 incl. full-density
+41-ship battle, scoring, campaign 3-battle chain, boot/menu/pause/map GL walk,
+NEW: campaign flow end-to-end + ASW UI end-to-end GL probes.
+
+**For the human playtest (STILL MANDATORY, still pending):** ENEMY page ->
+SUBMARINES 1 + DEFENSE page -> SONOBUOYS 8 / ASW 2 for the acoustic duel;
+CAMPAIGN from the main menu for the meta-loop. Balance flags: PAR rewards
+passivity (500 s of nothing = B), swarm launch range 25 vs 40 km design,
+back-plot buff feel, rear-band transports ~324 min sim transit.
