@@ -126,15 +126,17 @@ def _fmt_clock(t: float) -> str:
 # --- Shared panel chrome (§1.2): fill + 1px border + amber corner ticks ---------
 
 def draw_panel(text, x, y, w, h, alpha=PANEL_ALPHA, tick_col=ACCENT_DIM,
-               strip=False, ticks=True) -> None:
+               strip=False, ticks=True, fill=None) -> None:
     """Wardroom PLATE (spec §5): BG1 fill, 1px hairline border, a 1px
     top inset highlight (rgba 255,255,255,.05 — the powered-surface cue),
     and the corner-tick brackets (16px legs, 2px, brass-dim) at top-left +
     bottom-right.  ``strip`` adds the 2px brass powered-on strip (0.12
     alpha) along the top inner edge of the ACTIVE panel; ``ticks=False``
-    drops the brackets for quiet in-grid plates (hero plates keep them)."""
+    drops the brackets for quiet in-grid plates (hero plates keep them);
+    ``fill`` overrides the fill RGB (the HUD's darker over-3D ink)."""
     x, y, w, h = round(x), round(y), round(w), round(h)
-    text.draw_rect(x, y, w, h, (*BG1, alpha))
+    f = fill if fill is not None else BG1
+    text.draw_rect(x, y, w, h, (*f, alpha))
     text.draw_lines([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
                     (*LINE_COL, 1.0), 1.0)
     text.draw_rect(x + 1, y + 1, w - 2, 1, (1.0, 1.0, 1.0, 0.05))

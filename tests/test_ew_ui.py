@@ -37,7 +37,7 @@ import numpy as np
 
 import sim.ew as ew
 from game.hud import (radar_jam_row, emissions_exposure, RELOAD_COL,
-                      DANGER_COL, HUD, MARGIN, EMISSIONS_GAUGE_GAP_Y)
+                      DANGER_COL, HUD, MARGIN)
 from game.tactical_map import MapView, TacticalMap
 from world.combat import (CombatWorld, RADAR_STATION_XZ, RADAR_ANTENNA_M,
                           PLAYER_RADAR_RANGES)
@@ -481,51 +481,48 @@ def test_emissions_exposure_pod_ignored_when_unarmed():
 #      must never overlap a tall block (the magic-offset regression).
 # ===========================================================================
 
-def test_emissions_gauge_clears_a_tall_panel_bottom():
-    """_block returns its data-driven height; _emissions_gauge anchors the gauge
-    a fixed gap BELOW that bottom (MARGIN + height), so a tall bastion block
-    (status + 3 weapon rows + ammo/profile/target/radar + the jam row + pantsir
-    + time/clock + a tube band) can never overdraw the gauge — the magic-offset
-    bug. The gauge gy must be >= the panel bottom for every drawn glyph."""
+def test_emissions_meter_contained_in_tall_plate():
+    """Wardroom Dusk moved the EMCON meter INSIDE the platform plate: _block
+    reserves an emcon band in its data-driven height, so a tall bastion plate
+    (weapon rows + ammo/profile/target/radar + the jam row + pantsir + a tube
+    band) can never overdraw it — the same magic-offset regression, guarded
+    under the new layout.  Every EMCON glyph must sit BELOW the last row and
+    INSIDE the plate's returned height."""
     text = FakeText()
     hud = HUD(text)
-    # A bastion-shaped multi-row block PLUS the jam row (the row that makes the
-    # panel taller exactly under jamming, when the gauge matters most).
+    # A bastion-shaped multi-row block PLUS the jam row (the row that makes
+    # the plate taller exactly under jamming, when the meter matters most).
     c = (1.0, 1.0, 1.0, 1.0)
-    rows = [("STATUS", "ARMED", c)]
-    rows += [("WEAPON" if i == 0 else "", "> ONIKS  x8", c) for i in range(3)]
+    rows = [("WEAPON", "> ONIKS 8/8", c, True), ("", "ZIRCON 4", c)]
     rows += [("AMMO", "x8", c), ("PROFILE", "HI-DIVE", c),
              ("TARGET", "BRG 010  50 km", c), ("RADAR", "EMITTING", c),
-             ("RADAR", "BURN-THRU 175km", c), ("PANTSIR", "READY", c),
-             ("TIME", "x1", c), ("CLOCK", "T+00:10", c)]
+             ("RADAR", "BURN-THRU 175km", c), ("PANTSIR", "READY", c)]
     cells = [("1", "READY", 0.0), ("2", "RELOADING", 0.5), ("3", "EMPTY", 0.0)]
-    height = hud._block("BASTION", rows, cells=cells)
-    assert isinstance(height, (int, float)) and height > 0
-    panel_bottom = MARGIN + height
 
-    # Drive the gauge with an emitting own radar + a hot pod (own-truth) so it
-    # actually draws, then assert every gauge glyph sits below the panel bottom.
-    before_t, before_r, before_l = (len(text.texts), len(text.rects),
-                                    len(text.lines))
+    # Drive the meter with an emitting own radar + a hot pod (own-truth) so
+    # it actually draws.
     w = _StubWorld(radar_station=_StubRadar(alive=True, emitting=True),
                    drone=_StubDrone(alive=True, jam_active=True),
                    player_jammer=True)
-    hud._emissions_gauge(w, panel_bottom)
-    new_texts = text.texts[before_t:]
-    new_rects = text.rects[before_r:]
-    new_lines = text.lines[before_l:]
-    assert new_texts, "the gauge must actually draw (emitting radar + hot pod)"
-    # Caption + percent readout both start a fixed gap below the panel bottom.
-    for (x, y, *_rest) in new_texts:
-        assert y >= panel_bottom, "gauge text overdraws the panel"
-    assert all(y == panel_bottom + EMISSIONS_GAUGE_GAP_Y for (_x, y, *_r)
-               in new_texts)
-    # The gauge bar (rects/lines) likewise stays at/below the panel bottom.
-    for (_x, y, *_rest) in new_rects:
-        assert y >= panel_bottom, "gauge bar rect overdraws the panel"
-    for (points, *_rest) in new_lines:
-        for (_px, py) in points:
-            assert py >= panel_bottom, "gauge bar line overdraws the panel"
+    meter = emissions_exposure(w)
+    assert meter is not None, "the meter must actually draw (radar + hot pod)"
+    height = hud._block("BASTION", rows, cells=cells,
+                        status=("ARMED", (0.0, 1.0, 0.0)), emcon=meter)
+    assert isinstance(height, (int, float)) and height > 0
+    plate_bottom = MARGIN + height
+
+    # The EMCON caption + percent readout exist, sit inside the plate, and
+    # start below every value row (no overdraw of the row band).
+    emcon_texts = [t for t in text.texts if t[2] in ("EMCON",)
+                   or t[2].endswith("%")]
+    assert emcon_texts, "EMCON caption + percent must draw"
+    row_texts = [t for t in text.texts
+                 if t[2] in ("AMMO", "PROFILE", "TARGET", "RADAR", "PANTSIR")]
+    last_row_y = max(y for (_x, y, *_r) in row_texts)
+    for (_x, y, s, _col, size) in emcon_texts:
+        assert y > last_row_y, f"EMCON glyph {s!r} overdraws the row band"
+        assert y + text.line_height(size) <= plate_bottom, \
+            f"EMCON glyph {s!r} escapes the plate"
 
 
 # ===========================================================================

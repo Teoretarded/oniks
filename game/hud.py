@@ -24,8 +24,6 @@ from collections import namedtuple
 import numpy as np
 
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
-from game.hud_widgets import badge as _badge
-from game.hud_widgets import gauge_bar as _hud_gauge_bar
 from game.keybinds import ACTIONS
 from game.timewarp import drop_cause
 import game.states as _S
@@ -47,24 +45,19 @@ from world.generation import BASE_POS, SAM_SITE_POS
 # --- Layout tuning -------------------------------------------------------------
 
 MARGIN = 16                 # px, panel offset from the top-left corner (8px grid)
-PANEL_W = 268               # px, telemetry panel width
-PANEL_PAD = 16              # px, inner padding of panels (spec §1.5)
-LINE_H = 24                 # px, row pitch of the telemetry block (8px grid)
-VALUE_X = 104               # px, label -> value column offset inside the panel
-HEADER_GAP = 12             # px, gap under the header rule
+PANEL_W = 308               # px, platform plate width (mock 04)
+PANEL_PAD = 14              # px, inner padding of the platform plate
+LINE_H = 30                 # px, row pitch of the platform plate (18pt rows)
+VALUE_X = 104               # px, label -> value column offset (legacy blocks)
+HEADER_GAP = 10             # px, gap under the header rule
 HINT_MARGIN = 10            # px, hint line offset from the bottom edge
 CORNER_MARGIN = 16          # px, bottom-right micro-label inset (spec §4.1)
-CAM_LABEL_GAP = 24          # px, camera-mode text stacked above F1 CONTROLS
-PANEL_ALPHA = 0.55          # HUD panel fill alpha (menus use 0.92)
-EMISSIONS_GAUGE_GAP_Y = 8   # px gap below the (data-driven) panel bottom where
-#                             the EMCON gauge sits — anchored off the panel's
-#                             real height, never a fixed offset from the top
-EMISSIONS_GAUGE_H = 6       # px gauge bar height (compact own-emissions strip)
-EMISSIONS_GAUGE_GAP = 8     # px between the EMCON caption and the bar
-EMISSIONS_PCT_W = 34        # px reserved for the right-aligned percent readout
+# Panel ink calibration (mock 07): the HUD plates read as rgba-ink over the
+# WORST-CASE bright 3D scene at .93, not the old translucent .55.
+PANEL_ALPHA = 0.93
 
 # Wardroom Dusk: the HUD speaks the shared states.py palette (no forked hues).
-PANEL_RGBA = (*_S.BG1, 0.55)                 # translucent dark panel fill
+PANEL_RGBA = (*_S.PLATE_INK, PANEL_ALPHA)    # over-3D plate ink (mock 07)
 LABEL_COL = (*MUTED, 1.0)                    # muted sage labels
 VALUE_COL = (*TEXT_COL, 1.0)                 # warm-cream values
 HEADER_COL = (*ACCENT, 1.0)                  # brass headline
@@ -115,7 +108,6 @@ BRACKET_TEXT_GAP = 6.0      # px between the bracket and the range text
 TTI_CRIT_S = 20.0           # time-to-impact below this reads DANGER (red)
 TTI_WARN_S = 60.0           # ... below this reads WARN (amber); else MUTED
 CLOSING_EPS = 1.0           # m/s: a track closing slower than this has no TTI
-STRIP_W = 180               # px, threat-strip column width
 
 # Sensor-confidence ladder for the intel panel (track age in seconds):
 AGE_IDENTIFIED_S = 5.0      # fresher than this -> IDENTIFIED (a live fix)
@@ -133,10 +125,24 @@ CONFIDENCE_FADE_S = 25.0    # linear confidence fade: 1.0 fresh -> 0.0 here on
 HOSTILE_KINDS = frozenset({"sm2", "sm6", "tomahawk", "jassm", "harm",
                            "aim9x", "kalibr"})
 
-# Severity token -> palette color (no hard-coded RGB at the strip call site;
-# these are the states.py palette tokens, the same ones SEMANTIC_COLORS routes
-# INBOUND/DESTROYED -> DANGER and TRANSIENT -> WARN through).
-SEVERITY_COLORS = {"DANGER": DANGER, "WARN": WARN, "MUTED": MUTED}
+# Severity token -> palette color (no hard-coded RGB at the strip call site).
+# A non-urgent vampire is still a HOSTILE contact, so the quiet band wears the
+# aged dusk-red — never the neutral muted (fog-of-war color LAW: hostile
+# contacts live in the dusk-red family, age/urgency expressed by tone).
+SEVERITY_COLORS = {"DANGER": DANGER, "WARN": WARN, "MUTED": _S.HOSTILE_AGED}
+
+# INBOUND ranked cards (mock 04): card chrome + the TTI countdown bar.
+CARD_W = 286                # px, inbound-card column width
+CARD_INK = (0.090, 0.078, 0.071)     # rgba(23,20,18) card fill (@0.9)
+CARD_PAD = 12               # px, card inner padding
+CARD_BAR_W = 4              # px, severity bar on the card's left edge
+CARD_GAP = 10               # px, vertical gap between cards
+TTI_BAR_WINDOW_S = 240.0    # bar = time-to-impact as a fraction of this
+#                             window (a typical long SAM/vampire flight); the
+#                             bar DRAINS as the round closes — presentation
+#                             scale only, the number next to it is the truth
+CARD_MAX = 5                # cards shown; the rest collapse to '+N MORE'
+INBOUND_BLINK_S = 1.2       # header blink period (mock: steps(1) 1.2s)
 
 # A single fog-pierced inbound row: sid (track id), kind (weapon_id stamp),
 # brg (compass deg from the friendly asset to the estimate), rng (ground-plane
@@ -145,7 +151,6 @@ SEVERITY_COLORS = {"DANGER": DANGER, "WARN": WARN, "MUTED": MUTED}
 ThreatRow = namedtuple("ThreatRow", "sid kind brg rng tti severity")
 
 STRIP_MARGIN = 16           # px, strip inset from the right/top screen edges
-STRIP_ROW_H = 22            # px, threat-strip row pitch
 STRIP_PULSE_HZ = 2.0        # critical-row pulse frequency (sin breathing)
 STRIP_PULSE_LO = 0.55       # min alpha of the critical-row pulse
 STRIP_PULSE_HI = 1.0        # max alpha of the critical-row pulse
@@ -165,10 +170,8 @@ INTEL_GAUGE_H = 8           # px, confidence gauge height
 # the ammo pools). It NEVER touches contacts / enemy / truth, and renders in the
 # green/amber/disabled OWN idiom (READY/RELOADING/EMPTY via SEMANTIC_COLORS),
 # never the CONTACT estimate idiom. Deterministic, GL-free, no RNG.
-TUBE_CELL_W = 44            # px, width of one tube badge+gauge cell
 TUBE_GAP = 6                # px, horizontal gap between adjacent tube cells
 TUBE_ROW_GAP = 6            # px, gap between the panel body and the tube row
-TUBE_GAUGE_H = 6            # px, height of a RELOADING cell's progress gauge
 TUBE_LABEL_GAP = 2          # px, gap between a tube's index label and its badge
 
 # --- Expanded per-battery STATUS PANEL board (M6) -------------------------------
@@ -968,6 +971,7 @@ class HUD:
             self._banner(w, h, DEFEAT_TEXT, DANGER_COL)
         elif getattr(sandbox.world, "victorious", False):
             self._banner(w, h, VICTORY_TEXT, ARMED_COL)
+        self._clock_chip(sandbox, w)
         self._threat_strip(sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
         self._hint_flash(sandbox, w, h)
         self._corner_labels(sandbox, w, h)
@@ -985,115 +989,150 @@ class HUD:
 
     # ---------------------------------------------------------------- blocks
 
-    def _emissions_gauge(self, world, panel_bottom) -> None:
-        """M3-F5 own-emissions meter: a small captioned gauge_bar showing how
-        loud the player is on the back-plot (own radar + hot EW pod, own-truth).
-        Drawn as a free overlay just below the telemetry panel; nothing renders
-        when emissions_exposure returns None (silent / SANDBOX).
+    def _clock_chip(self, sandbox, w: int) -> None:
+        """Top-center clock chip (mock 04): the sim clock cream + the time-
+        scale readout faint.  The auto-warp cause text rides in the scale
+        span so WHY time slowed stays visible (M6 auto-warp legibility)."""
+        text = self.text
+        clock = "T+" + _fmt_clock(sandbox.world.sim_time)
+        scale = self._scale_text(sandbox)
+        body_h = text.line_height(BODY_SIZE)
+        small_h = text.line_height(SMALL_SIZE)
+        cw = text.text_width(clock)
+        sw = text.text_width(scale, SMALL_SIZE)
+        pad_x, gap = 18, 12
+        bw = round(cw + gap + sw + 2 * pad_x)
+        bh = body_h + 14
+        x = round((w - bw) / 2)
+        y = MARGIN
+        text.draw_rect(x, y, bw, bh, (*_S.PLATE_INK, 0.88))
+        text.draw_lines([(x, y), (x + bw, y), (x + bw, y + bh), (x, y + bh),
+                         (x, y)], (*_S.LINE_COL, 1.0), 1.0)
+        text.draw_text(x + pad_x, y + 7, clock, VALUE_COL)
+        text.draw_text(x + pad_x + cw + gap,
+                       y + 7 + (body_h - small_h) // 2, scale,
+                       _S.FAINT, SMALL_SIZE)
 
-        ``panel_bottom`` is the platform block's actual bottom edge in px
-        (MARGIN + the height _block returned for THIS frame's rows/tubes). The
-        gauge anchors a fixed gap below it so it always clears the panel — even
-        when the jam row makes the bastion block tall — instead of a magic
-        offset from the panel top decoupled from the data-driven height."""
-        out = emissions_exposure(world)
-        if out is None:
-            return
-        label, frac, col = out
-        # Anchor a fixed gap below the panel's real bottom — a compact, always-
-        # legible strip; layout is screen-space only (no GL).
-        gx = MARGIN + PANEL_PAD
-        gy = panel_bottom + EMISSIONS_GAUGE_GAP_Y
-        self.text.draw_text(gx, gy, label, LABEL_COL, SMALL_SIZE)
-        cap_w = self.text.text_width(label, SMALL_SIZE)
-        bar_x = gx + cap_w + EMISSIONS_GAUGE_GAP
-        bar_w = PANEL_W - 2 * PANEL_PAD - cap_w - EMISSIONS_GAUGE_GAP \
-            - EMISSIONS_PCT_W
-        _hud_gauge_bar(self.text, bar_x, gy, max(bar_w, 1.0),
-                       EMISSIONS_GAUGE_H, frac, col)
-        self.text.draw_text(bar_x + max(bar_w, 1.0) + 4, gy,
-                            f"{int(round(frac * 100))}%", col, SMALL_SIZE)
+    def _block(self, header: str, rows, cells=None, status=None,
+               emcon=None) -> float:
+        """The PLATFORM PLATE (mock 04): header row (brass platform name +
+        family-tinted status badge) over a brass-capped rule, label/value
+        rows right-aligned (a truthy 4th row element marks the selected-
+        WEAPON row: plate-selected fill + 3px brass bar), TUBE boxes, and
+        the in-plate EMCON meter.  Returns the plate height (px).
 
-    def _block(self, header: str, rows, cells=None) -> None:
-        """Panel at the top-left: header + rule + (label, value, color)
-        rows, in the menu language's chrome (border + amber corner ticks).
-
-        ``cells`` (M1-F4, optional) is a ``tube_cells`` list — per-tube
-        (label, state, frac) own-force telemetry drawn as a badge row INSIDE
-        the panel beneath the value rows, so it inherits the same chrome. An
-        empty/None list adds nothing (SANDBOX: the block is unchanged)."""
-        head_h = self.text.line_height(HEADER_SIZE)
-        small_h = self.text.line_height(SMALL_SIZE)
-        cell_h = small_h + 2 * 3.0      # badge body height (states.BADGE_PAD_Y)
-        # The tube row reserves its own height inside the panel, mirroring the
-        # stack drawn by _tube_cells_row: TUBE_ROW_GAP, the "TUBES" caption,
-        # the per-tube index label, the state badge, the RELOADING gauge band,
-        # plus a bottom margin so the badges sit fully inside the chrome.
-        tube_band = 0
-        if cells:
-            tube_band = int(TUBE_ROW_GAP
-                            + small_h + TUBE_LABEL_GAP     # "TUBES" caption
-                            + small_h + TUBE_LABEL_GAP     # per-tube index
-                            + cell_h                       # the state badge
-                            + TUBE_GAUGE_H + 4             # RELOADING gauge band
-                            + PANEL_PAD)                   # bottom margin
-        height = (PANEL_PAD * 2 + head_h + 4 + HEADER_GAP
-                  + len(rows) * LINE_H + tube_band)
-        draw_panel(self.text, MARGIN, MARGIN, PANEL_W, height,
-                   alpha=PANEL_ALPHA)
+        ``cells`` is a ``tube_cells`` list (own-force only, [] in SANDBOX);
+        ``status`` is an optional (text, color) badge; ``emcon`` an optional
+        (label, frac01, color) meter from emissions_exposure."""
+        text = self.text
+        small_h = text.line_height(SMALL_SIZE)
+        body_h = text.line_height(BODY_SIZE)
+        tube_box_h = small_h + 12
+        head_band = 10 + small_h + 9            # header row + rule gap
+        tube_band = (TUBE_ROW_GAP + tube_box_h + 4) if cells else 0
+        emcon_band = (small_h + 10) if emcon else 0
+        height = (head_band + HEADER_GAP + len(rows) * LINE_H + tube_band
+                  + emcon_band + PANEL_PAD)
+        draw_panel(text, MARGIN, MARGIN, PANEL_W, height, alpha=PANEL_ALPHA,
+                   fill=_S.PLATE_INK, ticks=False)
         tx = MARGIN + PANEL_PAD
-        ty = MARGIN + PANEL_PAD
-        self.text.draw_text(tx, ty, header, HEADER_COL, HEADER_SIZE)
-        ty += head_h + 4
-        draw_header_rule(self.text, tx, ty, PANEL_W - 2 * PANEL_PAD)
-        ty += HEADER_GAP
-        for label, value, col in rows:
-            self.text.draw_text(tx, ty + 2, label, LABEL_COL)
-            self.text.draw_text(tx + VALUE_X, ty + 2, value, col)
+        inner_w = PANEL_W - 2 * PANEL_PAD
+        ty = MARGIN + 10
+        text.draw_text(tx, ty, header, HEADER_COL, SMALL_SIZE)
+        if status is not None:
+            s_text, s_col = status
+            bw = round(text.text_width(s_text, SMALL_SIZE) + 14)
+            bh = small_h + 4
+            bx = MARGIN + PANEL_W - PANEL_PAD - bw
+            by = ty - 2
+            text.draw_rect(bx, by, bw, bh, (*s_col[:3], 0.14))
+            text.draw_lines([(bx, by), (bx + bw, by), (bx + bw, by + bh),
+                             (bx, by + bh), (bx, by)], (*s_col[:3], 0.9), 1.0)
+            text.draw_text(bx + 7, ty, s_text, s_col, SMALL_SIZE)
+        ty += small_h + 8
+        draw_header_rule(text, MARGIN + 1, ty, PANEL_W - 2)
+        ty += 1 + HEADER_GAP
+        for row in rows:
+            label, value, col = row[0], row[1], row[2]
+            selected = len(row) > 3 and row[3]
+            vy = ty + (LINE_H - body_h) // 2
+            if selected:
+                text.draw_rect(MARGIN + 1, ty, PANEL_W - 2, LINE_H,
+                               (*_S.BG2, 1.0))
+                text.draw_rect(MARGIN + 1, ty, 3, LINE_H, (*ACCENT, 1.0))
+            if label:
+                text.draw_text(tx, vy, label,
+                               ACCENT if selected else LABEL_COL)
+            vw = text.text_width(value)
+            text.draw_text(MARGIN + PANEL_W - PANEL_PAD - vw, vy, value, col)
             ty += LINE_H
         if cells:
-            self._tube_cells_row(tx, ty + TUBE_ROW_GAP, cells)
-        # The caller anchors the free-floating emissions gauge off the panel's
-        # actual bottom (the height is fully data-driven by row/tube count), so
-        # the gauge can never overlap a tall block (e.g. the jam-row-extended
-        # bastion panel). MARGIN + height == the panel's bottom edge in px.
+            ty += TUBE_ROW_GAP
+            self._tube_boxes(tx, ty, inner_w, cells, tube_box_h)
+            ty += tube_box_h + 4
+        if emcon:
+            label, frac, col = emcon
+            gy = ty + 4
+            text.draw_text(tx, gy, label, LABEL_COL, SMALL_SIZE)
+            cap_w = text.text_width(label, SMALL_SIZE)
+            pct = f"{int(round(frac * 100))}%"
+            pw = text.text_width(pct, SMALL_SIZE)
+            bar_x = tx + cap_w + 8
+            bar_w = max(1.0, inner_w - cap_w - 8 - pw - 8)
+            _gauge_bar(text, bar_x, gy + (small_h - 5) // 2, bar_w, 5,
+                       frac, col)
+            text.draw_text(tx + inner_w - pw, gy, pct, col, SMALL_SIZE)
         return height
 
-    def _tube_cells_row(self, x, y, cells) -> None:
-        """Per-tube battery row (M1-F4): for each ``(label, state, frac)`` cell
-        a small CAPS state badge (READY/RELOADING/EMPTY via SEMANTIC_COLORS, the
-        own-force green/amber/disabled idiom) under its 1-based tube index, with
-        a thin progress gauge beneath a RELOADING cell. OWN-FORCE only — no
-        contact/enemy reads, no CONTACT_COL."""
-        small_h = self.text.line_height(SMALL_SIZE)
-        self.text.draw_text(x, y, "TUBES", LABEL_COL, SMALL_SIZE)
-        y += small_h + TUBE_LABEL_GAP
+    def _tube_boxes(self, x, y, w, cells, box_h) -> None:
+        """TUBE CELL boxes (spec §5): family-color border + tinted fill —
+        green 'TUBE n - RDY', amber reloading with a thin progress strip,
+        hairline+disabled empty.  Boxes split the plate's inner width; the
+        labels shorten when >2 tubes so an S-300 row of 4 still reads.
+        OWN-FORCE only — no contact/enemy reads."""
+        text = self.text
+        small_h = text.line_height(SMALL_SIZE)
+        n = len(cells)
+        box_w = (w - TUBE_GAP * (n - 1)) / n
+        short = n > 2
         for i, (label, state, frac) in enumerate(cells):
-            cx = x + i * (TUBE_CELL_W + TUBE_GAP)
-            # Index label above the badge, then the state badge.
-            self.text.draw_text(cx, y, label, MUTED, SMALL_SIZE)
-            ly = y + small_h + TUBE_LABEL_GAP
-            # badge(renderer, label, x, y, state): label is the CAPS text, state
-            # routes the SEMANTIC color (both the state token here).
-            _badge(self.text, state, cx, ly, state, size=SMALL_SIZE)
-            # A RELOADING cell gets a progress gauge in its own (amber) color.
+            bx = round(x + i * (box_w + TUBE_GAP))
+            col = SEMANTIC_COLORS.get(state, MUTED)
+            st = {"READY": "RDY", "RELOADING": "RLD", "EMPTY": "EMP"}.get(
+                state, state)
+            txt = f"{label} {st}" if short else f"TUBE {label} - {st}"
+            if state == "EMPTY":
+                border, fill_a, tcol = _S.LINE_COL, 0.0, (*_S.DISABLED, 1.0)
+            else:
+                border, fill_a, tcol = col, 0.14, (*col[:3], 1.0)
+            if fill_a > 0.0:
+                text.draw_rect(bx, y, round(box_w), box_h,
+                               (*col[:3], fill_a))
+            text.draw_lines([(bx, y), (bx + box_w, y),
+                             (bx + box_w, y + box_h), (bx, y + box_h),
+                             (bx, y)], (*border[:3], 0.9), 1.0)
+            tw = text.text_width(txt, SMALL_SIZE)
+            text.draw_text(round(bx + (box_w - tw) / 2),
+                           y + (box_h - small_h) // 2, txt, tcol, SMALL_SIZE)
             if state == "RELOADING":
-                gy = ly + self.text.line_height(SMALL_SIZE) + 2 * 3.0 + 2
-                _hud_gauge_bar(self.text, cx, gy, TUBE_CELL_W, TUBE_GAUGE_H,
-                               frac, SEMANTIC_COLORS["RELOADING"])
+                # Thin progress strip along the box bottom.
+                fw = round((box_w - 4) * _clamp01(frac))
+                if fw > 0:
+                    text.draw_rect(bx + 2, y + box_h - 4, fw, 2,
+                                   (*col[:3], 0.9))
 
     def _flight_block(self, sandbox, m) -> None:
-        """In-flight telemetry for the followed missile (Oniks or SAM)."""
+        """In-flight telemetry for the followed missile (Oniks or SAM).
+        The flight phase is the plate's status badge (TERMINAL pops
+        dusk-red); TIME/CLOCK live in the top-center clock chip."""
         speed = float(np.linalg.norm(m.vel))
         alt = float(m.pos[1])
         tgt = _missile_target_pos(m)
         rng_km = (float(np.hypot(tgt[0] - m.pos[0], tgt[2] - m.pos[2])) / 1e3
                   if tgt is not None else None)
         label = m.phase_label
-        phase_col = TERMINAL_COL if label == "TERMINAL" else VALUE_COL
-        rows = [
-            ("PHASE", label, phase_col),
-        ]
+        phase_col = TERMINAL_COL if label == "TERMINAL" else ARMED_COL
+        rows = []
         # M2-T4: a followed player ARM gets a seeker-state row (LOCK /
         # SILENT-CEP / MEMORY) read off its OWN homing state; None (skipped)
         # for every non-ARM round, so the Oniks/SAM flight block is unchanged.
@@ -1115,11 +1154,8 @@ class HUD:
             rows.append(("PROP",
                          f"{100.0 * m.propellant / m.weapon.propellant_mass:.0f}%",
                          VALUE_COL))
-        rows += [
-            ("TIME", self._scale_text(sandbox), VALUE_COL),
-            ("CLOCK", "T+" + _fmt_clock(sandbox.world.sim_time), VALUE_COL),
-        ]
-        self._block(m.weapon.display_name.upper(), rows)
+        self._block(m.weapon.display_name.upper(), rows,
+                    status=(label, phase_col))
 
     def _launcher_block(self, sandbox) -> None:
         """Active platform's launcher status while nothing is followed."""
@@ -1133,20 +1169,18 @@ class HUD:
             self._bastion_block(sandbox)
 
     def _drone_block(self, sandbox) -> None:
-        """Recon-drone platform panel (Phase 4): flight/sensor/RWR rows
-        from the pure helper, plus the shared TIME/CLOCK footer."""
+        """Recon-drone platform panel (Phase 4): flight/sensor/RWR rows from
+        the pure helper; the STATUS row is the plate's badge.  The EMCON
+        meter rides inside the plate — the drone is where the EW pod goes
+        hot and back-plot exposure peaks."""
         world = sandbox.world
         rows = drone_panel_rows(world)
-        rows += [
-            ("TIME", self._scale_text(sandbox), VALUE_COL),
-            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
-        ]
-        height = self._block("RECON DRONE", rows)
-        # M3-F5: the own-emissions gauge ALSO shows while flying the drone — the
-        # platform where the EW pod is hot and the back-plot exposure is highest
-        # (the pod is a primary EXPOSURE_POD_W contributor). Anchored below the
-        # data-driven block bottom; None when silent -> nothing drawn.
-        self._emissions_gauge(world, MARGIN + height)
+        status = None
+        if rows and rows[0][0] == "STATUS":
+            status = (rows[0][1], rows[0][2])
+            rows = rows[1:]
+        self._block("RECON DRONE", rows, status=status,
+                    emcon=emissions_exposure(world))
 
     def _bastion_block(self, sandbox) -> None:
         world = sandbox.world
@@ -1161,19 +1195,19 @@ class HUD:
             # the exact second, which would ceil one second too high.
             status = f"RELOADING {int(np.ceil(world.reload_left - 1e-9))} s"
             col = RELOAD_COL
-        rows = [("STATUS", status, col)]
+        rows = []
         # M2-T4: the Bastion weapon-select strip — one row per chamberable
-        # round (ONIKS|ZIRCON, plus KH-31P only when the ARM pool is stocked),
-        # the active one flagged with a '>' marker and accent colour, ammo
-        # right-aligned in the value.  In the DEFAULT battle (ARM off, ONIKS
-        # active) this renders the two-round strip; the ONIKS magazine row
-        # still follows so the per-tube AMMO readout is unchanged.
+        # round (ONIKS|ZIRCON, plus KH-31P only when the ARM pool is stocked).
+        # The ACTIVE round renders as the plate's selected-WEAPON row (mock
+        # 04: plate-selected fill + 3px brass bar + brass '>' value); the
+        # rest are quiet right-aligned rows below it.
         strip = bastion_weapon_strip(sandbox, world)
         for label, selected, ammo_text in strip:
-            marker = "> " if selected else "  "
-            wcol = ACCENT if selected else VALUE_COL
-            rows.append(("WEAPON" if label == strip[0][0] else "",
-                         f"{marker}{label}  {ammo_text}", wcol))
+            if selected:
+                rows.append(("WEAPON", f"> {label} {ammo_text}", ACCENT,
+                             True))
+            else:
+                rows.append(("", f"{label} {ammo_text}", VALUE_COL))
         ammo = oniks_ammo_row(world)        # COMBAT magazine; None in sandbox
         if ammo is not None:
             rows.append(ammo)
@@ -1198,25 +1232,18 @@ class HUD:
         salvo = salvo_readout(sandbox)
         if salvo is not None:
             rows.append(salvo)
-        rows += [
-            ("TIME", self._scale_text(sandbox), VALUE_COL),
-            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
-        ]
-        # M1-F4: per-tube battery row (own-force; [] in SANDBOX -> unchanged).
-        height = self._block(BASTION.display_name.upper(), rows,
-                             cells=tube_cells(world, "bastion"))
-        # M3-F5: the own-emissions gauge (how loud the player is on the
-        # back-plot) anchored below the data-driven block bottom; None when
-        # silent -> nothing drawn.
-        self._emissions_gauge(world, MARGIN + height)
+        # M1-F4 tube boxes + M3-F5 in-plate EMCON meter (own-force).
+        self._block(BASTION.display_name.upper(), rows,
+                    cells=tube_cells(world, "bastion"),
+                    status=(status, col),
+                    emcon=emissions_exposure(world))
 
     def _s300_block(self, sandbox) -> None:
         world = sandbox.world
         sam_round = getattr(sandbox, "sam_round", "48n6")
         status, col, name, ammo_text = s300_round_panel(world, sam_round)
         rows = [
-            ("STATUS", status, col),
-            ("WEAPON", name, VALUE_COL),
+            ("WEAPON", f"> {name}", ACCENT, True),   # the B-cycled round
             ("AMMO", ammo_text, VALUE_COL),
             ("TARGET", self._target_summary(sandbox, SAM_SITE_POS),
              VALUE_COL),
@@ -1238,17 +1265,10 @@ class HUD:
         salvo = salvo_readout(sandbox)
         if salvo is not None:
             rows.append(salvo)
-        rows += [
-            ("TIME", self._scale_text(sandbox), VALUE_COL),
-            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
-        ]
-        # M1-F4: per-tube battery row (own-force; [] in SANDBOX -> unchanged).
-        height = self._block(S300_TEL.display_name.upper(), rows,
-                             cells=tube_cells(world, "s300"))
-        # M3-F5: the own-emissions gauge (how loud the player is on the
-        # back-plot) anchored below the data-driven block bottom; None when
-        # silent -> nothing drawn.
-        self._emissions_gauge(world, MARGIN + height)
+        self._block(S300_TEL.display_name.upper(), rows,
+                    cells=tube_cells(world, "s300"),
+                    status=(status, col),
+                    emcon=emissions_exposure(world))
 
     def _buk_block(self, sandbox) -> None:
         """M5 Buk mid-SAM platform panel (mirror of _s300_block): the selected
@@ -1260,8 +1280,7 @@ class HUD:
         buk_round = getattr(sandbox, "buk_round", "9m317")
         status, col, name, ammo_text = buk_round_panel(world, buk_round)
         rows = [
-            ("STATUS", status, col),
-            ("WEAPON", name, VALUE_COL),
+            ("WEAPON", f"> {name}", ACCENT, True),   # the B-cycled round
             ("AMMO", ammo_text, VALUE_COL),
             ("TARGET", self._target_summary(sandbox, origin), VALUE_COL),
         ]
@@ -1275,19 +1294,16 @@ class HUD:
             world, engaging=getattr(sandbox, "pantsir_engaging", False))
         if pantsir is not None:
             rows.append(pantsir)
-        rows += [
-            ("TIME", self._scale_text(sandbox), VALUE_COL),
-            ("CLOCK", "T+" + _fmt_clock(world.sim_time), VALUE_COL),
-        ]
-        height = self._block(BUK_TEL.display_name.upper(), rows,
-                             cells=tube_cells(world, "buk"))
-        self._emissions_gauge(world, MARGIN + height)
+        self._block(BUK_TEL.display_name.upper(), rows,
+                    cells=tube_cells(world, "buk"),
+                    status=(status, col),
+                    emcon=emissions_exposure(world))
 
     @staticmethod
     def _target_summary(sandbox, origin) -> str:
         tp = sandbox.target_point
         if tp is None:
-            return "none"
+            return "NONE"
         dx = float(tp[0]) - origin[0]
         dz = float(tp[2]) - origin[2]
         brg = int(round(np.degrees(np.arctan2(dx, dz)))) % 360
@@ -1333,37 +1349,73 @@ class HUD:
     # ------------------------------------------ threat strip + intel panel
 
     def _threat_strip(self, sandbox, friendly_xz, w: int, h: int) -> None:
-        """Right-edge inbound column from ``threat_rows`` (M1): one badge +
-        bearing/range line per hostile, soonest impact at the top, colored by
-        severity. Reads ONLY the gated picture (the pure helper enforces this);
-        an empty board draws nothing. The single most-critical row (top, DANGER)
-        breathes via a sim-clock sine so the eye snaps to it.
+        """Right-edge INBOUND ranked cards from ``threat_rows`` (mock 04):
+        soonest impact on top, each a severity-tinted card — 4px left bar,
+        kind + bearing line, the TTI seconds, a range line, and a 3px
+        countdown bar that drains over TTI_BAR_WINDOW_S (the number beside
+        it is the truth; the bar is the glance).  Beyond CARD_MAX cards the
+        tail collapses to an honest '+N MORE'.  Reads ONLY the gated picture
+        (the pure helper enforces this); an empty board draws nothing.  The
+        top DANGER card's bar breathes via a deterministic sim-clock sine.
 
-        Queues into the shared TextRenderer (NO flush): the HUD's draw() and the
-        map's _chrome() both call it, then flush ONCE — calling flush here would
-        double-flush the map batch."""
+        Queues into the shared TextRenderer (NO flush): the HUD's draw() and
+        the map's _chrome() both call it, then flush ONCE."""
         rows = threat_rows(sandbox.world, friendly_xz,
                            sandbox.world.sim_time)
         if not rows:
             return                          # empty board: no strip
-        x = w - STRIP_MARGIN - STRIP_W
+        text = self.text
+        small_h = text.line_height(SMALL_SIZE)
+        body_h = text.line_height(BODY_SIZE)
+        x = w - STRIP_MARGIN - CARD_W
         y = STRIP_MARGIN
-        head = "INBOUND"
-        self.text.draw_text(x, y, head, ACCENT, SMALL_SIZE)
-        y += self.text.line_height(SMALL_SIZE) + 4
-        # Pulse the top critical row: a deterministic sim-clock sine (no RNG,
-        # no per-frame state) ramping STRIP_PULSE_LO..HI at STRIP_PULSE_HZ.
+        # Header: tracked dusk-red label (mock blink, steps(1)) + count.
+        blink_on = (sandbox.world.sim_time % INBOUND_BLINK_S) < 0.66
+        text.draw_text(x + 2, y, "INBOUND",
+                       (*_S.HOSTILE_AGED, 1.0 if blink_on else 0.35),
+                       SMALL_SIZE)
+        cnt = str(len(rows))
+        text.draw_text(x + CARD_W - 2 - text.text_width(cnt, SMALL_SIZE), y,
+                       cnt, (*_S.HOSTILE_AGED, 1.0), SMALL_SIZE)
+        y += small_h + 8
+        card_h = 6 + body_h + 2 + small_h + 6 + 3 + 8
         pulse = (STRIP_PULSE_LO + (STRIP_PULSE_HI - STRIP_PULSE_LO)
                  * 0.5 * (1.0 + np.sin(sandbox.world.sim_time
                                        * 2.0 * np.pi * STRIP_PULSE_HZ)))
-        for i, r in enumerate(rows):
-            col = SEVERITY_COLORS.get(r.severity, MUTED)
-            a = pulse if (i == 0 and r.severity == "DANGER") else 1.0
+        for i, r in enumerate(rows[:CARD_MAX]):
+            col = SEVERITY_COLORS.get(r.severity, MUTED)[:3]
+            bar_a = pulse if (i == 0 and r.severity == "DANGER") else 1.0
+            text.draw_rect(x, y, CARD_W, card_h, (*CARD_INK, 0.9))
+            text.draw_lines([(x, y), (x + CARD_W, y),
+                             (x + CARD_W, y + card_h), (x, y + card_h),
+                             (x, y)], (*col, 0.35), 1.0)
+            text.draw_rect(x, y, CARD_BAR_W, card_h, (*col, bar_a))
+            cx = x + CARD_BAR_W + CARD_PAD
             kind = (r.kind or "UNK").upper()
-            tti = f"{r.tti:.0f}s" if r.tti is not None else "--"
-            line = f"{kind}  {r.brg:03d}  {r.rng / 1e3:.0f}km  {tti}"
-            self.text.draw_text(x, y, line, (*col[:3], a))
-            y += STRIP_ROW_H
+            tti_txt = f"{r.tti:.0f} S" if r.tti is not None else "--"
+            tw = text.text_width(tti_txt)
+            text.draw_text(x + CARD_W - CARD_PAD - tw, y + 6, tti_txt,
+                           VALUE_COL)
+            text.draw_text(cx, y + 6 + (body_h - small_h) // 2,
+                           f"{kind} - BRG {r.brg:03d}", (*col, 1.0),
+                           SMALL_SIZE)
+            text.draw_text(cx, y + 6 + body_h + 2,
+                           f"{r.rng / 1e3:.0f} KM", MUTED, SMALL_SIZE)
+            # Countdown bar: track in the dim family tone, fill drains with
+            # the time remaining (frac of the fixed window).
+            by = y + card_h - 8 - 3
+            bw = CARD_W - CARD_BAR_W - 2 * CARD_PAD
+            text.draw_rect(cx, by, bw, 3, (*col, 0.18))
+            frac = _clamp01((r.tti or 0.0) / TTI_BAR_WINDOW_S)
+            fw = round(bw * frac)
+            if fw > 0:
+                text.draw_rect(cx, by, fw, 3, (*col, 0.9))
+            y += card_h + CARD_GAP
+        extra = len(rows) - CARD_MAX
+        if extra > 0:
+            more = f"+{extra} MORE"
+            text.draw_text(x + 2, y, more, (*_S.HOSTILE_AGED, 0.8),
+                           SMALL_SIZE)
 
     def _intel_panel(self, world, selected_contact, origin_xz, x, y) -> None:
         """Docked contact-intel panel from ``contact_intel`` (M1): the
@@ -1431,17 +1483,26 @@ class HUD:
         self.text.draw_text(x, y, sandbox.hint_text, RELOAD_COL)
 
     def _corner_labels(self, sandbox, w: int, h: int) -> None:
-        """Bottom-right, no panel fill (spec §4.1): the 'F1 CONTROLS'
-        micro-label with the bare camera-mode readout stacked above it."""
-        lh = self.text.line_height(SMALL_SIZE)
-        y = h - CORNER_MARGIN - lh
-        tw = self.text.text_width(F1_LABEL, SMALL_SIZE)
-        self.text.draw_text(w - CORNER_MARGIN - tw, y, F1_LABEL, ACCENT_DIM,
-                            SMALL_SIZE)
-        cam = f"CAM {sandbox.rig.mode.upper()}"
-        cw = self.text.text_width(cam, SMALL_SIZE)
-        self.text.draw_text(w - CORNER_MARGIN - cw, y - CAM_LABEL_GAP, cam,
-                            MUTED, SMALL_SIZE)
+        """Bottom-right (mock 04): the boxed CAM chip stacked over the
+        combined micro-hint line.  F1_LABEL keeps the exact spec §4.1 copy
+        (test-pinned); the map/battery hints ride behind it."""
+        text = self.text
+        lh = text.line_height(SMALL_SIZE)
+        hint = f"{F1_LABEL} - M MAP - O BATTERY"
+        hw = text.text_width(hint, SMALL_SIZE)
+        hy = h - CORNER_MARGIN - lh
+        text.draw_text(w - CORNER_MARGIN - hw, hy, hint, _S.HINT_COL,
+                       SMALL_SIZE)
+        cam = f"CAM - {sandbox.rig.mode.upper()}"
+        cw = text.text_width(cam, SMALL_SIZE)
+        bw = round(cw + 20)
+        bh = lh + 8
+        bx = w - CORNER_MARGIN - bw
+        by = hy - 8 - bh
+        text.draw_rect(bx, by, bw, bh, (*_S.PLATE_INK, 0.8))
+        text.draw_lines([(bx, by), (bx + bw, by), (bx + bw, by + bh),
+                         (bx, by + bh), (bx, by)], (*_S.LINE_COL, 1.0), 1.0)
+        text.draw_text(bx + 10, by + 4, cam, VALUE_COL, SMALL_SIZE)
 
     def _battery_panel(self, sandbox, w: int, h: int) -> None:
         """O: the EXPANDED per-battery status board (M6) — a centered corner-
@@ -1483,13 +1544,13 @@ class HUD:
                        ACCENT_DIM, SMALL_SIZE)
 
     def _battery_row(self, x, y, bat, row_w) -> None:
-        """One battery row of the expanded board: the name + pooled magazine on
-        the left, the per-tube state badges (LOADED/RELOADING/EMPTY via
-        SEMANTIC_COLORS — the own-force idiom) on the right, with a thin reload
-        gauge under a RELOADING tube.  OWN-FORCE only; no contact reads."""
+        """One battery row of the expanded board (mock 07): the name +
+        pooled magazine on the left, TUBE boxes (the spec §5 tube-cell
+        recipe via _tube_boxes) on the right.  OWN-FORCE only; no contact
+        reads."""
         text = self.text
         small_h = text.line_height(SMALL_SIZE)
-        text.draw_text(x, y, bat["name"], LABEL_COL, SMALL_SIZE)
+        text.draw_text(x, y, bat["name"], VALUE_COL, SMALL_SIZE)
         pool = bat["pool_text"]
         if pool is not None:
             ptxt = pool
@@ -1497,16 +1558,13 @@ class HUD:
                 ptxt += f"  RLDG {int(np.ceil(bat['refill_left'] - 1e-9))}s"
             text.draw_text(x, y + small_h + TUBE_LABEL_GAP, ptxt,
                            bat["pool_col"], SMALL_SIZE)
-        # Tube badges, right of the name column.
-        bx = x + BPANEL_NAME_W
-        for i, (state, _left) in enumerate(bat["tubes"]):
-            cx = bx + i * (TUBE_CELL_W + TUBE_GAP)
-            text.draw_text(cx, y, str(i + 1), MUTED, SMALL_SIZE)
-            ly = y + small_h + TUBE_LABEL_GAP
-            # READY is the own-force LOADED token in SEMANTIC_COLORS; map the
-            # LOADED state onto it so the badge reads green.
-            badge_state = "READY" if state == "LOADED" else state
-            _badge(text, badge_state, cx, ly, badge_state, size=SMALL_SIZE)
+        # Tube boxes, right of the name column (READY is the own-force
+        # LOADED token in SEMANTIC_COLORS; per-tube reload frac is unknown
+        # here so the box shows RLD without a progress strip).
+        cells = [(str(i + 1), "READY" if s == "LOADED" else s, 0.0)
+                 for i, (s, _left) in enumerate(bat["tubes"])]
+        self._tube_boxes(x + BPANEL_NAME_W, y, row_w - BPANEL_NAME_W, cells,
+                         small_h + 10)
 
     def _controls_overlay(self, sandbox, w: int, h: int) -> None:
         """F1: centered corner-ticked panel listing every binding straight
