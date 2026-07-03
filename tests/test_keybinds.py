@@ -200,7 +200,8 @@ def test_settings_path_is_appdata_oniks(monkeypatch):
 def test_conflict_query(kb):
     assert kb.conflict("map", pygame.K_c) == "camera_mode"
     assert kb.conflict("map", pygame.K_m) is None      # own key: no conflict
-    assert kb.conflict("map", pygame.K_j) is None
+    # L is a genuinely unbound key (J became the forensics default).
+    assert kb.conflict("map", pygame.K_l) is None
 
 
 def test_conflict_rebind_swaps_atomically(kb):

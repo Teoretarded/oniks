@@ -260,9 +260,11 @@ def test_settings_enter_listens_then_captures(settings):
     kb = settings.app.keybinds
     settings.handle_event(key_event(pygame.K_RETURN))
     assert settings.listening == "launch"
-    settings.handle_event(key_event(pygame.K_j))
+    # L is a genuinely unbound key (J became the forensics default), so the
+    # capture binds immediately with no conflict-swap prompt.
+    settings.handle_event(key_event(pygame.K_l))
     assert settings.listening is None
-    assert kb.key_for("launch") == pygame.K_j     # saved immediately
+    assert kb.key_for("launch") == pygame.K_l     # saved immediately
 
 
 def test_settings_escape_cancels_listening(settings):

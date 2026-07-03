@@ -542,6 +542,12 @@ class SandboxState(GameState):
         self.controls_overlay = not self.controls_overlay
         self.app.audio.ui_click()
 
+    def toggle_forensics(self) -> None:
+        """J (forensics binding): the FORENSICS/DEBRIEF ledger is COMBAT-only
+        (it reads the CombatState flight recorder) — graceful no-op hint in
+        SANDBOX, same convention as the other combat-only actions."""
+        self.show_hint("FORENSICS LEDGER: COMBAT ONLY")
+
     def toggle_battery_panel(self) -> None:
         """O (battery_panel binding): toggle the EXPANDED per-battery STATUS
         PANEL (every player Oniks/S-300 tube's LOADED/RELOADING/EMPTY + the

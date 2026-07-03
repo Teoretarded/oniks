@@ -129,6 +129,30 @@ def main() -> int:
     save(app, "15_controls_overlay.png")
     key(app, pygame.K_F1)
 
+    # ---------- forensics / shot debrief ledger (J or map rail button) ----
+    # Let the opening salvo RESOLVE first so the ledger shows CLOSED sheets
+    # (death anchors + cause attribution), not just IN AIR rounds.  Bails
+    # early if the battle decides itself (the end overlay owns input then).
+    for _ in range(int(240.0 / PHYS_DT)):
+        st.sim_step(PHYS_DT)
+        if st._end_overlay is not None:
+            break
+        recs = st.flight_recorder.rounds()
+        if recs and all(r["death"] is not None for r in recs):
+            break
+    key(app, pygame.K_j)
+    settle(app)
+    save(app, "16_forensics_ledger.png")
+    key(app, pygame.K_DOWN)                 # leaf to the next sheet
+    settle(app)
+    save(app, "17_forensics_sheet2.png")
+    key(app, pygame.K_2)                    # BLACK BOX tab: AWAITING DESIGN
+    settle(app)
+    save(app, "18_forensics_blackbox_placeholder.png")
+    key(app, pygame.K_1)
+    key(app, pygame.K_ESCAPE)               # close the sheet (back to map)
+    key(app, pygame.K_m)                    # close the map
+
     # ---------- AAR / end overlay ----------
     from sim.ships import ST_GONE
     for s in world.ships:
@@ -143,6 +167,12 @@ def main() -> int:
         st.sim_step(PHYS_DT)
     settle(app, 12)
     save(app, "20_aar_victory_grade.png")
+
+    # DEBRIEF row (first AAR row): the ledger opens OVER the end screen.
+    key(app, pygame.K_RETURN)
+    settle(app, 14)                         # 80 ms press-flash then callback
+    save(app, "21_aar_debrief_ledger.png")
+    key(app, pygame.K_ESCAPE)               # leaf back to the AAR
 
     # ---------- campaign hub ----------
     app.open_campaign()

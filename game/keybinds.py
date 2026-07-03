@@ -110,6 +110,11 @@ ACTIONS: tuple[ActionDef, ...] = (
     # claimed by the M3-F4 drone EW pod (jam); O was unclaimed by every default
     # (and F/Y are the salvo keys), so the panel binds to O.
     ActionDef("battery_panel", "BATTERY PANEL", "SIMULATION", pygame.K_o),
+    # FORENSICS / SHOT DEBRIEF ledger (handoff 2026-07-03): J opens the
+    # recorded-flight-path sheet in battle.  An overlay, not a menu — the sim
+    # NEVER pauses under it.  J is unclaimed by every other default; in
+    # SANDBOX (no flight recorder) the action is a graceful no-op.
+    ActionDef("forensics", "FORENSICS / DEBRIEF", "SIMULATION", pygame.K_j),
     # M6 AUTO-TIME-WARP: T toggles event-aware auto pacing — the - / = ladder
     # sets the TARGET warp and the sim auto-drops to 1x on important events
     # (inbound detected / own terminal / intercept), then eases back.  T was

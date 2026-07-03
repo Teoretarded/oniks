@@ -31,10 +31,13 @@ tests.
 
 from __future__ import annotations
 
+import pygame
+
 from engine.mesh import Mesh
 from game.combat_end import CombatEndOverlay
 from game.controls import PLATFORMS_COMBAT, combat_platforms
 from game.flight_recorder import FlightRecorder
+from game.forensics import ForensicsScreen
 from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
 from game.scoring import (
     compute_par, compute_scorecard, grade, new_telemetry,
@@ -131,6 +134,13 @@ class CombatState(SandboxState):
         # at fixed sim-clock boundaries — the debrief plots 1:1 from this).
         # Own rounds only; the sim never reads it (digest untouched).
         self.flight_recorder = FlightRecorder()
+        # FORENSICS / SHOT DEBRIEF ledger: an overlay the render branch draws
+        # INSTEAD of the HUD/map — sim_step is untouched, THE SIM NEVER
+        # PAUSES under it (tactical-map pattern).  Opened by J, the map
+        # side-rail button, or the AAR DEBRIEF row.
+        self.forensics = ForensicsScreen(self)
+        self.forensics_open = False
+        self._rail_rect = None       # map side-rail DEBRIEF button hit box
 
     def _pantsir_ammo_total(self) -> int:
         """Pooled 57E6 rounds remaining across all Pantsir units (alive or
@@ -281,7 +291,8 @@ class CombatState(SandboxState):
             scorecard=card,
             campaign_cb=self._campaign_continue if in_campaign else None,
             par=getattr(self, "_final_par", None),
-            end_time=float(getattr(self.world, "sim_time", 0.0)))
+            end_time=float(getattr(self.world, "sim_time", 0.0)),
+            debrief_cb=self._open_forensics)
         overlay.enter()
         self._end_overlay = overlay
 
@@ -327,20 +338,64 @@ class CombatState(SandboxState):
         except Exception:
             return None
 
+    # ------------------------------------------------------------- forensics
+
+    def toggle_forensics(self) -> None:
+        """J / map rail button / AAR DEBRIEF row: flip the forensics ledger.
+        An overlay, not a menu — THE SIM NEVER PAUSES under it (sim_step is
+        untouched; the live T+ chip on the sheet proves it)."""
+        self.forensics_open = not self.forensics_open
+        self.app.audio.ui_click()
+
+    def _open_forensics(self) -> None:
+        """AAR DEBRIEF row: open the ledger over the end screen (ESC leafs
+        back to the AAR — the overlay stays latched underneath)."""
+        self.forensics_open = True
+
     def handle_event(self, ev) -> None:
-        """Route input to the end overlay once the battle is decided (its
-        REMATCH/NEW BATTLE/MAIN MENU rows + ESC); otherwise the normal
-        sandbox controls."""
+        """Route input to the forensics ledger while it is open, then to the
+        end overlay once the battle is decided (its option rows + ESC);
+        otherwise the normal sandbox controls.  The map side-rail DEBRIEF
+        button claims its click before the map layer eats it."""
+        if self.forensics_open:
+            if self.forensics.handle_event(ev):
+                return
+            if self._end_overlay is not None:
+                return       # unhandled input never leaks into the AAR below
+            super().handle_event(ev)         # F1/F2 reach the binding table
+            return
         if self._end_overlay is not None:
             self._end_overlay.handle_event(ev)
             return
+        if (self.map_open and self._rail_rect is not None
+                and ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
+            x0, y0, x1, y1 = self._rail_rect
+            if x0 <= ev.pos[0] <= x1 and y0 <= ev.pos[1] <= y1:
+                self.toggle_forensics()
+                return
         super().handle_event(ev)
 
     def render(self, dt_real: float) -> None:
         """Normal sandbox render; once the battle is decided, draw the live
         scene (the sim keeps running underneath — spec §2.2) and lay the
         end overlay's dim + panel on top.  The overlay's _tick_pending runs
-        inside its render, advancing the 80 ms press-flash before firing."""
+        inside its render, advancing the 80 ms press-flash before firing.
+        The forensics ledger outranks both branches (it opens over the map
+        AND over the AAR); the map screen gains the side-rail DEBRIEF
+        button, drawn OUTSIDE the map canvas."""
+        if self.forensics_open:
+            self.controls.update(dt_real)        # free-cam still flies
+            self.rig.update(dt_real, self.followed)
+            audio = self.app.audio
+            audio.set_listener(self.camera.eye)
+            audio.update_loops(self._loop_sources())
+            w, h = self.window.size()
+            self._draw_scene(w, h)
+            self.forensics.draw(w, h)
+            if self.controls_overlay:            # F1 works over the sheet
+                self.hud._controls_overlay(self, w, h)
+                self.hud.text.flush(w, h)
+            return
         if self._end_overlay is not None:
             self.controls.update(dt_real)        # free-cam still flies
             self.rig.update(dt_real, self.followed)
@@ -352,6 +407,29 @@ class CombatState(SandboxState):
             self._end_overlay.render(dt_real)
             return
         super().render(dt_real)
+        if self.map_open:
+            w, h = self.window.size()
+            self._draw_map_rail(w, h)
+
+    def _draw_map_rail(self, w: int, h: int) -> None:
+        """Side-rail DEBRIEF button on the tactical-map screen — docked on
+        the LEFT edge, outside the map canvas widgets (the threat strip owns
+        the right edge).  Mouse click OR the J key opens the ledger."""
+        from engine.text import SMALL_SIZE
+        from game.states import draw_panel
+        text = self.text
+        key = self.app.keybinds.name_for("forensics")
+        label = f"DEBRIEF [{key}]"
+        lw = text.text_width(label, SMALL_SIZE)
+        lh = text.line_height(SMALL_SIZE)
+        bw = lw + 28
+        bh = lh + 18
+        bx, by = 12, int(h * 0.5 - bh * 0.5)
+        draw_panel(text, bx, by, bw, bh)
+        from game.states import TEXT_COL
+        text.draw_text(bx + 14, by + 9, label, TEXT_COL, SMALL_SIZE)
+        self._rail_rect = (bx, by, bx + bw, by + bh)
+        text.flush(w, h)
 
     def _build_meshes(self) -> None:
         super()._build_meshes()

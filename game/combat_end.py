@@ -160,6 +160,7 @@ class CombatEndOverlay(GameState):
         campaign_cb=None,
         par=None,
         end_time=None,
+        debrief_cb=None,
     ):
         super().__init__(app)
         self._gl   = None
@@ -183,6 +184,13 @@ class CombatEndOverlay(GameState):
                 "NEW BATTLE": new_battle_cb,
                 "MAIN MENU":  menu_cb,
             }
+        # FORENSICS handoff: a DEBRIEF row opens the recorded-flight-path
+        # ledger OVER this overlay (ESC on the sheet leafs back here).  Only
+        # offered when the owning state wired a callback — legacy/smoke
+        # constructions keep the exact historical row set.
+        if debrief_cb is not None:
+            self._items = ("DEBRIEF",) + tuple(self._items)
+            self._callbacks["DEBRIEF"] = debrief_cb
 
         self._sel:          int   = 0
         self._pending:      str | None = None

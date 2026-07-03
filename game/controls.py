@@ -251,6 +251,8 @@ class SandboxControls:
             sandbox.request_asw()
         elif action == "battery_panel":
             sandbox.toggle_battery_panel()
+        elif action == "forensics":
+            sandbox.toggle_forensics()
         elif action == "auto_warp_toggle":
             sandbox.toggle_auto_warp()
         elif action == "pause":

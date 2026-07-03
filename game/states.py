@@ -55,6 +55,30 @@ BRASS_KEY_BORDER = (0.290, 0.235, 0.133)  # brass key border #4A3C22
 BRASS_KEY_BG = (0.129, 0.106, 0.063)      # brass key fill  #211B10
 PLATE_INK = (0.051, 0.071, 0.063)   # HUD plate ink over 3D #0D1210 (@0.93)
 
+# --- FORENSICS ledger paper (approved mock: ledger2_final_debrief.html) ---------
+# NEW token family — light paper on the dark desk.  These are DOCUMENT INKS
+# (a typed after-action sheet), not the HUD phosphor families above; never
+# repurpose the HUD tokens for the paper, or these for the HUD.
+PAPER_BG = (0.918, 0.878, 0.784)     # paper sheet        #EAE0C8
+PAPER_FIELD = (0.906, 0.867, 0.761)  # plot field fill    #E7DDC2
+PAPER_SELECT = (0.875, 0.827, 0.706) # selected stub fill #DFD3B4
+PAPER_TAG = (0.937, 0.902, 0.804)    # pin-label fill     #EFE6CD
+PAPER_INK = (0.149, 0.125, 0.059)    # typed ink          #26200F
+PAPER_MUTED = (0.420, 0.384, 0.314)  # muted ink          #6B6250
+PAPER_HATCH = (0.725, 0.678, 0.553)  # ground residue     #B9AD8D
+PAPER_DESK = (0.082, 0.063, 0.035)   # desk field         #151009
+PAPER_DESK_EDGE = (0.043, 0.031, 0.016)  # desk vignette edge #0B0804
+PAPER_CHIP_BG = (0.055, 0.043, 0.024)    # clock chip fill    #0E0B06
+PAPER_CHIP_EDGE = (0.227, 0.184, 0.110)  # clock chip border  #3A2F1C
+PAPER_CHIP_TEXT = (0.851, 0.643, 0.255)  # clock chip amber   #D9A441
+PAPER_CHIP_MUTED = (0.420, 0.353, 0.208) # clock chip dim     #6B5A35
+PAPER_HEADLINE = (0.541, 0.478, 0.298)   # desk header text   #8A7A4C
+INK_RED = (0.659, 0.208, 0.165)      # loss/intercept ink #A8352A
+INK_TEAL = (0.125, 0.392, 0.494)     # plotted-path ink   #20647E
+INK_AMBER = (0.541, 0.435, 0.208)    # fuel/illum ink     #8A6F35
+INK_GREEN = (0.227, 0.420, 0.259)    # hit/launcher ink   #3A6B42
+INK_VIOLET = (0.373, 0.294, 0.541)   # spare lane ink     #5F4B8A
+
 # Grade families (spec §9): S/A green, B amber, C/D dusk-red; D adds the shame
 # treatment (tinted bg + flat inset ring + blink).  (bg, border) per letter.
 GRADE_COLS = {"S": OK_COL, "A": OK_COL, "B": WARN, "C": DANGER, "D": DANGER}
