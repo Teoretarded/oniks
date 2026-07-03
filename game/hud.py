@@ -26,6 +26,8 @@ import numpy as np
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.keybinds import ACTIONS
 from game.timewarp import drop_cause
+from sim.contacts import classify as _classify
+from sim.contacts import track_quality as _track_quality
 import game.states as _S
 from game.states import (ACCENT, ACCENT_DIM, BG0, DANGER, MUTED, OK_COL,
                          SEMANTIC_COLORS, TEXT_COL, WARN, draw_header_rule,
@@ -110,9 +112,10 @@ TTI_CRIT_S = 20.0           # time-to-impact below this reads DANGER (red)
 TTI_WARN_S = 60.0           # ... below this reads WARN (amber); else MUTED
 CLOSING_EPS = 1.0           # m/s: a track closing slower than this has no TTI
 
-# Sensor-confidence ladder for the intel panel (track age in seconds):
-AGE_IDENTIFIED_S = 5.0      # fresher than this -> IDENTIFIED (a live fix)
-AGE_CLASSIFIED_S = 20.0     # fresher than this -> CLASSIFIED; else UNKNOWN
+# Sensor staleness thresholds for the intel panel.  (The old age-keyed
+# IDENTIFIED/CLASSIFIED ladder is gone — classification is now EARNED by
+# dwell, sim/contacts.classify; staleness only degrades position quality.)
+AGE_CLASSIFIED_S = 20.0     # older than this -> the fix is dead-reckoned
 CONFIDENCE_FADE_S = 25.0    # linear confidence fade: 1.0 fresh -> 0.0 here on
 #                             (so a brand-new fix reads >= 0.8, the panel's
 #                             "high confidence" band, well before AGE_CLASSIFIED)
@@ -491,22 +494,30 @@ def threat_rows(world, friendly_xz, now) -> list:
 
 
 def contact_intel(world, sid, origin_xz, now):
-    """The fog-of-war track inspector for the click-contact intel panel (M1) —
-    pure, GL-free, deterministic. None when ``sid`` is None or not on the board;
-    else a dict of sensor-DERIVED fields (never truth):
+    """The fog-of-war track inspector for the click-contact intel panel (M1,
+    re-keyed by the classification spec) — pure, GL-free, deterministic.
+    None when ``sid`` is None or not on the board; else a dict of
+    sensor-DERIVED fields (never truth):
 
-      cls           'MISSILE' / 'AIR' / 'SURFACE', from size + is_air
-      id            'IDENTIFIED' / 'CLASSIFIED' / 'UNKNOWN', by track age
+      cls           'UNKNOWN' until the dwell ladder earns the class, then
+                    'MISSILE' / 'AIR' / 'SURFACE' (size + is_air)
+      id            the ladder stage 'UNKNOWN' / 'CLASSIFIED' / 'IDENTIFIED'
+                    — earned by TRACK DWELL (sim/contacts.classify), MONOTONIC
+                    (a coasting track keeps what it earned; the old age-keyed
+                    version called a first-frame track IDENTIFIED — the exact
+                    free-knowledge bug the spec removes)
+      label         the display name the ladder has earned (UNK / MSL / SM6)
+      quality       Q5 (fresh paint) .. Q1 (about to drop) — position quality
+                    from staleness (sim/contacts.track_quality)
       confidence    [0, 1] fading linearly with age (fresh >= 0.8)
       dead_reckoned True once age >= AGE_CLASSIFIED_S (the fix is coasting)
       brg, rng      compass bearing + ground-plane range from origin -> estimate
       course        compass heading of the track velocity
-      speed         ground-plane speed (m/s)
+      speed         ground-plane speed (m/s) — always shown: honestly measured
       alt           estimated altitude (m, the estimate's y)
-      kind, age     the raw track stamps (kind may be None for a platform)
-      source        coarse sensor provenance ('RADAR' for a fresh fix that is
-                    still being refreshed, 'COAST' once dead-reckoned) — derived
-                    from the track, not truth
+      kind          the TYPE stamp, or None while the ladder hasn't earned it
+      age           the raw staleness stamp
+      source        'RADAR' for a live fix, 'COAST' once dead-reckoned
     """
     if sid is None:
         return None
@@ -518,18 +529,15 @@ def contact_intel(world, sid, origin_xz, now):
     age = float(track.get("age", 0.0))
     size = track.get("size")
     is_air = bool(track.get("is_air"))
-    if size == "missile":
+    stage, label = _classify(track, now)
+    if stage == "UNKNOWN":
+        cls = "UNKNOWN"
+    elif size == "missile":
         cls = "MISSILE"
     elif is_air:
         cls = "AIR"
     else:
         cls = "SURFACE"
-    if age < AGE_IDENTIFIED_S:
-        ident = "IDENTIFIED"
-    elif age < AGE_CLASSIFIED_S:
-        ident = "CLASSIFIED"
-    else:
-        ident = "UNKNOWN"
     confidence = max(0.0, 1.0 - age / CONFIDENCE_FADE_S)
     dead_reckoned = age >= AGE_CLASSIFIED_S
     ox, oz = float(origin_xz[0]), float(origin_xz[1])
@@ -541,7 +549,9 @@ def contact_intel(world, sid, origin_xz, now):
     course = _compass_bearing(float(vel[0]), float(vel[2]))
     return {
         "cls": cls,
-        "id": ident,
+        "id": stage,
+        "label": label,
+        "quality": _track_quality(track),
         "confidence": confidence,
         "dead_reckoned": dead_reckoned,
         "brg": brg,
@@ -549,12 +559,38 @@ def contact_intel(world, sid, origin_xz, now):
         "course": course,
         "speed": speed,
         "alt": float(est[1]),
-        "kind": track.get("kind"),
+        # The TYPE is only surfaced once the ladder earned it (fog LAW:
+        # never display what the sensors have not produced yet).
+        "kind": track.get("kind") if stage == "IDENTIFIED" else None,
         "age": age,
-        # A dead-reckoned track is no longer being painted by radar; before
-        # that it is a live fix. Coarse, sensor-derived — never reads truth.
         "source": "COAST" if dead_reckoned else "RADAR",
     }
+
+
+def interceptor_pairings(world):
+    """{hostile air-track id: count of OWN interceptors in flight at it} —
+    the honest core of the NTDS 'FCS assigned' modifier (proto 03).
+
+    OWN-FORCE TRUTH ONLY (allowed): reads each of OUR live rounds' .target
+    entity reference (our own fire-control assignment) and keys it by the
+    target's ``aircraft_id`` — the same id the ContactBoard tracks under.
+    Enemy rounds (is_hostile) and surface-target rounds (Oniks locked ships,
+    ARM radar shots) are excluded; this counts interceptors at AIR threats.
+    Never reads enemy intent — unlike the rejected 'S-300 ASSIGNED' mock
+    copy, PAIRED/UNCOVERED states a fact about MY rounds."""
+    out: dict = {}
+    for m in getattr(world, "missiles", ()):
+        if not getattr(m, "alive", False):
+            continue
+        if getattr(m, "is_hostile", False):
+            continue                        # not ours
+        tgt = getattr(m, "target", None)
+        if tgt is None or not getattr(tgt, "is_air", False):
+            continue                        # interceptors only
+        tid = getattr(tgt, "aircraft_id", None)
+        if tid:
+            out[tid] = out.get(tid, 0) + 1
+    return out
 
 
 def radar_status_row(world):
@@ -949,6 +985,9 @@ class HUD:
 
     def __init__(self, text):
         self.text = text
+        # Track ids already announced on the INBOUND stack (render-side
+        # state: drives the one-shot NEW-CONTACT hint, never the sim).
+        self._threat_seen: set = set()
 
     # ------------------------------------------------------------------ draw
 
@@ -1361,27 +1400,42 @@ class HUD:
 
         Queues into the shared TextRenderer (NO flush): the HUD's draw() and
         the map's _chrome() both call it, then flush ONCE."""
-        rows = threat_rows(sandbox.world, friendly_xz,
-                           sandbox.world.sim_time)
+        world = sandbox.world
+        rows = threat_rows(world, friendly_xz, world.sim_time)
         if not rows:
             return                          # empty board: no strip
         text = self.text
+        # One-shot launch warning: a track id newly ON the stack flashes the
+        # contextual hint — the player hears 'something is inbound' before
+        # the ladder has earned WHAT it is (classification spec).
+        new_sids = [r.sid for r in rows if r.sid not in self._threat_seen]
+        if new_sids:
+            self._threat_seen.update(new_sids)
+            hint = getattr(sandbox, "show_hint", None)
+            if hint is not None:
+                hint("WARNING - NEW INBOUND CONTACT")
+        tracks = world.contacts.tracks
+        pairings = interceptor_pairings(world)
         small_h = text.line_height(SMALL_SIZE)
         body_h = text.line_height(BODY_SIZE)
         x = w - STRIP_MARGIN - CARD_W
         y = STRIP_MARGIN
-        # Header: tracked dusk-red label (mock blink, steps(1)) + count.
-        blink_on = (sandbox.world.sim_time % INBOUND_BLINK_S) < 0.66
+        # Header: tracked dusk-red label (mock blink, steps(1)) + the count
+        # with the honest coverage tally (proto 03: 'N - M UNCOVERED').
+        blink_on = (world.sim_time % INBOUND_BLINK_S) < 0.66
         text.draw_text(x + 2, y, "INBOUND",
                        (*_S.HOSTILE_AGED, 1.0 if blink_on else 0.35),
                        SMALL_SIZE)
-        cnt = str(len(rows))
+        uncovered = sum(1 for r in rows if not pairings.get(r.sid))
+        cnt = (f"{len(rows)} - {uncovered} UNCOVERED" if uncovered
+               else f"{len(rows)} - ALL PAIRED")
+        ccol = DANGER if uncovered else OK_COL
         text.draw_text(x + CARD_W - 2 - text.text_width(cnt, SMALL_SIZE), y,
-                       cnt, (*_S.HOSTILE_AGED, 1.0), SMALL_SIZE)
+                       cnt, (*ccol[:3], 1.0), SMALL_SIZE)
         y += small_h + 8
         card_h = 6 + body_h + 2 + small_h + 6 + 3 + 8
         pulse = (STRIP_PULSE_LO + (STRIP_PULSE_HI - STRIP_PULSE_LO)
-                 * 0.5 * (1.0 + np.sin(sandbox.world.sim_time
+                 * 0.5 * (1.0 + np.sin(world.sim_time
                                        * 2.0 * np.pi * STRIP_PULSE_HZ)))
         for i, r in enumerate(rows[:CARD_MAX]):
             col = SEVERITY_COLORS.get(r.severity, MUTED)[:3]
@@ -1392,16 +1446,31 @@ class HUD:
                              (x, y)], (*col, 0.35), 1.0)
             text.draw_rect(x, y, CARD_BAR_W, card_h, (*col, bar_a))
             cx = x + CARD_BAR_W + CARD_PAD
-            kind = (r.kind or "UNK").upper()
+            # Classification ladder (fog LAW): the card names the round only
+            # once the dwell earned it — UNK -> MSL -> SM6.  Speed is always
+            # shown (honestly measured from the track vector).
+            trk = tracks.get(r.sid)
+            label = _classify(trk, world.sim_time)[1] if trk is not None \
+                else (r.kind or "UNK").upper()
             tti_txt = f"{r.tti:.0f} S" if r.tti is not None else "--"
             tw = text.text_width(tti_txt)
             text.draw_text(x + CARD_W - CARD_PAD - tw, y + 6, tti_txt,
                            VALUE_COL)
             text.draw_text(cx, y + 6 + (body_h - small_h) // 2,
-                           f"{kind} - BRG {r.brg:03d}", (*col, 1.0),
+                           f"{label} - BRG {r.brg:03d}", (*col, 1.0),
                            SMALL_SIZE)
+            spd = (float(np.hypot(trk["vel"][0], trk["vel"][2]))
+                   if trk is not None else 0.0)
             text.draw_text(cx, y + 6 + body_h + 2,
-                           f"{r.rng / 1e3:.0f} KM", MUTED, SMALL_SIZE)
+                           f"{r.rng / 1e3:.0f} KM - {spd:.0f} M/S",
+                           MUTED, SMALL_SIZE)
+            # Coverage state (own-force truth: my interceptors in flight).
+            n_up = pairings.get(r.sid, 0)
+            cov = f"PAIRED x{n_up}" if n_up else "UNCOVERED"
+            cov_col = OK_COL if n_up else DANGER
+            cw2 = text.text_width(cov, SMALL_SIZE)
+            text.draw_text(x + CARD_W - CARD_PAD - cw2, y + 6 + body_h + 2,
+                           cov, (*cov_col[:3], 0.9), SMALL_SIZE)
             # Countdown bar: track in the dim family tone, fill drains with
             # the time remaining (frac of the fixed window).
             by = y + card_h - 8 - 3
@@ -1428,9 +1497,12 @@ class HUD:
         if intel is None:
             return
         # Fixed-height panel: header rule + the value rows + the confidence
-        # gauge, with a bearing rose docked on the right.
+        # gauge, with a bearing rose docked on the right.  TYPE shows the
+        # ladder-earned label (UNK -> MSL -> SM6, classification spec) and
+        # ID the ladder stage; the Q chip below grades position quality.
         rows = [
             ("CLASS", intel["cls"]),
+            ("TYPE", intel["label"]),
             ("ID", intel["id"]),
             ("BRG", f"{intel['brg']:03d}"),
             ("RNG", f"{intel['rng'] / 1e3:.1f} km"),
@@ -1441,7 +1513,7 @@ class HUD:
         ]
         head_h = self.text.line_height(HEADER_SIZE)
         height = (INTEL_PAD * 2 + head_h + 4 + HEADER_GAP
-                  + len(rows) * INTEL_LINE_H + INTEL_GAUGE_H + 18)
+                  + len(rows) * INTEL_LINE_H + INTEL_GAUGE_H + 42)
         draw_panel(self.text, x, y, INTEL_W, height, alpha=PANEL_ALPHA)
         tx = x + INTEL_PAD
         ty = y + INTEL_PAD
@@ -1467,6 +1539,21 @@ class HUD:
         _gauge_bar(self.text, tx + INTEL_VALUE_X, ty,
                    INTEL_W - 2 * INTEL_PAD - INTEL_VALUE_X, INTEL_GAUGE_H,
                    intel["confidence"], gauge_col)
+        # Track-quality ladder chip (proto 04): five ascending bars, filled
+        # to Q, in the BELIEF teal family (a sensor grade, never truth).
+        ty += INTEL_GAUGE_H + 8
+        self.text.draw_text(tx, ty - 2, f"Q{intel['quality']}", LABEL_COL,
+                            SMALL_SIZE)
+        q = int(intel["quality"])
+        bx = tx + INTEL_VALUE_X
+        for i in range(5):
+            bar_h = 4 + 3 * i
+            if i < q:
+                self.text.draw_rect(bx + i * 9, ty + 12 - bar_h, 6, bar_h,
+                                    (*_S.BELIEF, 0.9))
+            else:
+                self.text.draw_rect(bx + i * 9, ty + 12 - bar_h, 6, bar_h,
+                                    (*_S.LINE_COL, 0.9))
 
     # ----------------------------------------------- hints + corner labels
 
