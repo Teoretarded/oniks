@@ -28,6 +28,7 @@ from game.hud_widgets import badge as _badge
 from game.hud_widgets import gauge_bar as _hud_gauge_bar
 from game.keybinds import ACTIONS
 from game.timewarp import drop_cause
+import game.states as _S
 from game.states import (ACCENT, ACCENT_DIM, BG0, DANGER, MUTED, OK_COL,
                          SEMANTIC_COLORS, TEXT_COL, WARN, draw_header_rule,
                          draw_panel)
@@ -62,14 +63,15 @@ EMISSIONS_GAUGE_H = 6       # px gauge bar height (compact own-emissions strip)
 EMISSIONS_GAUGE_GAP = 8     # px between the EMCON caption and the bar
 EMISSIONS_PCT_W = 34        # px reserved for the right-aligned percent readout
 
-PANEL_RGBA = (0.043, 0.078, 0.071, 0.55)     # translucent dark panel fill
-LABEL_COL = (0.60, 0.72, 0.64, 1.0)          # muted green-gray labels
-VALUE_COL = (0.92, 0.97, 0.92, 1.0)          # near-white values
-HEADER_COL = (0.95, 0.85, 0.45, 1.0)         # amber headline
-ARMED_COL = (0.45, 1.00, 0.55, 1.0)          # status green
-RELOAD_COL = (1.00, 0.72, 0.25, 1.0)         # status amber
-TERMINAL_COL = (1.00, 0.55, 0.40, 1.0)       # TERMINAL phase pops red-ish
-DANGER_COL = (1.00, 0.36, 0.24, 1.0)         # destroyed / defeat (states.py DANGER)
+# Wardroom Dusk: the HUD speaks the shared states.py palette (no forked hues).
+PANEL_RGBA = (*_S.BG1, 0.55)                 # translucent dark panel fill
+LABEL_COL = (*MUTED, 1.0)                    # muted sage labels
+VALUE_COL = (*TEXT_COL, 1.0)                 # warm-cream values
+HEADER_COL = (*ACCENT, 1.0)                  # brass headline
+ARMED_COL = (*OK_COL, 1.0)                   # own-force truth green
+RELOAD_COL = (*WARN, 1.0)                    # status amber
+TERMINAL_COL = (*_S.HOSTILE_AGED, 1.0)       # TERMINAL phase pops dusk-red
+DANGER_COL = (*DANGER, 1.0)                  # destroyed / defeat (states.py DANGER)
 
 # COMBAT Phase 3: radar-silence readout + the lose-condition banner.
 # Phase 5b adds the mirrored win banner (spec 2.2: all enemy ships + the
@@ -91,7 +93,8 @@ OVERLAY_DIM = 24            # px, dim-rect margin around the overlay panel
 OVERLAY_FOOTER = "F1 CLOSE   REBIND IN SETTINGS"
 
 # Target bracket: 4 corner L's sized with the locked ship's on-screen extent.
-BRACKET_COL = (1.0, 0.36, 0.24, 0.95)
+# Spec §7: the selected/locked target's bracket is BRASS (selection family).
+BRACKET_COL = (*ACCENT, 0.95)
 BRACKET_SIZE_FACTOR = 0.65  # bracket half-size = ship length * this (in px)
 BRACKET_MIN_PX = 18.0       # px, never collapses below this
 BRACKET_MAX_PX = 220.0      # px, never engulfs the screen
@@ -1397,12 +1400,12 @@ class HUD:
         ty += head_h + 4
         draw_header_rule(self.text, tx, ty, INTEL_W - 2 * INTEL_PAD)
         ty += HEADER_GAP
-        # The estimate-class fields render in the faded contact idiom (a sensor
-        # GUESS reads dimmer than friendly truth — fog-of-war color contract);
+        # The estimate-class fields render in the BELIEF teal idiom (a sensor
+        # GUESS never wears the own-truth green — fog-of-war color LAW);
         # the ID/CLASS labels stay MUTED.
         for label, value in rows:
             self.text.draw_text(tx, ty, label, LABEL_COL)
-            self.text.draw_text(tx + INTEL_VALUE_X, ty, value, ACCENT_DIM)
+            self.text.draw_text(tx + INTEL_VALUE_X, ty, value, _S.BELIEF)
             ty += INTEL_LINE_H
         # Confidence gauge: amber while a live fix, dimmer as it fades.
         ty += 4

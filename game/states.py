@@ -1,10 +1,12 @@
 """GameState base + state machine + the menu/pause/settings screens (Task UI).
 
-Visual language per docs/research/ui_reference.md (normative): near-black
-``BG0`` field, ``BG1`` panels with 1 px ``LINE`` borders and 8 px amber
-corner ticks (the in-game target-bracket motif), ONE amber accent carrying
-the brand, 56 pt space-tracked title, 40 px rows with hover fill + 3 px left
-focus bar + 80 ms press flash, 14 pt footers. The settings screen is the
+Visual language: "WARDROOM DUSK" (normative: Assets of oinks/ui_design/
+handoff/ONIKS-UI-SPEC.md; docs/research/ui_reference.md is the engine-
+constraint substrate it extends).  Petrol/dusk field, warm-cream text,
+ONE brass accent reserved for selection + weapons, plates with hairline
+borders + brass-dim corner brackets, 56 pt space-tracked title, 40 px rows
+with hover fill + 3 px left focus bar + 80 ms press flash, 14 pt footers.
+The fog-of-war COLOR LAW lives in the palette block below. The settings screen is the
 rebind UI: click/ENTER -> PRESS KEY capture, ESC cancels, conflicts offer an
 atomic ENTER-swap, R resets a row, RESET DEFAULTS double-ENTER confirms —
 every successful change is written to disk immediately (game/keybinds.py).
@@ -23,20 +25,48 @@ import pygame
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE, TITLE_SIZE
 from game.keybinds import (ACTIONS, RESERVED_KEYS, key_display, normalize_key)
 
-# --- Visual-language palette (ui_reference.md §1.1) -----------------------------
+# --- Visual-language palette: "WARDROOM DUSK" ------------------------------------
+# Normative: Assets of oinks/ui_design/handoff/ONIKS-UI-SPEC.md (locked 2a).
+# COLOR LAW (never mix families): sensor ESTIMATES/beliefs -> teal; own-force
+# TRUTH -> green; HOSTILE -> dusk-red (age = opacity); brass/gold -> selection
+# + weapons ONLY; cream/muted neutrals carry all other text.
 
-BG0 = (0.024, 0.039, 0.063)         # menu clear color / dim field
-BG1 = (0.043, 0.078, 0.071)         # panel fill
-BG2 = (0.063, 0.114, 0.098)         # row hover/focus fill
-LINE_COL = (0.137, 0.200, 0.180)    # 1px borders, dividers, scroll track
-ACCENT = (0.95, 0.85, 0.45)         # the one amber accent
-ACCENT_DIM = (0.55, 0.494, 0.263)   # amber at rest
-DANGER = (1.0, 0.36, 0.24)          # conflicts / destructive confirm
-OK_COL = (0.45, 1.00, 0.55)         # success states
-WARN = (1.0, 0.72, 0.25)            # transient hints / risky focus
-TEXT_COL = (0.92, 0.97, 0.92)       # primary values/body
-MUTED = (0.60, 0.72, 0.64)          # labels, secondary copy
-DISABLED = (0.29, 0.353, 0.329)     # greyed rows, version footer
+BG0 = (0.039, 0.067, 0.078)         # bg-app  #0A1114  menu/setup field
+BG1 = (0.078, 0.106, 0.094)         # plate   #141B18  panel fill
+BG2 = (0.114, 0.149, 0.125)         # plate-selected #1D2620 row focus fill
+LINE_COL = (0.173, 0.212, 0.188)    # hairline #2C3630 borders, dividers
+ROW_DIVIDER = (0.133, 0.188, 0.169)  # in-plate row separators #22302B
+ACCENT = (0.910, 0.722, 0.294)      # brass   #E8B84B  selection + weapons ONLY
+ACCENT_DIM = (0.541, 0.435, 0.208)  # brass-dim #8A6F35 corner ticks
+DANGER = (0.910, 0.416, 0.290)      # hostile #E86A4A  vampires, threats, C/D
+HOSTILE_AGED = (0.910, 0.529, 0.361)  # aged contact #E8875C (opacity also fades)
+OK_COL = (0.624, 0.851, 0.541)      # ok      #9FD98A  own-force truth, S/A
+WARN = (0.851, 0.643, 0.255)        # warn    #D9A441  reload timers, B grade
+TEXT_COL = (0.937, 0.902, 0.816)    # text    #EFE6D0  warm-cream values
+MUTED = (0.608, 0.659, 0.576)       # muted   #9BA893  labels
+FAINT = (0.431, 0.541, 0.502)       # faint   #6E8A80  captions, PAR annotations
+DISABLED = (0.361, 0.416, 0.376)    # disabled #5C6A60 greyed rows
+BELIEF = (0.494, 0.831, 0.816)      # belief  #7ED4D0  estimates — NEVER truth
+PRESS_FILL = (0.192, 0.251, 0.184)  # press   #31402F  80ms press-state fill
+HINT_COL = (0.541, 0.478, 0.298)    # hint-bar text #8A7A4C
+HINT_BAR_BG = (0.055, 0.067, 0.055)  # hint strip ink #0E110E (draw ~0.88 alpha)
+HINT_HAIRLINE = (0.180, 0.165, 0.110)  # hint strip top hairline #2E2A1C
+BRASS_KEY_BORDER = (0.290, 0.235, 0.133)  # brass key border #4A3C22
+BRASS_KEY_BG = (0.129, 0.106, 0.063)      # brass key fill  #211B10
+PLATE_INK = (0.051, 0.071, 0.063)   # HUD plate ink over 3D #0D1210 (@0.93)
+
+# Grade families (spec §9): S/A green, B amber, C/D dusk-red; D adds the shame
+# treatment (tinted bg + flat inset ring + blink).  (bg, border) per letter.
+GRADE_COLS = {"S": OK_COL, "A": OK_COL, "B": WARN, "C": DANGER, "D": DANGER}
+GRADE_TINTS = {
+    "S": ((0.102, 0.141, 0.094), (0.243, 0.353, 0.235)),   # #1A2418 / #3E5A3C
+    "A": ((0.102, 0.141, 0.094), (0.243, 0.353, 0.235)),
+    "B": ((0.129, 0.106, 0.063), (0.290, 0.235, 0.133)),   # #211B10 / #4A3C22
+    "C": ((0.141, 0.078, 0.071), (0.227, 0.149, 0.125)),   # #241412 / #3A2620
+    "D": ((0.227, 0.102, 0.078), (0.290, 0.149, 0.125)),   # #3A1A14 / #4A2620
+}
+GRADE_VERDICTS = {"S": "FLAWLESS", "A": "CLEAN", "B": "ADEQUATE",
+                  "C": "BELOW PAR", "D": "REVIEW ORDERED"}
 
 # --- Layout grid (§1.5) + interaction constants (§1.4) --------------------------
 
@@ -45,9 +75,10 @@ ROW_H = 40                          # interactive row pitch
 GROUP_H = 24                        # settings group sub-header height
 PAD = 16                            # panel inner padding
 FOCUS_BAR_W = 3                     # selected-row left bar
-TICK_LEG = 8.0                      # corner tick leg length (px)
-TICK_W = 1.5                        # corner tick stroke
-RULE_CAP = 24.0                     # amber cap length on header rules
+TICK_LEG = 16.0                     # corner tick leg length (px, spec §5)
+TICK_W = 2.0                        # corner tick stroke
+RULE_CAP = 28.0                     # brass cap length on header rules (§5)
+RULE_CAP_W = 3.0                    # brass cap stroke
 PANEL_ALPHA = 0.92                  # menu panel fill alpha
 PRESS_FLASH_S = 0.08                # press-flash duration before firing
 PRESS_FLASH_A = 0.22                # press-flash fill alpha
@@ -57,8 +88,8 @@ PAUSE_DIM_A = 0.65                  # pause dim over the frozen frame
 WHEEL_ROWS = 3                      # settings rows per wheel notch
 BTN_H = 32                          # settings button box height
 
-GAME_VERSION = "v0.4.0"
-BUILD_DATE = "2026-06-11"
+GAME_VERSION = "v0.5.0"
+BUILD_DATE = "2026-07-03"
 
 TITLE_TEXT = "O N I K S"            # space-tracked (monospace atlas, §1.3)
 SUBTITLE_TEXT = "ANTI-SHIP MISSILE SIMULATION"
@@ -95,26 +126,84 @@ def _fmt_clock(t: float) -> str:
 # --- Shared panel chrome (§1.2): fill + 1px border + amber corner ticks ---------
 
 def draw_panel(text, x, y, w, h, alpha=PANEL_ALPHA, tick_col=ACCENT_DIM,
-               strip=False) -> None:
-    """BG1 fill, 1px LINE border, 4 corner-tick L's; optional 2px powered-on
-    ACCENT strip (0.12 alpha) along the top inner edge of the active panel."""
+               strip=False, ticks=True) -> None:
+    """Wardroom PLATE (spec §5): BG1 fill, 1px hairline border, a 1px
+    top inset highlight (rgba 255,255,255,.05 — the powered-surface cue),
+    and the corner-tick brackets (16px legs, 2px, brass-dim) at top-left +
+    bottom-right.  ``strip`` adds the 2px brass powered-on strip (0.12
+    alpha) along the top inner edge of the ACTIVE panel; ``ticks=False``
+    drops the brackets for quiet in-grid plates (hero plates keep them)."""
     x, y, w, h = round(x), round(y), round(w), round(h)
     text.draw_rect(x, y, w, h, (*BG1, alpha))
     text.draw_lines([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
                     (*LINE_COL, 1.0), 1.0)
-    for sx, cx in ((1.0, x), (-1.0, x + w)):
-        for sy, cy in ((1.0, y), (-1.0, y + h)):
-            text.draw_lines(
-                [(cx + sx * TICK_LEG, cy), (cx, cy), (cx, cy + sy * TICK_LEG)],
-                (*tick_col, 1.0), TICK_W)
+    text.draw_rect(x + 1, y + 1, w - 2, 1, (1.0, 1.0, 1.0, 0.05))
+    if ticks:
+        # Spec §5: L-brackets on the top-left + bottom-right corners only.
+        text.draw_lines([(x + TICK_LEG, y), (x, y), (x, y + TICK_LEG)],
+                        (*tick_col, 1.0), TICK_W)
+        text.draw_lines([(x + w - TICK_LEG, y + h), (x + w, y + h),
+                         (x + w, y + h - TICK_LEG)], (*tick_col, 1.0), TICK_W)
     if strip:
-        text.draw_rect(x + 1, y + 1, w - 2, 2, (*ACCENT, 0.12))
+        text.draw_rect(x + 1, y + 2, w - 2, 2, (*ACCENT, 0.12))
 
 
 def draw_header_rule(text, x, y, w) -> None:
-    """1px LINE divider with a 24px ACCENT segment at the left end (§1.2)."""
+    """RULE WITH CAP (§5): 1px hairline; 28x3px brass cap flush left."""
     text.draw_lines([(x, y), (x + w, y)], (*LINE_COL, 1.0), 1.0)
-    text.draw_lines([(x, y), (x + RULE_CAP, y)], (*ACCENT, 1.0), 2.0)
+    text.draw_lines([(x, y), (x + RULE_CAP, y)], (*ACCENT, 1.0), RULE_CAP_W)
+
+
+def draw_plate_header(text, x, y, w, label, chip_col, *, active=False) -> float:
+    """PLATE HEADER (§5): 8x8 family-color chip + 14pt muted label, then a
+    hairline rule across the plate's inner width.  ``active`` renders the
+    label in brass (the selected-platform variant, widget sheet 08).
+    Returns the content y just below the rule."""
+    lh = text.line_height(SMALL_SIZE)
+    text.draw_rect(round(x), round(y + (lh - 8) / 2), 8, 8, (*chip_col, 1.0))
+    text.draw_text(x + 16, y, label, (ACCENT if active else MUTED), SMALL_SIZE)
+    ry = round(y + lh + 6)
+    text.draw_lines([(x, ry), (x + w, ry)], (*LINE_COL, 1.0), 1.0)
+    return float(ry + 1)
+
+
+def draw_brass_key(text, x, y, w, h, label, *, focused=False, pressed=False,
+                   size=SMALL_SIZE) -> None:
+    """BRASS KEY (§5/§6): bordered #4A3C22 plate, #211B10 fill, brass CAPS
+    label centered.  FOCUS adds the flat 2px translucent brass ring; PRESS
+    inverts (brass fill, dark text) for the 80ms flash."""
+    x, y, w, h = round(x), round(y), round(w), round(h)
+    if pressed:
+        text.draw_rect(x, y, w, h, (*ACCENT, 1.0))
+        lab_col = BG0
+    else:
+        text.draw_rect(x, y, w, h, (*BRASS_KEY_BG, 1.0))
+        lab_col = ACCENT
+    text.draw_lines([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
+                    (*BRASS_KEY_BORDER, 1.0), 1.0)
+    if focused and not pressed:
+        # Flat ring: a 2px brass outline inset 2px (no blur — stacked rects).
+        text.draw_lines([(x + 2, y + 2), (x + w - 2, y + 2),
+                         (x + w - 2, y + h - 2), (x + 2, y + h - 2),
+                         (x + 2, y + 2)], (*ACCENT, 0.55), 2.0)
+    lh = text.line_height(size)
+    tw = text.text_width(label, size)
+    text.draw_text(round(x + (w - tw) / 2), round(y + (h - lh) / 2), label,
+                   lab_col, size)
+
+
+def draw_hint_bar(text, w, h, hint) -> float:
+    """HINT BAR (§5): full-width bottom strip — translucent ink band, 1px
+    warm hairline on top, dot-separated 14pt hint text centered.  Returns
+    the strip's top edge y (callers keep content above it)."""
+    lh = text.line_height(SMALL_SIZE)
+    bar_h = lh + 14
+    y = h - bar_h
+    text.draw_rect(0, y, w, bar_h, (*HINT_BAR_BG, 0.88))
+    text.draw_lines([(0, y), (w, y)], (*HINT_HAIRLINE, 1.0), 1.0)
+    tw = text.text_width(hint, SMALL_SIZE)
+    text.draw_text(round((w - tw) / 2), y + 7, hint, HINT_COL, SMALL_SIZE)
+    return float(y)
 
 
 # --- Widget primitive library (spec 08): the shared UI vocabulary ---------------
@@ -141,7 +230,7 @@ SEMANTIC_COLORS = {
     "INBOUND": DANGER,       # threat / killed / final -> red
     "DESTROYED": DANGER,
     "TERMINAL": DANGER,
-    "ESTIMATE": ACCENT_DIM,  # sensor guess: dimmer than friendly truth
+    "ESTIMATE": BELIEF,      # sensor guess: teal belief family, never truth
     "LABEL": MUTED,          # field labels / secondary copy -> muted
     "ACCENT": ACCENT,        # the one brand accent
     "DISABLED": DISABLED,    # greyed / unavailable
@@ -546,7 +635,7 @@ class _ListScreen(GameState):
                 text.draw_rect(x, y, w, ROW_H, (*BG2, 1.0))
                 text.draw_rect(x, y, FOCUS_BAR_W, ROW_H, (*col, 1.0))
             if self._pending == name:
-                text.draw_rect(x, y, w, ROW_H, (*ACCENT, PRESS_FLASH_A))
+                text.draw_rect(x, y, w, ROW_H, (*PRESS_FILL, 1.0))
             label = text_for(name) if text_for is not None else name
             text.draw_text(x + PAD, y + (ROW_H - lh) // 2, label, col)
             self._rects.append((x, y, x + w, y + ROW_H))
@@ -950,7 +1039,7 @@ class SettingsState(GameState):
             text.draw_rect(x, y, COL_W, ROW_H, (*BG2, 1.0))
             text.draw_rect(x, y, FOCUS_BAR_W, ROW_H, (*ACCENT, 1.0))
         if self._flash is not None and self._flash[0] == a.id:
-            text.draw_rect(x, y, COL_W, ROW_H, (*ACCENT, PRESS_FLASH_A))
+            text.draw_rect(x, y, COL_W, ROW_H, (*PRESS_FILL, 1.0))
         ty = y + (ROW_H - body_lh) // 2
         text.draw_text(x + PAD, ty, a.label, label_col)
         if self.listening == a.id:
@@ -981,7 +1070,7 @@ class SettingsState(GameState):
         if focused:
             text.draw_rect(x, y, w, BTN_H, (*BG2, 1.0))
         if self._flash is not None and self._flash[0] == target:
-            text.draw_rect(x, y, w, BTN_H, (*ACCENT, PRESS_FLASH_A))
+            text.draw_rect(x, y, w, BTN_H, (*PRESS_FILL, 1.0))
         text.draw_lines([(x, y), (x + w, y), (x + w, y + BTN_H),
                          (x, y + BTN_H), (x, y)], (*col, 1.0), 1.0)
         lh = text.line_height(BODY_SIZE)
