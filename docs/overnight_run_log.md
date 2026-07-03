@@ -318,3 +318,13 @@ The user played; every report was a real engine bug (3/3):
   buoys/ASW (9087bf4).
 Note: two long audit agents were killed by the user's ESC ~2 h in; a scoped
 sim-logic reviewer was relaunched at session end.
+
+**Scoped adversarial logic review (Opus, post-ESC relaunch): CLEAN.** Damage
+sweep double-hit/dead-entity/self-hit guards correct; is_hostile + isinstance
+two-sweep gating internally consistent (ASBM correctly hits ships, never enemy
+structures); all kill rolls on seeded streams, no wall-clock/set-iteration
+hazards; CIWS/Pantsir Pk math clamped+guarded. ONE known nit (deliberately
+NOT fixed — it would shift the byte-identical baseline for a 0.8% cosmetic
+step): sim/physics.py speed-of-sound has a 2.3 m/s discontinuity at the 11 km
+tropopause boundary (hardcoded 295.1 vs computed 297.4). Fix alongside the
+next argued physics change: set the stratosphere constant to 297.4.
