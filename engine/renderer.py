@@ -61,8 +61,16 @@ out vec4 frag;
 void main(){
     gl_FragDepth = log2(max(v_flogz, 1e-6)) * (u_log_depth_fcoef * 0.5);
     vec3 n = normalize(v_nrm);
-    float ndl = max(dot(n, u_sun_dir), 0.0);
-    vec3 hemi = mix(vec3(0.18,0.16,0.14), vec3(0.35,0.42,0.52), n.y*0.5+0.5);
+    // WRAP diffuse: soften the terminator so back-lit geometry keeps its
+    // FORM instead of collapsing to an albedo*hemi cutout (model_360
+    // critique 2026-07-03: every model read as a black silhouette against
+    // the bright sky whenever the sun was behind it).  raw=1 is unchanged,
+    // raw=0 gets ~8% sun, raw<=-0.4 stays dark — front-lit scenes render
+    // near-identically; only the shadow side gains legibility.
+    float raw = dot(n, u_sun_dir);
+    float ndl = clamp((raw + 0.4) / 1.4, 0.0, 1.0);
+    ndl *= ndl;                    // quadratic: keeps terminator contrast
+    vec3 hemi = mix(vec3(0.24,0.22,0.19), vec3(0.35,0.42,0.52), n.y*0.5+0.5);
     vec3 v = normalize(-v_view_vec);
     vec3 hv = normalize(v + u_sun_dir);
     float spec = pow(max(dot(n, hv), 0.0), 48.0) * 0.25;
