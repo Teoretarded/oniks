@@ -80,7 +80,8 @@ DEFEAT_PAD_X = 28           # px panel padding around the banner text
 DEFEAT_PAD_Y = 18
 
 F1_LABEL = "F1 CONTROLS"    # the HUD's entire permanent hint footprint
-OVERLAY_W = 460             # px, F1 overlay panel width
+OVERLAY_W = 1040            # px, F1 overlay panel width (mock 10: two-column)
+OVERLAY_COL_GAP = 40        # px, gap between the two binding columns
 OVERLAY_ROW_H = 24          # px, overlay binding-row pitch
 OVERLAY_DIM = 24            # px, dim-rect margin around the overlay panel
 OVERLAY_FOOTER = "F1 CLOSE   REBIND IN SETTINGS"
@@ -1567,14 +1568,21 @@ class HUD:
                          small_h + 10)
 
     def _controls_overlay(self, sandbox, w: int, h: int) -> None:
-        """F1: centered corner-ticked panel listing every binding straight
-        from the live table (sim keeps running — overlay, not menu)."""
+        """F1 (mock 10): centered corner-ticked panel listing every binding
+        straight from the live table, in TWO columns split at a group
+        boundary — the one-column list outgrew 1080p as milestones added
+        bindings.  Sim keeps running (overlay, not menu)."""
         text = self.text
         rows = overlay_rows(sandbox.app.keybinds)
         head_h = text.line_height(HEADER_SIZE)
         small_h = text.line_height(SMALL_SIZE)
         body_h = text.line_height(BODY_SIZE)
-        content_h = len(rows) * OVERLAY_ROW_H
+        # Split ONLY at a group header, minimizing column imbalance.
+        header_idx = [i for i, r in enumerate(rows) if r[0] == "header"]
+        split = min(header_idx[1:] or [len(rows)],
+                    key=lambda i: abs(i - len(rows) / 2))
+        cols = (rows[:split], rows[split:])
+        content_h = max(len(c) for c in cols) * OVERLAY_ROW_H
         panel_h = (PANEL_PAD * 2 + head_h + 4 + HEADER_GAP + content_h
                    + 8 + small_h)
         x = (w - OVERLAY_W) // 2
@@ -1586,23 +1594,31 @@ class HUD:
         tx = x + PANEL_PAD
         ty = y + PANEL_PAD
         text.draw_text(tx, ty, "CONTROLS", HEADER_COL, HEADER_SIZE)
+        close_w = text.text_width("F1 CLOSE", SMALL_SIZE)
+        text.draw_text(x + OVERLAY_W - PANEL_PAD - close_w,
+                       ty + (head_h - small_h), "F1 CLOSE", _S.FAINT,
+                       SMALL_SIZE)
         ty += head_h + 4
         draw_header_rule(text, tx, ty, OVERLAY_W - 2 * PANEL_PAD)
-        ty += HEADER_GAP
-        for row in rows:
-            if row[0] == "header":
-                text.draw_text(tx, ty + (OVERLAY_ROW_H - small_h) // 2,
-                               row[1], ACCENT_DIM, SMALL_SIZE)
-            else:
-                _, label, key = row
-                oy = ty + (OVERLAY_ROW_H - body_h) // 2
-                text.draw_text(tx, oy, label, MUTED)
-                kw = text.text_width(key)
-                text.draw_text(x + OVERLAY_W - PANEL_PAD - kw, oy, key,
-                               TEXT_COL)
-            ty += OVERLAY_ROW_H
+        top = ty + HEADER_GAP
+        col_w = (OVERLAY_W - 2 * PANEL_PAD - OVERLAY_COL_GAP) // 2
+        for ci, col in enumerate(cols):
+            cx = tx + ci * (col_w + OVERLAY_COL_GAP)
+            cy = top
+            for row in col:
+                if row[0] == "header":
+                    text.draw_text(cx, cy + (OVERLAY_ROW_H - small_h) // 2,
+                                   row[1], ACCENT_DIM, SMALL_SIZE)
+                else:
+                    _, label, key = row
+                    oy = cy + (OVERLAY_ROW_H - body_h) // 2
+                    text.draw_text(cx, oy, label, MUTED)
+                    kw = text.text_width(key)
+                    text.draw_text(cx + col_w - kw, oy, key, TEXT_COL)
+                cy += OVERLAY_ROW_H
+        fy = top + content_h
         fw = text.text_width(OVERLAY_FOOTER, SMALL_SIZE)
-        text.draw_text(x + (OVERLAY_W - fw) // 2, ty + 8, OVERLAY_FOOTER,
+        text.draw_text(x + (OVERLAY_W - fw) // 2, fy + 8, OVERLAY_FOOTER,
                        ACCENT_DIM, SMALL_SIZE)
 
     # -------------------------------------------------------- target bracket
