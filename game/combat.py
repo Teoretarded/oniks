@@ -414,10 +414,22 @@ class CombatState(SandboxState):
         model's forward (+Z) already faces the +z threat-ingress bearing,
         so it draws with identity rotation.  Destroyed units stay rendered
         as a hulk (base structures do the same — destruction visuals are
-        Phase-7 polish), but their radar has already gone dark in the sim."""
+        Phase-7 polish), but their radar has already gone dark in the sim.
+
+        M5/M4 stand-ins: the Buk TELAR draws the erected S-300 TEL mesh and
+        a swarm pod the horizontal Bastion TEL truck at their sim positions —
+        an armed battery the camera anchors on must never be INVISIBLE
+        (dedicated meshes are the deferred model pass).  Both lists are
+        empty at defaults (byte-identical n_buk=0 / no pods)."""
         super()._draw_tel()
         for unit in getattr(self.world, "pantsirs", ()):
             self.renderer.draw_mesh(self._mesh_pantsir, unit.pos)
+        # Live world positions (NOT the init copy): a shoot-and-scoot Buk
+        # must render where it actually is.
+        for pos in getattr(self.world, "_buk_launcher_positions", ()):
+            self.renderer.draw_mesh(self._mesh_s300_tel, pos)
+        for pos in getattr(self.world, "_swarm_pod_positions", ()):
+            self.renderer.draw_mesh(self._tel_meshes[0], pos)
 
     def _draw_aircraft(self) -> None:
         """The sandbox aircraft pass (none spawn in COMBAT), plus the

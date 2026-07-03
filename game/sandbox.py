@@ -93,6 +93,27 @@ DEDICATED_MISSILE_IDS = frozenset(
     ("tomahawk", "jassm", "harm", "kh31p", "s300", "40n6", "sm2",
      "pantsir_57e6", "zircon", "sm6")
 )
+# Rounds WITHOUT a dedicated mesh render the closest existing silhouette
+# instead of defaulting to the (ramjet-intake, 3-ton) Oniks body: the
+# sub-launched Kalibr is a Tomahawk-class subsonic cruise round; the Buk
+# 9M317 is an S-300-family SAM rod, the slim agile 9M338 reads like the
+# 57E6 stick; the Bastion-K ASBM is the big ballistic 40N6 rod; a 55 kg
+# swarm loiterer is closest to the small AIM-9X airframe.  Each gets a
+# real mesh in the deferred model pass; these keep the SCALE honest.
+MISSILE_MESH_ALIAS = {
+    "kalibr":     "tomahawk",
+    "buk_9m317":  "s300",
+    "buk_9m338":  "pantsir_57e6",
+    "asbm":       "40n6",
+    "swarm":      "aim9x",
+}
+# Hulls without a dedicated mesh render the closest existing silhouette
+# (same rationale as MISSILE_MESH_ALIAS; the destroyer fallback stays for
+# genuinely unknown types).
+SHIP_MESH_ALIAS = {
+    "transport": "cargo",
+    "lcac":      "warship",
+}
 
 
 def _missile_mesh_key(m) -> str:
@@ -101,6 +122,8 @@ def _missile_mesh_key(m) -> str:
     weapon_id = getattr(weapon, "weapon_id", None)
     if weapon_id in DEDICATED_MISSILE_IDS:
         return weapon_id
+    if weapon_id in MISSILE_MESH_ALIAS:
+        return MISSILE_MESH_ALIAS[weapon_id]
     if isinstance(m, IrMissile):
         return "aim9x"
     return "oniks"
@@ -1466,14 +1489,16 @@ class SandboxState(GameState):
                 continue
             rot = rot_y(ship.heading) @ rot_z(ship.list_angle)
             # M5 #1: a Transport / LCAC has no dedicated mesh yet (DEFERRED) —
-            # fall back to the existing destroyer hull so an amphibious force
-            # renders without a dedicated model.  Existing ship_types are in the
-            # dict, so the fallback only ever fires for transport/lcac (and never
-            # at n_transports=0, where neither exists).
+            # render on the closest existing hull: a TRANSPORT is a boxy
+            # merchant (cargo mesh), an LCAC a small craft (warship mesh) —
+            # a landing force must never read as a destroyer squadron.  Any
+            # other unknown type still falls back to the destroyer hull.
             mesh = self._ship_meshes.get(ship.ship_type)
             if mesh is None:
-                mesh = self._ship_meshes.get("destroyer") \
-                    or next(iter(self._ship_meshes.values()), None)
+                alias = SHIP_MESH_ALIAS.get(ship.ship_type)
+                mesh = (self._ship_meshes.get(alias)
+                        or self._ship_meshes.get("destroyer")
+                        or next(iter(self._ship_meshes.values()), None))
                 if mesh is None:
                     continue
             self.renderer.draw_mesh(mesh, ship.pos, rot)

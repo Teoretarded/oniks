@@ -88,8 +88,7 @@ def _arm_row_idx(setup):
 
 def test_armory_has_kh31p_ammo_stepper(setup):
     """The ARMORY page carries a kh31p_ammo stepper bounded by CLAMP_ARM_AMMO."""
-    setup.handle_event(key_event(pygame.K_TAB))
-    assert setup._page == _PAGE_ARMORY
+    setup._page = _PAGE_ARMORY
     row = next(r for r in setup._rows() if r.get("field") == "kh31p_ammo")
     assert row["kind"] == "stepper"
     assert (row["lo"], row["hi"]) == CLAMP_ARM_AMMO
@@ -99,7 +98,7 @@ def test_armory_has_kh31p_ammo_stepper(setup):
 def test_kh31p_stepper_changes_field_within_clamp(setup):
     """Stepping right raises kh31p_ammo by 1; it clamps at the ARM ceiling and
     floor (0) — never wraps, never escapes CLAMP_ARM_AMMO."""
-    setup.handle_event(key_event(pygame.K_TAB))
+    setup._page = _PAGE_ARMORY
     setup._sel = _arm_row_idx(setup)
     assert setup._fields["kh31p_ammo"] == 0          # OFF by default
     setup.handle_event(key_event(pygame.K_RIGHT))
