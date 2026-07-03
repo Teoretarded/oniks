@@ -76,7 +76,10 @@ def _lex_strake(b: MeshBuilder) -> None:
     # make_fin args: (root_chord, tip_chord, span, sweep, thickness, color)
     # span extends in +X; chords along -Z (aft).
     # We place the root leading edge at z = +4.5, x = 0.55 (just off the centreline).
-    lex = make_fin(4.0, 1.5, 2.2, 2.0, 0.12, _GREY)
+    # READABILITY: plate thicknesses are ~1.7x scale — a 0.12 m plate is
+    # invisible edge-on at gameplay distance (the whole planform vanished
+    # at level camera elevations; orbit critique 2026-07-03).
+    lex = make_fin(4.0, 1.5, 2.2, 2.0, 0.22, _GREY)
     # Starboard (+X side)
     b.add_mesh(lex, offset=(0.55, -0.30, 0.50))
     # Port (-X side): mirror in X using rot_z(π)
@@ -89,7 +92,7 @@ def _main_wings(b: MeshBuilder) -> None:
     Root chord 4.5 m, tip chord 1.6 m, semi-span 6.0 m, sweep 2.5 m.
     Wing root leading edge at z ≈ +1.5 m, y ≈ −0.25 m.
     """
-    wing = make_fin(4.5, 1.6, 6.0, 2.5, 0.20, _GREY)
+    wing = make_fin(4.5, 1.6, 6.0, 2.5, 0.34, _GREY)
     # Starboard
     b.add_mesh(wing, offset=(0.85, -0.25, 1.5))
     # Port
@@ -118,7 +121,7 @@ def _twin_tails(b: MeshBuilder) -> None:
     rot_cant_stbd = rot_x(cant_rad)        # tips lean toward +X (outboard stbd)
     rot_cant_port = rot_x(-cant_rad)       # tips lean toward -X (outboard port)
 
-    tail_fin = make_fin(3.2, 1.0, 3.0, 2.0, 0.18, _GREY)
+    tail_fin = make_fin(3.2, 1.0, 3.0, 2.0, 0.30, _GREY)
 
     # Starboard: x = +1.0, at the tail end
     b.add_mesh(tail_fin,
@@ -135,7 +138,7 @@ def _horizontal_stabs(b: MeshBuilder) -> None:
 
     Root chord 2.8 m, tip chord 0.9 m, span 3.2 m, sweep 1.8 m.
     """
-    stab = make_fin(2.8, 0.9, 3.2, 1.8, 0.15, _GREY)
+    stab = make_fin(2.8, 0.9, 3.2, 1.8, 0.26, _GREY)
     b.add_mesh(stab, offset=(0.85, -0.55, -5.0))
     b.add_mesh(stab, rotation=_ROT_MIRROR, offset=(-0.85, -0.55, -5.0))
 
@@ -157,8 +160,8 @@ def _engine_nacelles(b: MeshBuilder) -> None:
 
 def _cockpit(b: MeshBuilder) -> None:
     """Raised canopy hump at the fuselage spine just ahead of the wing root."""
-    b.add_mesh(make_box((0.90, 0.50, 1.80), _DARK,
-                        offset=(0.0, 0.90, 3.80)))
+    b.add_mesh(make_box((1.05, 0.62, 2.30), _DARK,
+                        offset=(0.0, 0.95, 3.90)))
 
 
 def build_fighter() -> MeshData:

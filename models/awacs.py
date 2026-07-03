@@ -135,7 +135,8 @@ def _rotodome(b: MeshBuilder) -> None:
 
     Centre of the disc is ~2.8 m above the fuselage centreline, at z ≈ −4.0 m.
     """
-    dome_cy = 2.80    # dome centre y above fuselage centreline
+    dome_cy = 3.40    # dome centre y — raised for clear DAYLIGHT under
+    #                 the saucer (flush-ish mounting read as a spine hump)
     dome_cz = -4.00   # dome centre z (aft of centre)
 
     # Disc body: a wide, flat cylinder (axis = y so it lies horizontal)
@@ -143,9 +144,11 @@ def _rotodome(b: MeshBuilder) -> None:
                              axis="y",
                              offset=(0.0, dome_cy + 1.90, dome_cz)))
 
-    # Grey band around the disc edge (the rotating antenna housing)
-    b.add_mesh(make_cylinder(_DOME_RADIUS + 0.08, _DOME_THICK * 0.6, 12, _GREY,
-                             axis="y",
+    # THIN dark band around the disc edge (the antenna window) — the old
+    # fuselage-grey band covered 60% of the disc face and made the WHITE
+    # saucer read as a grey drum.
+    b.add_mesh(make_cylinder(_DOME_RADIUS + 0.10, _DOME_THICK * 0.32, 12,
+                             PALETTE["radome"], axis="y",
                              offset=(0.0, dome_cy + 1.90, dome_cz)))
 
     # Two vertical struts from fuselage top (~y = 1.9 m) to disc bottom
@@ -155,7 +158,7 @@ def _rotodome(b: MeshBuilder) -> None:
     strut_h = strut_top_y - strut_base_y
 
     for sz in (-2.5, 2.5):
-        b.add_mesh(make_box((0.30, strut_h, 0.30), _GREY,
+        b.add_mesh(make_box((0.50, strut_h, 0.55), _GREY,
                             offset=(0.0,
                                     strut_base_y + strut_h * 0.5,
                                     dome_cz + sz)))

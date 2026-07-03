@@ -30,7 +30,10 @@ POS = np.array([0.0, 3000.0, 80_000.0], dtype=np.float64)   # clean sky bg
 TILE_W, TILE_H = 640, 360
 COLS, ROWS = 4, 2
 AZIMUTHS = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
-ELEVATION = -10.0
+ELEVATION = float(os.environ.get("ORBIT_EL", "-10.0"))
+# NOTE: judge AIRCRAFT at ORBIT_EL=-35 or steeper — at near-level elevation
+# the thin wing/LEX plates sit edge-on and vanish, and the critique reads a
+# fully-winged airframe as a finless dart (measured mistake 2026-07-03).
 
 
 def _builders():
