@@ -396,3 +396,56 @@ NOT fixed — it would shift the byte-identical baseline for a 0.8% cosmetic
 step): sim/physics.py speed-of-sound has a 2.3 m/s discontinuity at the 11 km
 tropopause boundary (hardcoded 295.1 vs computed 297.4). Fix alongside the
 next argued physics change: set the stratosphere constant to 297.4.
+
+## SESSION 2026-07-03 (overnight) — FORENSICS build: death-cause channel + the SHOT DEBRIEF ledger
+
+Implemented the approved `ledger2_final_debrief` mock as the in-game
+FORENSICS screen, in the handoff's two work items:
+
+**1. Death-cause channel (`f65d1f9`)** — every recorded round now closes with
+WHY it died. Kill sites stamp `m.death_cause=(code, detail)` +
+`m.killed_by=<killer>` on the dead round — WRITE-ONLY, no sim code reads
+them, digest verified byte-identical: sam.py fuse (sam/<weapon_id>), a2a.py
+fuse, enemy_defense.py CIWS (ciws/<ship_type>), pantsir.py 30mm, damage.py
+hull hit (hit/<ship_type>), strike.py ARM radar kill (self-stamp).
+FlightRecorder classifies at close-out from the round's own attributes
+(stamps, killed_target/acquired, fuel<=0+impact -> FUEL, impact, else LOST)
+and records the FOG FLAG: observed=True ONLY if the killer was a track in
+world.contacts.tracks at kill time; self causes = own telemetry, always
+observed. Also: target_xz stamped at pickup (planned-remainder anchor) and
+(t, phase_label) events. 18 new tests (tests/test_death_cause.py), TDD.
+NOTE: 'decoy seduction' from the handoff cause list does NOT exist as a sim
+mechanism against player rounds (sim/decoys.py is player-side bait for the
+enemy) — no cause invented for it, per the fog law.
+
+**2. The screen (`game/forensics.py`)** — paper ledger over the dark desk,
+drawn INSTEAD of the HUD/map in CombatState.render; sim_step untouched (THE
+SIM NEVER PAUSES; live T+ chip + fog-honest INBOUND count prove it).
+Counter row + clickable stubs + the 1:1 ACCURACY-CONTRACT plots: side view
+altitude x cumulative hypot(dx,dz), top-down uniform scale — both
+draw_lines polylines DIRECTLY from path_of() samples, square ticks every
+8th sample, exact death anchor (red circled X), dashed planned remainder to
+the recorded aim point + AIM POINT NOT REACHED diamond, event pins from the
+recorder's own phase labels (frame-clamped). FOG GATE verified in
+screenshots: mid-battle unobserved kill = 'LOST? / LOST - UNCONFIRMED';
+post-battle the SAME sheet retypes 'SM-6 X?' + 'KILLED BY SM-6 -
+RECONSTRUCTED (NOT OBSERVED)'. BLACK BOX / SENSORS tabs + sensor-lane strip
+= AWAITING DESIGN placeholders (not approved, not designed here).
+ENTRIES: J (new ActionDef, F1 auto-lists), map side-rail DEBRIEF [J] button
+(left edge, outside canvas, click OR key), AAR DEBRIEF row (debrief_cb;
+legacy AAR constructions unchanged). New PAPER_*/INK_* tokens in states.py
+from the mock hexes; existing tokens untouched. SANDBOX J = no-op hint.
+Deviations under engine constraints (flat desk, 28pt digits, straight
+stamp, sim's own phase-label pin wording) noted in the commit.
+Honest re-key: two tests used K_j as a FREE-key example; probes moved to
+K_l (no assertion weakened).
+
+**Gates:** digest `7d5716..` byte-identical after BOTH commits; smoke 84
+PASS / 0 FAIL; full `pytest -q -n auto` green x2 except the two known
+pre-existing reds (pantsir width, phase5b order-flake); shoot_ui_reference
+extended (16/17/18/21 + salvo-resolve staging) and the PNGs visually
+compared against renders/ledger2_final_debrief.png.
+
+**Backlog surfaced:** stub row caps at 14 + '+N MORE' (no scroll yet);
+sensor-lane/BLACK BOX/SENSORS panes await design; top-down has no coast
+outline (terrain-derived overlay would be honest — render pass needed).
