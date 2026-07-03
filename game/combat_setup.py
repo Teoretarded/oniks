@@ -36,10 +36,10 @@ import pygame
 
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.states import (
-    ACCENT, ACCENT_DIM, BG0, BG2, DISABLED, FOCUS_BAR_W, FOOTER_MARGIN,
-    LINE_COL, MUTED, PAD, PRESS_FLASH_A, PRESS_FLASH_S, ROW_H,
-    TEXT_COL, GameState, draw_header_rule, draw_panel,
-    move_selection, tab_strip,
+    ACCENT, BELIEF, BG0, BG2, DANGER, DISABLED, FAINT, FOCUS_BAR_W,
+    LINE_COL, MUTED, OK_COL, PAD, PRESS_FLASH_S, ROW_DIVIDER, ROW_H,
+    TEXT_COL, GameState, draw_brass_key, draw_hint_bar, draw_panel,
+    draw_plate_header, move_selection,
 )
 from world.combat_config import (
     CombatConfig,
@@ -53,11 +53,17 @@ from world.combat_config import (
     CLAMP_TRANSPORTS, MAP_PRESET_NAMES, clamp_config,
 )
 
-# --- Layout -------------------------------------------------------------------
+# --- Layout (Wardroom Dusk, mock 03: 2-column grouped plates) -------------------
 
-SETUP_PANEL_W = 680    # wider than menu COL_W; fits label + value + chevrons
+SETUP_CONTENT_W = 1160   # centered content column (tab rail + plate grid)
+GRID_GAP = 20            # px between plate columns / stacked plates
+START_KEY_W = 420        # centered brass START key
+START_KEY_H = 46
+TAB_RAIL_BG = (0.063, 0.090, 0.102)      # #10171A rail field behind the tabs
+CHIP_DECEPTION = (0.788, 0.651, 0.910)   # #C9A6E8 (mock 03 group-identity chip)
 SETUP_FOOTER = ("UP/DN SELECT   LT/RT ADJUST   TAB PAGE   "
                 "ENTER START   R RANDOMIZE SEED   ESC BACK")
+START_KEY_LABEL = "ENTER > START BATTLE"
 
 # Deterministic LCG for seed randomisation (Numerical Recipes constants).
 # No host RNG, no wall-clock: same sequence from the same starting counter.
@@ -108,12 +114,13 @@ _WORLD_ROWS = [
     {"kind": "stepper", "label": "DRONE EW POD",  "field": "player_jammer",
      "step": 1, "lo": CLAMP_PLAYER_JAMMER[0], "hi": CLAMP_PLAYER_JAMMER[1],
      "names": ("NONE", "FITTED")},
-    {"kind": "stepper", "label": "PANTSIR TELs",  "field": "n_pantsir",
-     "step": 1, "lo": CLAMP_PANTSIR[0],       "hi": CLAMP_PANTSIR[1]},
+    # LAUNCHERS plate order per mock 03: strike first, then the SAM ladder.
     {"kind": "stepper", "label": "ONIKS TELs",    "field": "n_oniks",
      "step": 1, "lo": CLAMP_ONIKS[0],         "hi": CLAMP_ONIKS[1]},
     {"kind": "stepper", "label": "S-300 TELs",    "field": "n_s300",
      "step": 1, "lo": CLAMP_S300[0],          "hi": CLAMP_S300[1]},
+    {"kind": "stepper", "label": "PANTSIR TELs",  "field": "n_pantsir",
+     "step": 1, "lo": CLAMP_PANTSIR[0],       "hi": CLAMP_PANTSIR[1]},
     # M5 Buk mid-SAM: floor 0 (CLAMP_BUK) so leaving it at 0 keeps the Buk OFF
     # and the default battle byte-identical; a non-zero count builds the
     # gap-filler battery + its 9S36 radar and unlocks the buk TAB platform.
@@ -241,6 +248,29 @@ _DEFENSE_ROWS = [
 ]
 
 _PAGES = (_WORLD_ROWS, _ENEMY_ROWS, _ARMORY_ROWS, _DEFENSE_ROWS)
+
+# Grouped plates (Wardroom Dusk, mock 03): per page, (title, chip color,
+# row count) — consecutive slices of the page's row list, START excluded.
+# Chip families follow the mock + color law: brass = the session plate,
+# teal = sensors/belief hardware, green = own-force trucks, dusk-red = the
+# threat axis (every ENEMY group), lavender = the deception identity chip.
+# Groups fill the 2-column grid in order (left, right, left, ...).
+_PAGE_GROUPS = (
+    (("WORLD", ACCENT, 2), ("RECON", BELIEF, 3),
+     ("LAUNCHERS", OK_COL, 4), ("DECEPTION", CHIP_DECEPTION, 3)),
+    (("FLEET", DANGER, 5), ("AMPHIB + UNDERSEA", DANGER, 3),
+     ("AIR + EW", DANGER, 2), ("GROUND SENSORS", DANGER, 1)),
+    (("CRUISE MISSILES", ACCENT, 3), ("STANDOFF + SEAD", ACCENT, 2),
+     ("LOITERING SWARM", ACCENT, 2)),
+    (("S-300 BATTERY", ACCENT, 3), ("PANTSIR PD", ACCENT, 3),
+     ("BUK BATTERY", ACCENT, 3), ("ASW", BELIEF, 2)),
+)
+
+# Parity guard (import-time): every non-START row belongs to exactly one
+# group — a page edit that forgets the group table fails fast, not silently.
+for _pg, _prows in zip(_PAGE_GROUPS, _PAGES):
+    assert sum(n for _, _, n in _pg) == len(_prows) - 1, \
+        "group row counts must cover every row except START"
 
 
 class CombatSetupState(GameState):
@@ -480,64 +510,105 @@ class CombatSetupState(GameState):
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         w, h = self.app.window.size()
         text = self.text
-        x = (w - SETUP_PANEL_W) // 2
+        x = (w - SETUP_CONTENT_W) // 2
         self._hit_rects = []
 
         head_lh  = text.line_height(HEADER_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
         body_lh  = text.line_height(BODY_SIZE)
 
-        # --- Header ----------------------------------------------------------
-        page_name   = _PAGE_NAMES[self._page]
-        header_text = f"COMBAT SETUP  /  {page_name}"
-        text.draw_text(x, 40, header_text, ACCENT, HEADER_SIZE)
-        rule_y = 40 + head_lh + 8
-        draw_header_rule(text, x, rule_y, SETUP_PANEL_W)
+        # --- Header (mock 03): cream 'COMBAT SETUP' + dim slash + brass page
+        # name; 'PAGE n / 4' right-aligned in faint.
+        page_name = _PAGE_NAMES[self._page]
+        hx = x
+        text.draw_text(hx, 40, "COMBAT SETUP", TEXT_COL, HEADER_SIZE)
+        hx += text.text_width("COMBAT SETUP", HEADER_SIZE) + 12
+        text.draw_text(hx, 40, "/", DISABLED, HEADER_SIZE)
+        hx += text.text_width("/", HEADER_SIZE) + 12
+        text.draw_text(hx, 40, page_name, ACCENT, HEADER_SIZE)
+        page_no = f"PAGE {self._page + 1} / {len(_PAGES)}"
+        text.draw_text(x + SETUP_CONTENT_W - text.text_width(page_no, SMALL_SIZE),
+                       40 + head_lh - small_lh, page_no, FAINT, SMALL_SIZE)
 
-        # --- Page tabs -------------------------------------------------------
-        # Even-column tab bar via the shared widget (fixed-grid mode): renders
-        # byte-identically to the old inline loop (locked by test_widgets).
-        tab_w = SETUP_PANEL_W // len(_PAGE_NAMES)
-        tab_strip(text, x, rule_y + 6, _PAGE_NAMES, self._page,
-                  size=SMALL_SIZE, tab_w=tab_w)
-        tab_h = small_lh + 12
+        # --- Tab rail: contiguous boxed tabs on a darker rail; the active tab
+        # carries the plate-selected fill + a 3px brass bar along its bottom.
+        rail_y = 40 + head_lh + 12
+        rail_h = small_lh + 18
+        tab_w = SETUP_CONTENT_W / len(_PAGE_NAMES)
+        text.draw_rect(x, rail_y, SETUP_CONTENT_W, rail_h, (*TAB_RAIL_BG, 1.0))
+        for i, name in enumerate(_PAGE_NAMES):
+            tx0 = round(x + i * tab_w)
+            if i:
+                text.draw_lines([(tx0, rail_y), (tx0, rail_y + rail_h)],
+                                (*LINE_COL, 1.0), 1.0)
+            active = (i == self._page)
+            if active:
+                text.draw_rect(tx0, rail_y, round(tab_w), rail_h, (*BG2, 1.0))
+                text.draw_rect(tx0, rail_y + rail_h - 3, round(tab_w), 3,
+                               (*ACCENT, 1.0))
+            tw = text.text_width(name, SMALL_SIZE)
+            text.draw_text(round(tx0 + (tab_w - tw) / 2),
+                           rail_y + (rail_h - small_lh) // 2, name,
+                           ACCENT if active else MUTED, SMALL_SIZE)
+        text.draw_lines([(x, rail_y), (x + SETUP_CONTENT_W, rail_y),
+                         (x + SETUP_CONTENT_W, rail_y + rail_h),
+                         (x, rail_y + rail_h), (x, rail_y)],
+                        (*LINE_COL, 1.0), 1.0)
 
-        # --- Panel -----------------------------------------------------------
+        # --- Grouped plates: the 2-column grid; groups land left/right in
+        # order and each column stacks independently (mock 03).
         rows = self._rows()
-        panel_y = rule_y + tab_h + 4
-        panel_h = len(rows) * ROW_H + 2 * PAD
-        draw_panel(text, x, panel_y, SETUP_PANEL_W, panel_h, strip=True)
+        grid_y = rail_y + rail_h + GRID_GAP
+        col_w = (SETUP_CONTENT_W - GRID_GAP) // 2
+        col_y = [grid_y, grid_y]
+        idx = 0
+        for gi, (title, chip, n) in enumerate(_PAGE_GROUPS[self._page]):
+            gcol = gi % 2
+            gx = x + gcol * (col_w + GRID_GAP)
+            gy = col_y[gcol]
+            head_band = 12 + small_lh + 7      # top pad + chip label + rule
+            plate_h = head_band + n * ROW_H + 8
+            draw_panel(text, gx, gy, col_w, plate_h, ticks=False)
+            draw_plate_header(text, gx + PAD, gy + 12, col_w - 2 * PAD,
+                              title, chip)
+            ry = gy + head_band
+            for k in range(n):
+                if k:
+                    text.draw_lines([(gx + PAD, ry), (gx + col_w - PAD, ry)],
+                                    (*ROW_DIVIDER, 1.0), 1.0)
+                self._draw_row(rows[idx], idx, gx + 1, ry, col_w - 2, body_lh)
+                ry += ROW_H
+                idx += 1
+            col_y[gcol] = gy + plate_h + GRID_GAP
 
-        # --- Rows ------------------------------------------------------------
-        row_x = x + PAD
-        row_w = SETUP_PANEL_W - 2 * PAD
-        ry = panel_y + PAD
-        for i, row in enumerate(rows):
-            self._draw_row(row, i, row_x, ry, row_w, body_lh)
-            ry += ROW_H
+        # --- START: the centered brass key below the grid (mock 03); PRESS
+        # inverts the key for the 80 ms flash.
+        start_idx = len(rows) - 1
+        key_y = max(col_y) + 4
+        kx = x + (SETUP_CONTENT_W - START_KEY_W) // 2
+        draw_brass_key(text, kx, key_y, START_KEY_W, START_KEY_H,
+                       START_KEY_LABEL, focused=(self._sel == start_idx),
+                       pressed=self._pending)
+        self._hit_rects.append((start_idx, (kx, key_y, kx + START_KEY_W,
+                                            key_y + START_KEY_H)))
 
-        # --- Footer ----------------------------------------------------------
-        fy = h - FOOTER_MARGIN - small_lh
-        fw = text.text_width(SETUP_FOOTER, SMALL_SIZE)
-        text.draw_text((w - fw) // 2, fy, SETUP_FOOTER, ACCENT_DIM, SMALL_SIZE)
-
+        # --- Hint bar ---------------------------------------------------------
+        draw_hint_bar(text, w, h, SETUP_FOOTER)
         text.flush(w, h)
 
     def _draw_row(self, row: dict, idx: int, x: int, y: int, w: int,
                   body_lh: int) -> None:
+        """One plate row: full-plate-width focus fill + 3px brass bar, label
+        at x+PAD, value right-aligned.  A zero/OFF stepper reads DISABLED at
+        rest (mock 03) so an unfitted feature is visibly off."""
         text  = self.text
         kind  = row.get("kind")
         selected = (idx == self._sel)
         label = row["label"]
 
-        # Row background + 3px left focus bar
         if selected:
             text.draw_rect(x, y, w, ROW_H, (*BG2, 1.0))
             text.draw_rect(x, y, FOCUS_BAR_W, ROW_H, (*ACCENT, 1.0))
-
-        # Press-flash on the START action row
-        if self._pending and kind == "action" and label == _START:
-            text.draw_rect(x, y, w, ROW_H, (*ACCENT, PRESS_FLASH_A))
 
         label_col = ACCENT if selected else MUTED
         ty = y + (ROW_H - body_lh) // 2
@@ -546,18 +617,21 @@ class CombatSetupState(GameState):
             text.draw_text(x + PAD, ty, label, MUTED)
             val = row.get("value", "")
             vw  = text.text_width(val)
-            text.draw_text(x + w - vw, ty, val, DISABLED)
+            text.draw_text(x + w - PAD - vw, ty, val, DISABLED)
 
         elif kind == "seed":
             text.draw_text(x + PAD, ty, label, label_col)
             if self._seed_editing and selected:
                 display  = (self._seed_digits + "_") if self._seed_digits else "_"
                 val_col  = ACCENT
+            elif selected:
+                display  = f"< {int(self._fields['seed'])} >"
+                val_col  = ACCENT
             else:
                 display  = str(int(self._fields["seed"]))
-                val_col  = TEXT_COL if selected else MUTED
+                val_col  = TEXT_COL
             vw = text.text_width(display)
-            text.draw_text(x + w - vw, ty, display, val_col)
+            text.draw_text(x + w - PAD - vw, ty, display, val_col)
 
         elif kind == "stepper":
             text.draw_text(x + PAD, ty, label, label_col)
@@ -566,8 +640,8 @@ class CombatSetupState(GameState):
             names = row.get("names")
             if names is not None:
                 # Enum stepper (e.g. MAP): the value indexes a names table.
-                idx = int(v)
-                val_str = names[idx] if 0 <= idx < len(names) else str(idx)
+                vi = int(v)
+                val_str = names[vi] if 0 <= vi < len(names) else str(vi)
             # Whole-number floats (reload multiples of 5 s): show as int
             elif isinstance(v, float) and v == int(v):
                 val_str = str(int(v))
@@ -576,17 +650,12 @@ class CombatSetupState(GameState):
             else:
                 val_str = str(v)
             if selected:
-                display = f"< {val_str} >"
+                display, val_col = f"< {val_str} >", ACCENT
             else:
                 display = val_str
-            vw      = text.text_width(display)
-            val_col = TEXT_COL if selected else MUTED
-            text.draw_text(x + w - vw, ty, display, val_col)
-
-        elif kind == "action":
-            # START: centred, uses accent when selected, disabled otherwise
-            col = ACCENT if selected else DISABLED
-            tw  = text.text_width(label)
-            text.draw_text(x + (w - tw) // 2, ty, label, col)
+                # OFF/zero features read greyed so the ON set pops (mock 03).
+                val_col = DISABLED if val_str in ("0", "NONE") else TEXT_COL
+            vw = text.text_width(display)
+            text.draw_text(x + w - PAD - vw, ty, display, val_col)
 
         self._hit_rects.append((idx, (x, y, x + w, y + ROW_H)))
