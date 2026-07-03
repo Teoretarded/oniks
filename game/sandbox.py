@@ -1477,6 +1477,11 @@ class SandboxState(GameState):
         if self.map_open:
             self.tactical_map.update(dt_real)   # arrow-key panning
             self.tactical_map.draw(w, h)
+            # F1 must work over the MAP too (it silently no-oped: the overlay
+            # only drew inside hud.draw, which the map branch skips).
+            if self.controls_overlay:
+                self.hud._controls_overlay(self, w, h)
+                self.hud.text.flush(w, h)
         elif self.hud_visible:
             self.hud.draw(self, w, h)
 
