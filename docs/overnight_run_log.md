@@ -293,3 +293,28 @@ SUBMARINES 1 + DEFENSE page -> SONOBUOYS 8 / ASW 2 for the acoustic duel;
 CAMPAIGN from the main menu for the meta-loop. Balance flags: PAR rewards
 passivity (500 s of nothing = B), swarm launch range 25 vs 40 km design,
 back-plot buff feel, rear-band transports ~324 min sim transit.
+
+## SESSION 2026-07-03 (daytime) — live-playtest bug burst + physics realism pass
+
+The user played; every report was a real engine bug (3/3):
+- 'I can't intercept the missiles' -> S-300/Buk could NEVER engage strike
+  rounds (_find_air_entity never searched world.missiles) + silent refusals.
+  Fixed 28d119f. Measured: 48N6 kills a 50 m Tomahawk passing 20 km from the
+  site (27.7 m fuse); 35+ km wave-top shots are honestly out of energy
+  (matches the real S-300's ~25-40 km low-alt envelope; loft left AS TUNED).
+- 'the Pantsirs should be intercepting... why why why' -> the multipath
+  tracking error was an ANGLE (3 mrad @ 20 km) implemented as flat 60 m at
+  ANY range: point defense at 5 km chased long-range noise with an 8 m fuse
+  (12-round magazine for ~1 kill, a leaker impacting every seed). Fixed
+  fe8c204 (range-scaled sigma, capped at the calibration range). Measured:
+  on-target salvos now die 3-6.3 km out, zero structures lost, all seeds.
+  Duel bands + digest UNCHANGED.
+- Zircon realism ('the missiles don't look accurate') -> per-weapon descent
+  profile fields (3d5f287): M5.5 @ 20 km combat-validated cruise, late steep
+  dive, FULL-LEG PN; measured HIT 5 m at Mach 4.5 (was: 159 m/s crawl/miss).
+  Lo-lo: M4.5 hits to ~90 km, honest fuel death beyond.
+- UX: LOW TGT ~22 km dashed honesty ring on the S-300 map envelope (bed9129),
+  F1 overlay now draws over the map (24e07f9), unfitted-vs-empty hints for
+  buoys/ASW (9087bf4).
+Note: two long audit agents were killed by the user's ESC ~2 h in; a scoped
+sim-logic reviewer was relaunched at session end.
