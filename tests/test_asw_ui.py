@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from game.sandbox import (
-    HINT_ASW_EMPTY, HINT_ASW_NO_FIX, HINT_BUOY_ARMED, HINT_BUOY_EMPTY,
-    HINT_BUOY_OFF, SandboxState,
+    HINT_ASW_NO_FIX, HINT_ASW_UNFITTED, HINT_BUOY_ARMED, HINT_BUOY_EMPTY,
+    HINT_BUOY_OFF, HINT_BUOY_UNFITTED, SandboxState,
 )
 from world.combat import CombatWorld
 from world.combat_config import CombatConfig
@@ -44,10 +44,20 @@ def asw_world():
 
 
 def test_toggle_refuses_with_zero_stock():
+    """A battle that never FITTED buoys points at the setup page (the live
+    playtest hit 'NO SONOBUOYS LEFT' having deployed nothing — misleading);
+    a battle that HAD stock and spent it says empty."""
     host = _Host(CombatWorld(CombatConfig(seed=1337)))   # n_sonobuoys=0
     SandboxState.toggle_buoy_drop(host)
     assert host.buoy_drop_armed is False
-    assert host.hints == [HINT_BUOY_EMPTY]
+    assert host.hints == [HINT_BUOY_UNFITTED]
+
+    spent = CombatWorld(CombatConfig(seed=1337, n_subs=1, n_sonobuoys=1,
+                                     sub_kalibr_ammo=4))
+    spent.place_sonobuoy((0.0, 90_000.0))                # exhaust the stock
+    host2 = _Host(spent)
+    SandboxState.toggle_buoy_drop(host2)
+    assert host2.hints == [HINT_BUOY_EMPTY]
 
 
 def test_toggle_arms_and_disarms(asw_world):
@@ -121,8 +131,8 @@ def test_request_asw_refuses_blind_then_kills_off_a_fix():
     assert not sub.alive, "a sharp cross-fix inside the basket must kill"
 
 
-def test_request_asw_empty_magazine_hint():
+def test_request_asw_unfitted_magazine_hint():
     world = CombatWorld(CombatConfig(seed=1337, n_subs=1, sub_kalibr_ammo=4))
-    host = _Host(world)                          # asw_ammo defaults 0
+    host = _Host(world)                          # asw_ammo NEVER fitted
     SandboxState.request_asw(host)
-    assert host.hints == [HINT_ASW_EMPTY]
+    assert host.hints == [HINT_ASW_UNFITTED]

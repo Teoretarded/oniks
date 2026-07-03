@@ -275,9 +275,11 @@ HINT_JAM_WRONG_PLATFORM = "DRONE EW POD: SELECT THE DRONE (TAB)"
 HINT_BUOY_ARMED = "BUOY DROP ARMED - LMB ON MAP PLACES A SONOBUOY"
 HINT_BUOY_OFF = "BUOY DROP OFF"
 HINT_BUOY_EMPTY = "NO SONOBUOYS LEFT"
+HINT_BUOY_UNFITTED = "SONOBUOYS: NOT FITTED (SETUP > DEFENSE)"
 HINT_BUOY_DROPPED = "SONOBUOY AWAY ({n} LEFT)"
 HINT_ASW_AWAY = "ASW ROUND AWAY - RUNNING TO THE FIX"
 HINT_ASW_EMPTY = "ASW MAGAZINE EMPTY"
+HINT_ASW_UNFITTED = "ASW: NOT FITTED (SETUP > DEFENSE)"
 HINT_ASW_NO_FIX = "NO LOCALIZED SUBSURFACE FIX (CROSS-FIX WITH BUOYS)"
 # M6 salvo / ripple-fire (F): empty every ready tube of the active platform in
 # a controlled ripple.  The hints flash the mode + the count fired; an empty
@@ -608,7 +610,12 @@ class SandboxState(GameState):
             self.app.audio.ui_click()
             return
         if int(getattr(self.world, "sonobuoys_left", 0)) <= 0:
-            self.show_hint(HINT_BUOY_EMPTY)
+            # "Left" vs "never fitted": a battle configured with zero buoys
+            # points the player at the setup page instead of implying they
+            # spent a stock they never had.
+            fitted = int(getattr(getattr(self.world, "_config", None),
+                                 "n_sonobuoys", 0)) > 0
+            self.show_hint(HINT_BUOY_EMPTY if fitted else HINT_BUOY_UNFITTED)
             return
         self.buoy_drop_armed = True
         self.show_hint(HINT_BUOY_ARMED)
@@ -642,7 +649,9 @@ class SandboxState(GameState):
         if launch is None:
             return
         if int(getattr(self.world, "asw_ammo_left", 0)) <= 0:
-            self.show_hint(HINT_ASW_EMPTY)
+            fitted = int(getattr(getattr(self.world, "_config", None),
+                                 "asw_ammo", 0)) > 0
+            self.show_hint(HINT_ASW_EMPTY if fitted else HINT_ASW_UNFITTED)
             return
         rnd = launch()
         if rnd is None:
