@@ -59,39 +59,45 @@ SEEKER_ARC_SEGMENTS = 16
 BACKDROP_RGBA = (0.01, 0.02, 0.02, 0.78)     # dims the 3D scene behind the map
 MAP_ALPHA = 0.96                             # terrain texture opacity
 
-LANE_COL = (0.45, 0.60, 0.75, 0.38)          # dim shipping-lane polylines
-RING_COL = (0.45, 0.75, 0.55, 0.22)          # dim range rings
-RING_TEXT_COL = (0.55, 0.80, 0.62, 0.55)
-SAM_RING_COL = (1.00, 0.62, 0.30, 0.40)      # S-300 envelope (s300 active)
+# Wardroom Dusk (spec §2 world / §7 symbology + the color LAW): hostile
+# contacts dusk-red (age = opacity), beliefs teal, own-force truth green,
+# brass strictly for selection + the player's aim/plan.
+LANE_COL = (0.106, 0.227, 0.259, 0.60)       # bathymetry-toned lane polylines
+RING_COL = (0.165, 0.290, 0.278, 0.85)       # range rings #2A4A47
+RING_TEXT_COL = (0.431, 0.541, 0.502, 0.75)  # ring labels — faint
+SAM_RING_COL = (0.541, 0.435, 0.208, 0.60)   # engagement ring — brass-dim
 SAM_LOW_RING_M = 22_000.0    # m — MEASURED 48N6 kill reach vs a 50 m skimmer
 #                              (tools/probe_s300_vs_tomahawk.py: kill at 20 km,
 #                              energy-dead at 35+; the dashed honesty ring)
-SITE_COL = (1.00, 0.45, 0.35, 0.95)          # enemy land sites
-BASE_COL = (0.45, 1.00, 0.55, 0.95)          # player platform stars
+SITE_COL = (0.910, 0.416, 0.290, 0.95)       # enemy land sites — hostile
+BASE_COL = (0.624, 0.851, 0.541, 0.95)       # player platform stars — own
 PLATFORM_DIM = 0.55                          # inactive platform star fade
-CONTACT_COL = (1.00, 0.78, 0.30)             # contact triangles (alpha by age)
-SELECT_COL = (1.00, 0.95, 0.55, 1.00)        # selected-contact ring
-MISSILE_COL = (0.55, 1.00, 0.70, 1.00)       # live missile diamonds
-MISSILE_ROUTE_COL = (0.55, 1.00, 0.70, 0.30) # missile's remaining route
-TRAIL_COL = (0.80, 1.00, 0.85, 0.75)         # missile trail dots
-PLAN_COL = (0.40, 0.85, 1.00, 0.65)          # planned waypoint chain
-TARGET_COL = (0.40, 0.90, 1.00, 1.00)        # target cross + circle
-SEEKER_COL = (0.40, 0.85, 1.00, 0.50)        # seeker-basket cone preview
-HEADER_COL = (0.95, 0.85, 0.45, 1.0)
-STATUS_COL = (0.92, 0.97, 0.92, 1.0)
-ARMED_COL = (0.45, 1.00, 0.55, 1.0)
-RELOAD_COL = (1.00, 0.72, 0.25, 1.0)
-HINT_COL = (0.85, 0.90, 0.85, 0.92)
-PANEL_RGBA = (0.03, 0.06, 0.05, 0.55)
+CONTACT_COL = (0.910, 0.416, 0.290)          # contact triangles — hostile
+#                                              (age fades ALPHA, the aged-
+#                                               contact idiom of mock 01)
+SELECT_COL = (0.910, 0.722, 0.294, 1.00)     # selected-contact ring — brass
+MISSILE_COL = (0.624, 0.851, 0.541, 1.00)    # live missile diamonds — own
+MISSILE_ROUTE_COL = (0.624, 0.851, 0.541, 0.30)  # missile's remaining route
+TRAIL_COL = (0.750, 0.900, 0.690, 0.75)      # missile trail dots
+PLAN_COL = (0.541, 0.435, 0.208, 0.80)       # planned waypoint chain — brass-dim
+TARGET_COL = (0.910, 0.722, 0.294, 1.00)     # target cross — the player's AIM
+SEEKER_COL = (0.910, 0.722, 0.294, 0.40)     # seeker-basket cone preview
+HEADER_COL = (0.910, 0.722, 0.294, 1.0)      # brass
+STATUS_COL = (0.937, 0.902, 0.816, 1.0)      # warm cream
+ARMED_COL = (0.624, 0.851, 0.541, 1.0)
+RELOAD_COL = (0.851, 0.643, 0.255, 1.0)
+HINT_COL = (0.541, 0.478, 0.298, 0.95)       # hint-bar text
+PANEL_RGBA = (0.051, 0.071, 0.063, 0.88)     # over-map plate ink
 
 # Phase 4 — recon drone + ELINT overlays. The drone draws at its TRUE
-# position (friendly telemetry, not a contact) in its own cyan family so
-# it can never be misread as a contact or an own missile.
-DRONE_COL = (0.50, 0.95, 1.00, 1.00)         # drone diamond
-DRONE_DEAD_COL = (0.50, 0.95, 1.00, 0.45)    # falling wreck, dimmed
-DRONE_ROUTE_COL = (0.50, 0.95, 1.00, 0.35)   # tasked route polyline
-ELINT_RAY_COL = (0.85, 0.70, 0.95, 0.22)     # faint live bearing rays
-ELINT_CIRCLE_COL = (0.85, 0.70, 0.95, 0.50)  # fix uncertainty circles
+# position (friendly telemetry, not a contact) in the OWN-FORCE green
+# family (color LAW; mock 01: green diamond outline + orbit) — glyph SHAPE
+# separates it from an own missile, hue separates it from any contact.
+DRONE_COL = (0.624, 0.851, 0.541, 1.00)      # drone diamond
+DRONE_DEAD_COL = (0.624, 0.851, 0.541, 0.45)  # falling wreck, dimmed
+DRONE_ROUTE_COL = (0.624, 0.851, 0.541, 0.35)  # tasked route polyline
+ELINT_RAY_COL = (0.494, 0.831, 0.816, 0.22)  # bearing rays — BELIEF teal
+ELINT_CIRCLE_COL = (0.494, 0.831, 0.816, 0.50)  # fix circles — BELIEF teal
 ELINT_RAY_LEN_M = 250_000.0    # ray length: a bearing has no range; long
 #                                enough to cross the whole battlespace
 ELINT_CIRCLE_MAX_M = 30_000.0  # only draw circles once the fix error is
@@ -107,8 +113,8 @@ DRONE_RECON_HINT = "DRONE: RECON ONLY"       # LMB/SPACE with drone active
 # ship/air contact symbols, so the player reads them as a BELIEF (fog-honest
 # est_pos), never as friendly truth.  The uncertainty ring reuses the ELINT
 # circle colour/segments; the diamond reuses the ELINT estimate hue.
-EMITTER_COL = ELINT_CIRCLE_COL               # estimate-violet (belief, not truth)
-EMITTER_SEL_COL = (0.95, 0.80, 1.00, 0.95)   # brighter ring when ARM-selected
+EMITTER_COL = ELINT_CIRCLE_COL               # BELIEF teal (never truth)
+EMITTER_SEL_COL = (0.910, 0.722, 0.294, 0.95)  # brass ring when ARM-selected
 EMITTER_DIAMOND_PX = 6.0
 EMITTER_RING_PX = 11.0                        # minimum on-screen ring radius
 EMITTER_RING_SEGMENTS = ELINT_CIRCLE_SEGMENTS
@@ -119,13 +125,13 @@ EMITTER_RING_SEGMENTS = ELINT_CIRCLE_SEGMENTS
 # the est_pos + an uncertainty circle from the fix quality.  A 'datum' kind
 # (the launch-transient back-plot) draws dimmer than a buoy cross-fix.  ASW
 # rounds in flight are own-force truth (missile green, small).
-BUOY_COL = (0.50, 0.95, 1.00, 0.80)          # sonobuoy cross + ring
+BUOY_COL = (0.624, 0.851, 0.541, 0.80)       # sonobuoy cross + ring — own
 BUOY_PX = 4.0
-SUB_FIX_COL = (0.85, 0.70, 0.95, 0.85)       # cross-fix chevron (belief)
-SUB_DATUM_COL = (0.85, 0.70, 0.95, 0.45)     # stale datum chevron, dimmed
+SUB_FIX_COL = (0.494, 0.831, 0.816, 0.85)    # cross-fix chevron — BELIEF teal
+SUB_DATUM_COL = (0.494, 0.831, 0.816, 0.45)  # stale datum chevron, dimmed
 SUB_CHEVRON_PX = 7.0
 SUB_CIRCLE_MAX_M = 30_000.0                  # same clutter gate as ELINT
-ASW_ROUND_COL = (0.55, 1.00, 0.70, 0.95)     # own prosecution round
+ASW_ROUND_COL = (0.624, 0.851, 0.541, 0.95)  # own prosecution round
 ASW_ROUND_PX = 4.0
 BUOY_ARMED_TEXT = "BUOY DROP ARMED"          # chrome tag while modal
 
@@ -158,8 +164,8 @@ BASE_STAR_PX = 8.0             # base star spoke length
 # Phase 6 — Pantsir SHORAD markers: small friendly diamonds near the base
 # (point-defense nodes, distinct from the 8-spoke platform stars).  A dead
 # unit dims to the DEAD alpha.
-PANTSIR_COL = (0.45, 1.00, 0.70, 0.95)       # friendly point-defense green
-PANTSIR_DEAD_COL = (0.45, 1.00, 0.70, 0.35)  # destroyed unit, dimmed
+PANTSIR_COL = (0.624, 0.851, 0.541, 0.95)    # friendly point-defense green
+PANTSIR_DEAD_COL = (0.624, 0.851, 0.541, 0.35)  # destroyed unit, dimmed
 PANTSIR_DIAMOND_PX = 5.0
 CONTACT_NOSE_PX = 9.0          # contact triangle: nose ahead of the estimate
 CONTACT_BACK_PX = 5.0          # ... base behind it
@@ -856,7 +862,7 @@ class TacticalMap:
             msg = "BUILDING MAP..."
             tw = self.text.text_width(msg, HEADER_SIZE)
             self.text.draw_text((w - tw) * 0.5, (h - 28) * 0.5, msg,
-                                (0.95, 0.85, 0.45), HEADER_SIZE)
+                                HEADER_COL[:3], HEADER_SIZE)
             return
         gl = self._gl
         x0, y0 = self.view.world_to_screen((MAP_X_MIN, MAP_Z_MAX))  # NW corner
@@ -993,16 +999,21 @@ class TacticalMap:
         player sensor has imaged it; SANDBOX worlds have no such list)."""
         s = SITE_HALF_PX
         world = self.sandbox.world
-        sites = list(world.sites) + list(
-            getattr(world, "known_enemy_sites", ()))
-        for site in sites:
-            sx, sy = self.view.world_to_screen(site["pos"])
-            if not self._on_screen(sx, sy, pad=120.0):
-                continue
-            self.text.draw_lines([(sx - s, sy - s), (sx + s, sy - s),
-                                  (sx + s, sy + s), (sx - s, sy + s),
-                                  (sx - s, sy - s)], SITE_COL, 1.5)
-            self._label_text(sx + s + 4, sy - 9, site["name"], SITE_COL)
+        # Color LAW: the player's OWN installations (world.sites — e.g. the
+        # friendly radar stations) wear own-force green; only DISCOVERED
+        # enemy installations wear the hostile family.  (Both used to draw
+        # in the one hostile site color — a pre-Wardroom miscolor.)
+        groups = ((list(world.sites), BASE_COL),
+                  (list(getattr(world, "known_enemy_sites", ())), SITE_COL))
+        for sites, col in groups:
+            for site in sites:
+                sx, sy = self.view.world_to_screen(site["pos"])
+                if not self._on_screen(sx, sy, pad=120.0):
+                    continue
+                self.text.draw_lines([(sx - s, sy - s), (sx + s, sy - s),
+                                      (sx + s, sy + s), (sx - s, sy + s),
+                                      (sx - s, sy - s)], col, 1.5)
+                self._label_text(sx + s + 4, sy - 9, site["name"], col)
 
     def _platform_stars(self) -> None:
         """Both friendly platforms (Task S4): the active one full strength,
@@ -1541,7 +1552,7 @@ class TacticalMap:
     def _target_text(self) -> str:
         tp = self.sandbox.target_point
         if tp is None:
-            return "TGT none"
+            return "TGT NONE"
         kind = ("TRK " + str(self.selected_contact).upper()
                 if self.selected_contact is not None else "TGT")
         ox, oz = self._platform_origin()
