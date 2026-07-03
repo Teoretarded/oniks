@@ -355,6 +355,11 @@ class IrMissile:
             else:
                 self.target.alive = False
             self.killed_target = True
+            # Forensics stamps (WRITE-ONLY): the debrief flight recorder
+            # reads these off the dead round; NO sim code ever does — the
+            # digest contract is untouched.
+            self.target.death_cause = ("a2a", str(self.weapon_id))
+            self.target.killed_by = self
             self._die(np.array([cx, cy, cz]))
             return True
         return False

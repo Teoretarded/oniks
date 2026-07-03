@@ -94,6 +94,11 @@ def apply_missile_hits(missiles, ships, effects_out):
             m.alive = False
             m.phase = PH_DEAD
             m.impact_pos = impact.copy()
+            # Forensics stamps (WRITE-ONLY): the debrief flight recorder
+            # reads these off the dead round; NO sim code ever does — the
+            # digest contract is untouched.
+            m.death_cause = ("hit", str(getattr(ship, "ship_type", "ship")))
+            m.killed_by = ship
             ship.hp -= 1
             if ship.hp > 0:
                 ship.state = ST_BURNING

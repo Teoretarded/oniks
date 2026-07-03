@@ -456,6 +456,12 @@ class SamMissile:
             else:
                 self.target.alive = False
             self.killed_target = True
+            # Forensics stamps (WRITE-ONLY): the debrief flight recorder
+            # reads these off the dead round; NO sim code ever does — the
+            # digest contract is untouched.
+            self.target.death_cause = ("sam", str(getattr(
+                self.weapon, "weapon_id", "sam")))
+            self.target.killed_by = self
             self._die(np.array([cx, cy, cz]))
             return True
         return False

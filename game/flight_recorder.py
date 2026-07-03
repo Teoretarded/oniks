@@ -21,10 +21,26 @@ Mechanics
   (honest: the recorder states what it saw, never more).
 
 FOG / SCOPE: OWN rounds only (is_hostile False — the player's own
-telemetry, always allowed).  CAUSE attribution is NOT recorded here; the
-kill-attribution channel is a separate step (classification/observed
-rules apply there).  Nothing in the sim reads this state (render/AAR
-layer only — the world digest is untouched).
+telemetry, always allowed).  Nothing in the sim reads this state
+(render/AAR layer only — the world digest is untouched).
+
+Death-cause channel (handoff spec, 2026-07-03)
+----------------------------------------------
+Each record closes with ``rec["cause"] = dict(code, detail, observed)``.
+Attribution is read from the DEAD round's own attributes: the sim kill
+sites stamp ``m.death_cause = (code, detail)`` + ``m.killed_by = killer``
+(WRITE-ONLY stamps no sim code ever reads — digest-locked); self causes
+(own fuse hit / fuel / impact) come from attributes the round already
+carries.  FOG RULE (user-locked, v1 honest): ``observed`` is True only if
+the killer was itself a track in ``world.contacts.tracks`` at kill time —
+the mid-battle UI names the killer ONLY when observed, else it must show
+"LOST - UNCONFIRMED"; self causes are own-force telemetry, always
+observed.  A round that vanished with no evidence closes ("lost", False).
+
+Plot extensions: ``target_xz`` (the round's own aim point at pickup, for
+the dashed planned-remainder) and ``events`` — (t, phase_label) stamped
+whenever the round's own ``phase_label`` changes (pushover/skim/seeker
+flags on the debrief sheet).
 """
 
 from __future__ import annotations
@@ -67,6 +83,11 @@ class FlightRecorder:
                 self.tracks[key] = rec = {
                     "kind": kind, "seq": seq, "launch_t": t,
                     "samples": [self._sample(t, m)], "death": None,
+                    "cause": None,
+                    # Aim point at pickup (read-only): the dashed planned-
+                    # remainder target for a round that died short.
+                    "target_xz": self._target_xz(m),
+                    "events": [],
                     "next_t": t + self.period,
                     # Held reference (accuracy contract): the world PRUNES a
                     # dead round from the list within its death step, but the
@@ -74,11 +95,14 @@ class FlightRecorder:
                     # it lets the close-out anchor the TRUE terminal position
                     # instead of the last boundary sample.
                     "_m": m,
+                    "_label": None,           # last seen phase_label
                 }
+                self._stamp_phase(rec, t, m)
                 continue
             if rec["death"] is not None:
                 continue                      # already closed
             if alive:
+                self._stamp_phase(rec, t, m)
                 # Fixed-boundary sampling: exact post-step state whenever the
                 # sim clock has crossed the next boundary (ticks are far
                 # smaller than the period, so one sample per crossing).
@@ -91,6 +115,7 @@ class FlightRecorder:
                 rec["samples"].append(self._sample(t, m))
                 rec["death"] = {"t": t,
                                 "pos": np.asarray(m.pos, dtype=np.float64).copy()}
+                rec["cause"] = self._cause_of(m, world)
         # Rounds pruned from the list (the world removes a dead round within
         # its death step): close them at the held object's FROZEN terminal
         # position — the exact death point — stamped at this step's clock
@@ -102,6 +127,7 @@ class FlightRecorder:
                 rec["death"] = {"t": t,
                                 "pos": np.asarray(m.pos,
                                                   dtype=np.float64).copy()}
+                rec["cause"] = self._cause_of(m, world)
 
     # ------------------------------------------------------------- helpers
 
@@ -116,6 +142,74 @@ class FlightRecorder:
     def _sample(t: float, m) -> tuple:
         p = m.pos
         return (t, float(p[0]), float(p[1]), float(p[2]))
+
+    @staticmethod
+    def _target_xz(m):
+        """(x, z) of the round's own aim point at pickup, or None (a round
+        with no target_point — e.g. a SAM homing on an object)."""
+        tp = getattr(m, "target_point", None)
+        if tp is None:
+            return None
+        return (float(tp[0]), float(tp[2]))
+
+    @staticmethod
+    def _stamp_phase(rec, t: float, m) -> None:
+        """Append (t, phase_label) whenever the round's OWN label changes
+        (pushover/skim/terminal event flags for the debrief sheet)."""
+        label = getattr(m, "phase_label", None)
+        if label is not None and label != rec["_label"]:
+            rec["_label"] = label
+            rec["events"].append((t, str(label)))
+
+    # ------------------------------------------------------- cause channel
+
+    @staticmethod
+    def _killer_observed(killer, world) -> bool:
+        """v1 honest fog rule: the killer counts as OBSERVED only if it was
+        itself a track in world.contacts.tracks at kill time (checked the
+        same fixed step the death is recorded — at most one tick late)."""
+        if killer is None:
+            return False
+        kid = getattr(killer, "aircraft_id", None)
+        if kid is None:
+            kid = getattr(killer, "ship_id", None)
+        if kid is None:
+            return False
+        contacts = getattr(world, "contacts", None)
+        tracks = getattr(contacts, "tracks", None)
+        return tracks is not None and kid in tracks
+
+    def _cause_of(self, m, world) -> dict:
+        """Classify WHY the round died from its OWN attributes (the sim kill
+        sites stamp death_cause/killed_by; fuel/impact/own-fuse outcomes are
+        state the round already carries).  Never claims more than recorded:
+        no evidence at all closes as ('lost', unobserved)."""
+        dc = getattr(m, "death_cause", None)
+        if dc is not None:
+            code, detail = dc
+            return {"code": str(code),
+                    "detail": None if detail is None else str(detail),
+                    "observed": self._killer_observed(
+                        getattr(m, "killed_by", None), world)}
+        if getattr(m, "killed_target", False) or getattr(m, "acquired", False):
+            # Own interceptor/ASW fuse success: own-round telemetry, always
+            # observed.  Detail = the victim's weapon kind when named.
+            tgt = getattr(m, "target", None)
+            if tgt is None:
+                tgt = getattr(m, "_target", None)
+            detail = None
+            if tgt is not None:
+                w = getattr(tgt, "weapon", None)
+                detail = (getattr(w, "weapon_id", None) if w is not None
+                          else getattr(tgt, "weapon_id", None))
+                detail = None if detail is None else str(detail)
+            return {"code": "hit", "detail": detail, "observed": True}
+        if getattr(m, "impact_pos", None) is not None:
+            fuel = getattr(m, "fuel", None)
+            if fuel is not None and fuel <= 0.0:
+                return {"code": "fuel", "detail": None, "observed": True}
+            return {"code": "impact", "detail": None, "observed": True}
+        return {"code": "lost", "detail": None, "observed": False}
 
     # --------------------------------------------------------- read helpers
 

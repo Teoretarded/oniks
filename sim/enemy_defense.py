@@ -616,6 +616,12 @@ class ShipDefense:
                 # the next world.step (it never re-enters the flying set),
                 # so the kill point must be recorded here.
                 best.impact_pos = world_pos.copy()
+                # Forensics stamps (WRITE-ONLY): the debrief flight recorder
+                # reads these off the dead round; NO sim code ever does —
+                # the digest contract is untouched.
+                best.death_cause = ("ciws", str(getattr(
+                    self.ship, "ship_type", "ship")))
+                best.killed_by = self.ship
             world.events.append((kind, world_pos))
 
     # ----------------------------------------------------------------- step

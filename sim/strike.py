@@ -723,6 +723,10 @@ class HarmMissile(StrikeMissile):
             self.alive = False
             if self._miss_offset is None and self.target_radar.alive:
                 self.target_radar.alive = False
+                # Forensics stamp (WRITE-ONLY, self-recorded): the debrief
+                # flight recorder reads this off the dead round; NO sim code
+                # ever does — the digest contract is untouched.
+                self.death_cause = ("hit", "radar")
             return True
         return False
 

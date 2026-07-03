@@ -592,6 +592,11 @@ class _UnitDefense:
             world_pos = rel_pos + gun_pos
             if kind == "pantsir_kill":
                 best.impact_pos = world_pos.copy()
+                # Forensics stamps (WRITE-ONLY): the debrief flight recorder
+                # reads these off the dead round; NO sim code ever does —
+                # the digest contract is untouched.
+                best.death_cause = ("pantsir", "30mm")
+                best.killed_by = unit
             # Gun event kinds are already "pantsir_gun" / "pantsir_kill" as
             # set by _Pantsir30mmGun.engage().
             world.events.append((kind, world_pos))
