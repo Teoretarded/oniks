@@ -63,6 +63,9 @@ LANE_COL = (0.45, 0.60, 0.75, 0.38)          # dim shipping-lane polylines
 RING_COL = (0.45, 0.75, 0.55, 0.22)          # dim range rings
 RING_TEXT_COL = (0.55, 0.80, 0.62, 0.55)
 SAM_RING_COL = (1.00, 0.62, 0.30, 0.40)      # S-300 envelope (s300 active)
+SAM_LOW_RING_M = 22_000.0    # m — MEASURED 48N6 kill reach vs a 50 m skimmer
+#                              (tools/probe_s300_vs_tomahawk.py: kill at 20 km,
+#                              energy-dead at 35+; the dashed honesty ring)
 SITE_COL = (1.00, 0.45, 0.35, 0.95)          # enemy land sites
 BASE_COL = (0.45, 1.00, 0.55, 0.95)          # player platform stars
 PLATFORM_DIM = 0.55                          # inactive platform star fade
@@ -940,6 +943,25 @@ class TacticalMap:
         lx, ly = self.view.world_to_screen((cx, cz + r))
         if self._on_screen(lx, ly):
             self.text.draw_text(lx + 4, ly - 18, label, SAM_RING_COL)
+        # LOW-TARGET honesty ring (live playtest 2026-07-03: the 150 km ring
+        # badly oversold the envelope vs sea-skimmers — the measured 48N6
+        # kill reach vs a 50 m Tomahawk is ~20-25 km, energy + horizon
+        # physics).  A dashed inner ring shows where LOW inbounds actually
+        # die; drawn only for rounds whose max ring is far beyond it (the
+        # 40N6 refuses low targets outright; the Buk rings are close-in).
+        if platform == "s300" and sam_round != "40n6":
+            rl = SAM_LOW_RING_M
+            for a0 in range(0, RING_SEGMENTS, 8):     # dashed: 4-seg dashes
+                seg = np.linspace(2 * np.pi * a0 / RING_SEGMENTS,
+                                  2 * np.pi * (a0 + 4) / RING_SEGMENTS, 5)
+                self._poly_world(
+                    zip(cx + rl * np.sin(seg), cz + rl * np.cos(seg)),
+                    SAM_RING_COL, 1.0)
+            lx, ly = self.view.world_to_screen((cx, cz - rl))
+            if self._on_screen(lx, ly):
+                self.text.draw_text(lx + 4, ly + 6,
+                                    f"LOW TGT ~{rl / 1e3:.0f} km",
+                                    (*SAM_RING_COL[:3], 0.8))
 
     def _lanes(self) -> None:
         for lane in LANES:
