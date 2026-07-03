@@ -252,7 +252,15 @@ def _descent_range(weapon, cruise_alt):
     speed-bleed / terminal-run-in room the homing phase needs, and shrinking
     it lets a hypersonic round arrive low but too fast and overshoot the
     target horizontally (measured). Faster weapons instead get a STEEPER dive
-    inside this same corridor (self._descent_scale in the DESCENT guidance)."""
+    inside this same corridor (self._descent_scale in the DESCENT guidance).
+
+    A weapon with an EXPLICIT per-weapon profile (descent_range_m set on the
+    arsenal def) overrides this timing wholesale — the formula above encodes
+    the Oniks letdown; a hypersonic round that must dive LATE and arrive FAST
+    (measured: the Zircon handed over 100 km out spent >200 s at sea level
+    and died at 159 m/s, 7 km short) declares its own start range instead."""
+    if weapon.descent_range_m > 0.0:
+        return weapon.descent_range_m
     ramp_s = (cruise_alt - weapon.skim_alt) / DESCENT_RAMP_RATE
     return (SKIM_CAPTURE_RANGE
             + (ramp_s + DESCENT_SETTLE_T) * DESCENT_RUN_SPEED)
@@ -335,6 +343,18 @@ class Missile:
         # before _plan_vertical_profile so the descent-range timing reads it.
         self._descent_scale = max(
             1.0, weapon.cruise_mach_hi / DESCENT_BASELINE_MACH)
+        # Per-weapon descent profile (arsenal fields; 0.0 = the Oniks-tuned
+        # module defaults with their speed-ratio scaling — bit-identical
+        # arithmetic for every weapon that leaves them unset).
+        self._descent_ramp_rate = (
+            weapon.descent_ramp_rate if weapon.descent_ramp_rate > 0.0
+            else DESCENT_RAMP_RATE * self._descent_scale)
+        self._descent_max_sink = (
+            weapon.descent_max_sink if weapon.descent_max_sink > 0.0
+            else DESCENT_MAX_SINK * self._descent_scale)
+        self._final_pn_range = (
+            weapon.final_pn_range_m if weapon.final_pn_range_m > 0.0
+            else FINAL_PN_RANGE)
         # Per-weapon stall speed (see STALL_SPEED): the lift-fade floor scales
         # to the weapon's own slow-cruise band so a HEALTHY subsonic round keeps
         # full guidance authority and holds its skim altitude. The min() keeps
@@ -565,8 +585,7 @@ class Missile:
         elif self.phase == PH_DESCENT:
             self._descent_elapsed += dt
             ramp = (self._descent_alt0
-                    - DESCENT_RAMP_RATE * self._descent_scale
-                    * self._descent_elapsed)
+                    - self._descent_ramp_rate * self._descent_elapsed)
             target_alt = max(w.skim_alt, ramp)
             gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
             gy = altitude_hold_accel(alt, vs, target_alt,
@@ -583,14 +602,14 @@ class Missile:
                 dy = tpos[1] - self.pos[1]
                 dz = tpos[2] - self.pos[2]
                 gx, gy, gz = pn_accel(self.pos, self.vel, tpos, tvel).tolist()
-                if math.sqrt(dx * dx + dy * dy + dz * dz) < FINAL_PN_RANGE:
+                if math.sqrt(dx * dx + dy * dy + dz * dz) < self._final_pn_range:
                     gy += GRAVITY
                 else:
                     ralt, rvs = self._skim_ref(alt, vs, world)
                     gy = (altitude_hold_accel(ralt, rvs, w.skim_alt,
                                               ALT_KP, ALT_KD, ALT_MAX_A)
                           + GRAVITY)
-            elif self._dist_to_target() < FINAL_PN_RANGE:
+            elif self._dist_to_target() < self._final_pn_range:
                 gx, gy, gz = pn_accel(self.pos, self.vel, self.target_point,
                                       np.zeros(3)).tolist()
                 gy += GRAVITY
@@ -690,6 +709,15 @@ class Missile:
                 self._descent_elapsed = 0.0
         if self.phase == PH_DESCENT and alt < TERMINAL_ALT_FACTOR * w.skim_alt:
             self.phase = PH_TERMINAL
+        # Per-weapon-profile rounds hand over by RANGE as well: a fast diver
+        # can reach the target while the ramp-following PD is still kilometres
+        # high (the lag is ~ramp_rate*kd/kp) — the altitude gate alone then
+        # never trips and the round OVERFLIES with the seeker never engaged
+        # (measured: Zircon crossed the ship at 151 m, still in DESCENT).
+        # Legacy weapons (descent_range_m unset) keep the alt-only gate.
+        if (self.phase == PH_DESCENT and w.descent_range_m > 0.0
+                and self._dist_to_target() < w.terminal_range):
+            self.phase = PH_TERMINAL
 
         # --- forces ---
         gx = gy = gz = 0.0                 # guidance accel components
@@ -781,7 +809,7 @@ class Missile:
             if vy > max_vy:
                 vy = max_vy
         elif self.phase == PH_DESCENT:
-            max_sink = DESCENT_MAX_SINK * self._descent_scale
+            max_sink = self._descent_max_sink
             if vy < -max_sink:
                 vy = -max_sink
         self.vel[0] = vx

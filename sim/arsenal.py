@@ -32,6 +32,21 @@ class WeaponDef:
     max_g: float             # max lateral acceleration in g
     warhead_mass: float      # kg
     ref_area: float          # m^2, aerodynamic reference area
+    # --- per-weapon descent profile (the SamDef per-round-loft pattern) ----
+    # 0.0 = UNSET -> the Oniks-calibrated module defaults in sim/missile.py
+    # (with their speed-ratio scaling) apply, byte-identical.  A weapon whose
+    # letdown physics differ from the Mach-2.5 Oniks sets its OWN numbers —
+    # the shared-gain disease (a Mach-5 round handed over 100 km out, crawling
+    # the sea-level leg to fuel death) is what these fields exist to end.
+    descent_range_m: float = 0.0    # dist-to-go where the hi letdown starts
+    descent_ramp_rate: float = 0.0  # m/s commanded altitude-ramp rate
+    descent_max_sink: float = 0.0   # m/s vertical-speed clamp in the letdown
+    final_pn_range_m: float = 0.0   # full-3D-PN window onto the hull (0 ->
+    #                                 the 800 m Oniks default; a Mach-4.5
+    #                                 arrival gets 0.5 s of homing in 800 m —
+    #                                 geometrically too late to duck onto the
+    #                                 deck inside its g-limit; measured 151 m
+    #                                 overfly)
 
 
 ONIKS = WeaponDef(
@@ -49,20 +64,39 @@ ONIKS = WeaponDef(
 
 
 # 3M22 Zircon - hypersonic anti-ship (player). Reuses the Oniks Missile flight
-# machine; the scramjet sustainer holds a hypersonic cruise, so it out-speeds the
-# SM-2 reaction window even on a high profile (the "break the screen" round).
+# machine but flies its OWN researched descent profile (the per-weapon fields
+# below — the old shared-gain hack handed it over 100 km out at 14 km, and the
+# MEASURED result was 200+ s crawling at sea level, arriving at 159 m/s or
+# dying short: tools/probe_zircon_traj.py 2026-07-03).
+#
+# Realism basis (combat-validated, not brochure): Ukrainian intercept data
+# puts the 3M22 at ~Mach 5.5 SUSTAINED midcourse (the Mach 8-9 figure is the
+# unconfirmed Russian claim), cruising as high as 20-28 km, and ~Mach 4.5 in
+# the TERMINAL stage — it dives LATE and arrives FAST; there is no long
+# hypersonic sea-skim leg (sea-level drag makes one physically absurd).
+# Sources: defence-ua.com intercept analysis; armyrecognition/missilethreat
+# spec sheets (M8 claim, 20 km cruise); en.wikipedia.org/wiki/3M22_Zircon.
 ZIRCON = WeaponDef(
     weapon_id="zircon", display_name="3M22 Zircon",
     length=9.0, diameter=0.70, launch_mass=3400.0, fuel_mass=900.0,
     eject_speed=30.0, eject_time=0.35,
     booster_thrust=360_000.0, booster_time=11.0,
     max_thrust=200_000.0, isp=1300.0,
-    # Fast medium-altitude cruise (not a 28 km lofter: the shared descent gains,
-    # tuned for the M2.5 Oniks, cannot bleed 28 km at M5+, so a high lofter
-    # overshoots. 14 km + an early 100 km terminal handover lets the hypersonic
-    # dive capture in time — the SPEED, not the apogee, is the Zircon's edge).
-    cruise_mach_hi=8.0, cruise_alt_hi=14_000.0, cruise_mach_lo=4.5, lo_alt=80.0,
-    skim_alt=15.0, terminal_range=100_000.0,
+    # M5.5 @ 20 km cruise (combat-validated band), M4.5 low band.
+    cruise_mach_hi=5.5, cruise_alt_hi=20_000.0, cruise_mach_lo=4.5, lo_alt=80.0,
+    # LATE steep letdown: nose over ~70 km out, ~700 m/s commanded sink
+    # (a -25..-30 deg path at M5), seeker handover 30 km out mid-dive — the
+    # round crosses the whole SM-2 reaction window at Mach 4+ instead of
+    # crawling into it subsonic.
+    skim_alt=15.0, terminal_range=30_000.0,
+    descent_range_m=70_000.0, descent_ramp_rate=700.0, descent_max_sink=800.0,
+    # Full-leg PN: the terminal behavior IS the dive — from handover (~7 km
+    # high, 30 km out) the seeker flies proportional navigation straight onto
+    # the hull.  There is NO level-off onto a 15 m skim: the skim-hold flare
+    # (60 m/s^2 authority) cannot arrest a ~800 m/s letdown sink (measured:
+    # it flew into the sea 19.6 km short), and the combat-validated profile
+    # is a late dive arriving ~Mach 4.5, not a hypersonic sea-skim.
+    final_pn_range_m=30_000.0,
     seeker_range=60_000.0, seeker_half_angle_deg=30.0,
     max_g=14.0, warhead_mass=300.0,
     ref_area=0.3848,   # pi * (0.70/2)^2

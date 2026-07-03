@@ -145,13 +145,14 @@ def test_hi_lo_long_range_unchanged():
     assert m.phase == PH_CRUISE
     assert abs(m.pos[1] - ONIKS.cruise_alt_hi) < 800.0
 
-# --- 3M22 Zircon: hypersonic anti-ship (Phase 8) -----------------------------
-# The Zircon reuses the Oniks flight machine at Mach 8. Its hi-lo descent must
-# bleed altitude proportionally faster (it covers the descent corridor ~3x
-# faster than the Mach-2.5 Oniks the descent gains were tuned for) or it
-# overflies the target still kilometres high and wallows. Regression measured
-# by tools/probe_zircon_traj.py: a 150 km hi-lo shot splashed ~20 km past the
-# target after crossing it at 4.4 km overfly altitude.
+# --- 3M22 Zircon: hypersonic anti-ship (Phase 8, realism pass 2026-07-03) ----
+# The Zircon reuses the Oniks flight machine but flies its OWN per-weapon
+# descent profile (arsenal descent_* fields): M5.5 cruise at 20 km (the
+# combat-validated band, not the Mach-8 brochure), a steep letdown from 70 km
+# out, and a FULL-LEG PN dive onto the hull from the 30 km terminal handover —
+# no hypersonic sea-skim. Regressions measured by tools/probe_zircon_traj.py:
+# the old shared-gain profile handed over 100 km out and the round crawled the
+# sea-level leg to fuel death (arrived 159 m/s or died 7 km short).
 
 @pytest.mark.slow
 def test_zircon_hi_lo_medium_range_hits():
@@ -165,6 +166,33 @@ def test_zircon_hi_lo_medium_range_hits():
             break
     assert not m.alive and m.impact_pos is not None
     assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 600.0
+
+
+@pytest.mark.slow
+def test_zircon_arrives_hypersonic_not_crawling():
+    """THE realism regression (two-sided): a 250 km hi-lo Zircon must ARRIVE
+    fast — impact speed in the combat-validated Mach ~3.5-5.2 band (the old
+    profile arrived at 159 m/s after a 100+ km sea-level crawl), and its
+    time-of-flight must beat the old crawl by minutes without beating light
+    (sanity bounds on both sides)."""
+    target = np.array([0., 0., 250_000.])
+    m = Missile(ZIRCON, np.array([0., 60., 0.]), heading=0.0, profile="hi-lo",
+                target_point=target)
+    w = _World()
+    impact_speed = 0.0
+    for _ in range(int(400 / DT)):
+        v = float(np.linalg.norm(m.vel))
+        m.update(DT, w)
+        if not m.alive:
+            impact_speed = v
+            break
+    assert not m.alive and m.impact_pos is not None
+    assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 600.0
+    assert 1_150.0 < impact_speed < 1_800.0, (
+        f"terminal arrival {impact_speed:.0f} m/s outside the Mach ~3.5-5.2 "
+        "band — the hypersonic round must dive in fast, never crawl")
+    assert m.t < 260.0, f"ToF {m.t:.0f}s — the late-dive profile is ~200s"
+
 
 @pytest.mark.slow
 def test_zircon_hi_lo_long_range_hits_and_stays_high():
@@ -181,7 +209,7 @@ def test_zircon_hi_lo_long_range_hits_and_stays_high():
     reached_high = False
     for _ in range(int(400 / DT)):
         m.update(DT, w)
-        if m.phase == PH_CRUISE and m.pos[1] > 12_000.0:
+        if m.phase == PH_CRUISE and m.pos[1] > 16_000.0:
             reached_high = True
         if not m.alive:
             break
