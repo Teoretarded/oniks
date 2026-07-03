@@ -272,7 +272,9 @@ class CombatState(SandboxState):
             menu_cb=(self._campaign_quit if in_campaign
                      else app.quit_to_menu),
             scorecard=card,
-            campaign_cb=self._campaign_continue if in_campaign else None)
+            campaign_cb=self._campaign_continue if in_campaign else None,
+            par=getattr(self, "_final_par", None),
+            end_time=float(getattr(self.world, "sim_time", 0.0)))
         overlay.enter()
         self._end_overlay = overlay
 
@@ -302,6 +304,7 @@ class CombatState(SandboxState):
         """Compose the end-of-battle ScoreCard from the world + telemetry and
         grade it against the per-seed PAR.  Returns None on any error (the
         overlay then renders the legacy no-stats layout)."""
+        self._final_par = None
         try:
             card = compute_scorecard(self.world, self._telemetry)
             seed = int(getattr(self._config, "seed", 0)) if self._config \
@@ -309,7 +312,10 @@ class CombatState(SandboxState):
                                  "seed", 0) or 0)
             cfg = self._config or getattr(self.world, "_config", None)
             if cfg is not None:
-                card.grade = grade(card, compute_par(seed, cfg))
+                # Stash the PAR alongside the grade: the AAR renders each
+                # stat row against the SAME bar the letter was earned on.
+                self._final_par = compute_par(seed, cfg)
+                card.grade = grade(card, self._final_par)
             return card
         except Exception:
             return None

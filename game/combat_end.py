@@ -22,27 +22,23 @@ from typing import Callable
 
 import pygame
 
-from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
+from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE, TITLE_SIZE
 from game.states import (
-    ACCENT, ACCENT_DIM, BG0, BG2, DANGER, DISABLED, FOCUS_BAR_W,
-    FOOTER_MARGIN, MUTED, OK_COL, PAD, PAUSE_DIM_A, PRESS_FLASH_A,
-    PRESS_FLASH_S, ROW_H, TEXT_COL, WARN, GameState, draw_header_rule,
-    draw_panel, move_selection,
+    ACCENT, BG0, BG2, DANGER, FAINT, GRADE_COLS, GRADE_TINTS, GRADE_VERDICTS,
+    MUTED, OK_COL, PAD, PAUSE_DIM_A, PRESS_FILL, PRESS_FLASH_S, ROW_DIVIDER,
+    ROW_H, TEXT_COL, GameState, draw_hint_bar, draw_panel, move_selection,
 )
 
-# --- Layout -------------------------------------------------------------------
+# --- Layout (Wardroom Dusk, mock 09: grade plate + VALUE-vs-PAR table) ----------
 
-END_PANEL_W   = 480
-END_FOOTER    = "UP/DN SELECT  ENTER OK  ESC MENU"
+END_PANEL_W   = 800
+GRADE_W       = 208          # tinted grade plate width (left column)
+END_FOOTER    = "UP/DN SELECT   ENTER OK   ESC MENU"
 
 _ITEMS          = ("REMATCH", "NEW BATTLE", "MAIN MENU")
 # Campaign-mode rows: the battle belongs to a chain, so REMATCH/NEW BATTLE
 # (grade-scum / off-ramp) are replaced by the single continue affordance.
 _CAMPAIGN_ITEMS = ("CONTINUE CAMPAIGN", "MAIN MENU")
-
-# Grade -> banner colour (S/A green, B amber, C/D red — same OK/WARN/DANGER
-# palette the rest of the HUD uses).
-_GRADE_COLS = {"S": OK_COL, "A": OK_COL, "B": WARN, "C": DANGER, "D": DANGER}
 
 
 def _fmt_mmss(t):
@@ -55,28 +51,75 @@ def _fmt_mmss(t):
     return f"{m}:{s:02d}"
 
 
-def scorecard_rows(card):
-    """Pure: a ScoreCard -> ordered list of (label, value, colour-key) rows for
-    the end-overlay stats block.  GL-free + unit-testable; the overlay maps the
-    colour key to the OK/WARN/DANGER palette.  ``colour-key`` is 'ok' | 'warn'
-    | 'danger' | 'text'."""
+def aar_rows(card, par=None):
+    """Pure: ScoreCard (+ optional Par) -> ordered stat rows for the AAR table.
+
+    Each row is ``(label, value, passed, par_text)`` where ``passed`` is
+    True/False against the SAME bar :func:`game.scoring.grade` scored (green
+    pass / dusk-red fail), or None for a neutral measurement, and ``par_text``
+    is the faint annotation ('- PAR >=0.45') or None when the sim publishes no
+    bar for that stat.  HONESTY RULES (locked): ROUNDS EXPENDED has no PAR in
+    the sim, so it carries NO annotation (the mock's '<=12' was a placeholder);
+    LEAK RATE grades HIGHER-is-better (rounds that got through) and BACK-
+    PLOTTED's bar is NO (staying hidden earns the point) — both annotate the
+    real direction, not the mock's guess.  GL-free + unit-testable."""
     intact = card.base_intact_pct
-    return [
+    fixed = card.first_fix_t is not None
+    rows = [
         ("KILLS", f"{card.kills}/{card.enemy_total}",
-         "ok" if card.kills >= card.enemy_total else "warn"),
-        ("ROUNDS", f"{card.rounds_fired}", "text"),
-        ("EFFICIENCY", f"{card.efficiency:.2f}", "text"),
-        ("FIRST FIX", _fmt_mmss(card.first_fix_t),
-         "danger" if card.first_fix_t is None else "text"),
-        ("BACK-PLOTTED", "YES" if card.was_back_plotted else "NO",
-         "danger" if card.was_back_plotted else "ok"),
-        ("LEAK RATE", f"{card.leak_rate * 100:.0f}%", "text"),
-        ("BASE INTACT", f"{intact * 100:.0f}%",
-         "ok" if intact >= 0.999 else ("warn" if intact > 0.0 else "danger")),
+         card.kills >= card.enemy_total, f"- PAR {card.enemy_total}"),
+        ("ROUNDS EXPENDED", f"{card.rounds_fired}", None, None),
     ]
+    if par is not None:
+        rows += [
+            ("EFFICIENCY", f"{card.efficiency:.2f}",
+             card.efficiency >= par.efficiency,
+             f"- PAR >={par.efficiency:.2f}"),
+            ("FIRST FIX", _fmt_mmss(card.first_fix_t),
+             fixed and card.first_fix_t <= par.first_fix_t,
+             f"- PAR <={_fmt_mmss(par.first_fix_t)}"),
+            ("BACK-PLOTTED", "YES" if card.was_back_plotted else "NO",
+             not card.was_back_plotted, "- PAR NO"),
+            ("LEAK RATE", f"{card.leak_rate * 100:.0f}%",
+             card.leak_rate >= par.leak_rate,
+             f"- PAR >={par.leak_rate * 100:.0f}%"),
+            ("BASE INTACT", f"{intact * 100:.0f}%",
+             intact >= par.base_intact_pct,
+             f"- PAR >={par.base_intact_pct * 100:.0f}%"),
+        ]
+    else:                       # degraded path: measurements without a bar
+        rows += [
+            ("EFFICIENCY", f"{card.efficiency:.2f}", None, None),
+            ("FIRST FIX", _fmt_mmss(card.first_fix_t),
+             None if fixed else False, None),
+            ("BACK-PLOTTED", "YES" if card.was_back_plotted else "NO",
+             not card.was_back_plotted, None),
+            ("LEAK RATE", f"{card.leak_rate * 100:.0f}%", None, None),
+            ("BASE INTACT", f"{intact * 100:.0f}%",
+             True if intact >= 0.999 else (None if intact > 0.0 else False),
+             None),
+        ]
+    return rows
 
 
-_ROW_COL = {"ok": OK_COL, "warn": WARN, "danger": DANGER, "text": TEXT_COL}
+def failed_axes(card, par):
+    """Pure: the grade axes that missed PAR, as display names (the grade
+    plate's shame caption).  Mirrors the five axes grade() scores; an axis
+    at full merit is omitted.  Empty when par is None or everything passed."""
+    if par is None:
+        return []
+    out = []
+    if card.first_fix_t is None or card.first_fix_t > par.first_fix_t:
+        out.append("FIRST FIX")
+    if card.efficiency < par.efficiency:
+        out.append("EFFICIENCY")
+    if card.leak_rate < par.leak_rate:
+        out.append("LEAK RATE")
+    if card.base_intact_pct < par.base_intact_pct:
+        out.append("BASE INTACT")
+    if card.was_back_plotted:
+        out.append("BACK-PLOT")
+    return out
 
 
 class CombatEndOverlay(GameState):
@@ -115,12 +158,17 @@ class CombatEndOverlay(GameState):
         menu_cb:      Callable[[], None],
         scorecard=None,
         campaign_cb=None,
+        par=None,
+        end_time=None,
     ):
         super().__init__(app)
         self._gl   = None
         self.text  = None
         self.victory = victory
         self.scorecard = scorecard
+        self.par = par                  # game.scoring.Par (None: no bar shown)
+        self.end_time = end_time        # sim clock at the decision (header)
+        self._t = 0.0                   # presentation clock (D-grade blink)
 
         if campaign_cb is not None:
             self._items = _CAMPAIGN_ITEMS
@@ -209,6 +257,7 @@ class CombatEndOverlay(GameState):
 
     def render(self, dt_real: float) -> None:
         self._tick_pending(dt_real)
+        self._t += dt_real
 
         # The final combat frame is still on screen (the integrator leaves it
         # there by NOT clearing before calling this state's render).  We just
@@ -220,92 +269,138 @@ class CombatEndOverlay(GameState):
         # Dim the frozen scene
         text.draw_rect(0, 0, w, h, (*BG0, PAUSE_DIM_A))
 
-        # --- Panel geometry --------------------------------------------------
+        # --- Geometry (mock 09): hero AAR plate, then the option plate -------
         head_lh  = text.line_height(HEADER_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
         body_lh  = text.line_height(BODY_SIZE)
-        inner_w  = END_PANEL_W - 2 * PAD
 
-        # M6 stats block (grade row + one line per metric) — height 0 when no
-        # ScoreCard is attached, so the legacy/smoke panel is byte-for-byte the
-        # old geometry.
         card = self.scorecard
+        stat_rows = aar_rows(card, self.par) if card is not None else []
+        head_band = PAD + head_lh + 10          # banner row + gap
         if card is not None:
-            stat_rows = scorecard_rows(card)
-            stats_h = (head_lh + 4               # grade row
-                       + len(stat_rows) * small_lh + 10)   # metric lines + gap
+            table_h = small_lh + 6 + len(stat_rows) * ROW_H
+            stats_h = max(table_h, 150) + PAD
         else:
-            stat_rows = []
             stats_h = 0
+        panel_h = head_band + stats_h + (PAD if card is None else 0)
+        menu_h = len(self._items) * ROW_H + 2 * 8
 
-        panel_h  = (PAD + head_lh + 2 + small_lh + 10 + stats_h + 10
-                    + len(self._items) * ROW_H + PAD)
         px = (w - END_PANEL_W) // 2
-        py = (h - panel_h)     // 2 - 40
+        py = (h - (panel_h + 12 + menu_h)) // 2 - 30
         draw_panel(text, px, py, END_PANEL_W, panel_h, strip=True)
 
-        # --- Outcome banner --------------------------------------------------
-        if self.victory:
-            banner_text  = "VICTORY"
-            banner_col   = OK_COL
-        else:
-            banner_text  = "DEFEAT"
-            banner_col   = DANGER
+        # --- Banner row: outcome left, clock caption right -------------------
+        banner_text = "VICTORY" if self.victory else "DEFEAT"
+        banner_col  = OK_COL if self.victory else DANGER
         text.draw_text(px + PAD, py + PAD, banner_text, banner_col, HEADER_SIZE)
-
-        # Sub-label: small, muted
         sub = "MISSION COMPLETE" if self.victory else "ALL BASTION TELs DESTROYED"
-        text.draw_text(px + PAD, py + PAD + head_lh + 2, sub, MUTED, SMALL_SIZE)
+        if self.end_time is not None:
+            sub += f" - T+{_fmt_mmss(self.end_time)}"
+        sw = text.text_width(sub, SMALL_SIZE)
+        text.draw_text(px + END_PANEL_W - PAD - sw,
+                       py + PAD + (head_lh - small_lh), sub, MUTED, SMALL_SIZE)
 
-        # Divider
-        rule_y = py + PAD + head_lh + 2 + small_lh + 10
-        draw_header_rule(text, px + PAD, rule_y, inner_w)
-
-        # --- M6 stats block (grade + metric rows) ----------------------------
-        block_y = rule_y + 10
+        # --- Grade plate (left) + VALUE-vs-PAR table (right) -----------------
         if card is not None:
-            label_x = px + PAD
-            val_x = px + END_PANEL_W - PAD            # right-aligned values
-            grade_col = _GRADE_COLS.get(card.grade, TEXT_COL)
-            # Big grade letter on the left, 'GRADE' label trailing it.
-            text.draw_text(label_x, block_y, card.grade or "-",
-                           grade_col, HEADER_SIZE)
-            gw = text.text_width(card.grade or "-", HEADER_SIZE)
-            text.draw_text(label_x + gw + 8,
-                           block_y + (head_lh - small_lh),
-                           "GRADE", MUTED, SMALL_SIZE)
-            sy = block_y + head_lh + 4
-            for label, value, key in stat_rows:
-                text.draw_text(label_x, sy, label, MUTED, SMALL_SIZE)
-                vw = text.text_width(value, SMALL_SIZE)
-                text.draw_text(val_x - vw, sy, value,
-                               _ROW_COL.get(key, TEXT_COL), SMALL_SIZE)
-                sy += small_lh
-            block_y = sy + 10
+            gy = py + head_band
+            self._grade_plate(px + PAD, gy, GRADE_W, stats_h - PAD, card)
+            tx = px + PAD + GRADE_W + 20
+            tw_col = px + END_PANEL_W - PAD - tx          # right column width
+            # Faint table header: STAT left, VALUE - PAR right.
+            text.draw_text(tx, gy, "STAT", FAINT, SMALL_SIZE)
+            hdr = "VALUE - PAR"
+            text.draw_text(tx + tw_col - text.text_width(hdr, SMALL_SIZE), gy,
+                           hdr, FAINT, SMALL_SIZE)
+            ry = gy + small_lh + 6
+            for label, value, passed, par_text in stat_rows:
+                text.draw_lines([(tx, ry), (tx + tw_col, ry)],
+                                (*ROW_DIVIDER, 1.0), 1.0)
+                vy = ry + (ROW_H - body_lh) // 2
+                text.draw_text(tx, vy, label, MUTED)
+                # value (pass green / fail dusk-red / neutral cream) with the
+                # faint PAR annotation trailing it.
+                vcol = (TEXT_COL if passed is None
+                        else OK_COL if passed else DANGER)
+                pw = (text.text_width(par_text, SMALL_SIZE) + 8
+                      if par_text else 0)
+                vw = text.text_width(value)
+                text.draw_text(tx + tw_col - pw - vw, vy, value, vcol)
+                if par_text:
+                    text.draw_text(tx + tw_col - pw + 8,
+                                   ry + (ROW_H - small_lh) // 2,
+                                   par_text, FAINT, SMALL_SIZE)
+                ry += ROW_H
 
-        # --- Option rows -----------------------------------------------------
-        row_x = px + PAD
-        ry    = block_y
+        # --- Option plate ----------------------------------------------------
+        my = py + panel_h + 12
+        draw_panel(text, px, my, END_PANEL_W, menu_h, ticks=False)
+        ry = my + 8
         for i, name in enumerate(self._items):
             selected = (i == self._sel)
             col = MUTED
+            rx = px + 1
+            rw = END_PANEL_W - 2
             if selected:
                 col = ACCENT
-                text.draw_rect(row_x, ry, inner_w, ROW_H, (*BG2, 1.0))
-                text.draw_rect(row_x, ry, FOCUS_BAR_W, ROW_H, (*ACCENT, 1.0))
+                text.draw_rect(rx, ry, rw, ROW_H, (*BG2, 1.0))
+                text.draw_rect(rx, ry, 4, ROW_H, (*ACCENT, 1.0))
             if self._pending == name:
-                text.draw_rect(row_x, ry, inner_w, ROW_H, (*ACCENT, PRESS_FLASH_A))
+                text.draw_rect(rx, ry, rw, ROW_H, (*PRESS_FILL, 1.0))
             ty = ry + (ROW_H - body_lh) // 2
-            text.draw_text(row_x + PAD, ty, name, col)
-            self._hit_rects.append((i, (row_x, ry, row_x + inner_w, ry + ROW_H)))
+            tw = text.text_width(name)
+            text.draw_text(px + (END_PANEL_W - tw) // 2, ty, name, col)
+            self._hit_rects.append((i, (rx, ry, rx + rw, ry + ROW_H)))
             ry += ROW_H
 
-        # --- Footer ----------------------------------------------------------
-        fw = text.text_width(END_FOOTER, SMALL_SIZE)
-        text.draw_text((w - fw) // 2, py + panel_h + FOOTER_MARGIN,
-                       END_FOOTER, ACCENT_DIM, SMALL_SIZE)
-
+        # --- Hint bar ---------------------------------------------------------
+        draw_hint_bar(text, w, h, END_FOOTER)
         text.flush(w, h)
+
+    def _grade_plate(self, x, y, w, h, card) -> None:
+        """The family-tinted grade plate (mock 09 + widget sheet 08): 56pt
+        letter, verdict word, and the missed-axes caption.  S wears a flat
+        ring glow; D wears the shame treatment (deep red tint, inset ring,
+        blinking letter).  Flat rects + text only."""
+        text = self.text
+        g = card.grade or "-"
+        tint = GRADE_TINTS.get(g)
+        gcol = GRADE_COLS.get(g, TEXT_COL)
+        if tint is not None:
+            bg, border = tint
+            text.draw_rect(x, y, w, h, (*bg, 1.0))
+            text.draw_lines([(x, y), (x + w, y), (x + w, y + h), (x, y + h),
+                             (x, y)], (*border, 1.0), 1.0)
+        if g in ("S", "D"):
+            # Flat inset ring: S = achievement glow, D = the shame ring.
+            ring = OK_COL if g == "S" else DANGER
+            text.draw_lines([(x + 4, y + 4), (x + w - 4, y + 4),
+                             (x + w - 4, y + h - 4), (x + 4, y + h - 4),
+                             (x + 4, y + 4)], (*ring, 0.25), 2.0)
+        title_lh = text.line_height(TITLE_SIZE)
+        small_lh = text.line_height(SMALL_SIZE)
+        # D blinks its letter at ~1.2 Hz (presentation clock only).
+        visible = (g != "D") or (int(self._t * 2.4) % 2 == 0)
+        gw = text.text_width(g, TITLE_SIZE)
+        gy = y + max(10, (h - title_lh - 2 * small_lh - 18) // 2)
+        if visible:
+            text.draw_text(x + (w - gw) // 2, gy, g, gcol, TITLE_SIZE)
+        verdict = GRADE_VERDICTS.get(g, "")
+        if verdict:
+            vw = text.text_width(verdict, SMALL_SIZE)
+            text.draw_text(x + (w - vw) // 2, gy + title_lh + 6, verdict,
+                           (*gcol[:3], 0.75), SMALL_SIZE)
+        # Missed-axes caption, faint, up to two lines.
+        axes = failed_axes(card, self.par)
+        if axes:
+            line1 = " - ".join(axes[:2])
+            line2 = " - ".join(axes[2:4])
+            cy = gy + title_lh + 6 + small_lh + 8
+            for ln in (line1, line2):
+                if not ln:
+                    continue
+                lw = text.text_width(ln, SMALL_SIZE)
+                text.draw_text(x + (w - lw) // 2, cy, ln, FAINT, SMALL_SIZE)
+                cy += small_lh + 2
 
     # ------------------------------------------------------------------ public API
 
