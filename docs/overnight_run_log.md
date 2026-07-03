@@ -346,6 +346,22 @@ the map terrain palette (sea gradient / land tones per spec §2) is a
 render-level pass NOT done here (chrome/symbology only); mock 02 main-menu
 full restyle not separately implemented (token layer carries it).
 
+**Evening part 2 (user feedback round):** the radar-realism question was
+answered from code (detection = honest physics; IDENTIFICATION was free) and
+fixed per the user's directive: `2560c02` classification ladder
+(sim/contacts.py first_seen + classify() UNKNOWN->CLASSIFIED->IDENTIFIED,
+monotonic, IFF bypass; spec: docs/research/classification_spec.md) + Q5..Q1
+track quality + intel-panel re-key + UNK-gated INBOUND cards + one-shot
+'WARNING - NEW INBOUND CONTACT' + proto-03 coverage tally (interceptor_
+pairings, PAIRED/UNCOVERED, own-truth). 12 new tests; digest byte-identical.
+PROTOTYPE-FIRST workflow locked for the FORENSICS suite (M-map side-rail
+button, sim NEVER pauses, three views DEBRIEF/BLACK BOX/SENSORS — the
+SENSORS you-deduce view is the user's own concept): rebuilt as
+ui_prototypes/01{,b,c}_forensics_*.html + 02 v2 (vertical threat axis +
+numbered legend), self-rendered via headless Brave and visually iterated;
+renders in ui_prototypes/renders/. NO game code for the debrief until the
+user approves the HTML look.
+
 ## SESSION 2026-07-03 (daytime) — live-playtest bug burst + physics realism pass
 
 The user played; every report was a real engine bug (3/3):
