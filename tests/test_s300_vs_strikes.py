@@ -91,3 +91,43 @@ def test_s300_kills_a_sea_skimmer_passing_close_to_the_site():
     assert dist_base > 6_000.0, (
         "the kill must be the S-300's (beyond the Pantsir point-defense ring), "
         f"but the round died {dist_base / 1e3:.1f} km from the base")
+
+
+@pytest.mark.slow
+def test_pantsir_stops_an_on_target_tomahawk_salvo():
+    """The point-defense layer must actually DEFEND: an on-target 2-round
+    Tomahawk salvo dies to the Pantsir ring BEFORE reaching the base
+    structures.  REGRESSION: the multipath tracking error was a flat 60 m
+    regardless of range (an ANGLE error baked in at its 20 km calibration),
+    so the Pantsir at 3-8 km chased long-range noise with an 8 m fuse —
+    measured: a full 12-round magazine spent for ~one kill, one leaker
+    IMPACTING the base every time.  With the range-scaled error the salvo
+    dies 3+ km out (measured across seeds 1337/42/7)."""
+    from sim.strike import SPH_STRIKE_CRUISE
+
+    w = CombatWorld(CombatConfig(seed=1337))
+    base = np.array(BASE_POS, dtype=np.float64)
+    w.radar_station.emitting = False          # the live-playtest EMCON case
+    w._fire_tomahawk_salvo(dict(
+        target_pos=np.array([base[0], 0.0, base[2]]), target_id="probe"))
+    tlams = [m for m in w.missiles
+             if getattr(m, "weapon", None) is not None
+             and m.weapon.weapon_id == "tomahawk"]
+    for _ in range(int(120.0 / DT)):
+        w.step(DT)
+        if all(m.phase == SPH_STRIKE_CRUISE for m in tlams if m.alive):
+            break
+    for k, m in enumerate(tlams):
+        m.pos[0] = base[0] + k * 300.0
+        m.pos[2] = base[2] + 30_000.0
+    for _ in range(int(300.0 / DT)):
+        w.step(DT)
+        if not any(m.alive for m in tlams):
+            break
+    assert not any(m.alive for m in tlams), "the salvo must be stopped"
+    for m in tlams:
+        d = float(np.linalg.norm(np.asarray(m.pos) - base))
+        assert d > 2_000.0, (
+            f"a round died only {d:.0f} m from the base — the point-defense "
+            "ring must kill inbound strikes clear of the structures")
+    assert all(s.alive for s in w.structures), "no structure may be lost"

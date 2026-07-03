@@ -129,6 +129,15 @@ MID_GAIN = 2.2                 # 1/s of angle error
 # the player's S-300 vs aircraft is bit-identical to before.
 MULTIPATH_ALT_M = 150.0   # m: target altitude below which the error grows
 MULTIPATH_TAU_S = 0.5     # s: OU correlation time (multipath lobe flicker)
+# Multipath is an ANGLE error at the fire-control sensor: the sigma below is
+# calibrated AT the reference range (the "3 mrad at 20 km = 60 m" note), so
+# the meters of wander SHRINK as the tracking geometry closes (measured
+# 2026-07-03: the flat-60 m version made the Pantsir dump a 12-round
+# magazine at two 50 m Tomahawks for ~one kill — point defense at 5 km was
+# chasing 20 km worth of noise).  Scaled by sensor->target range over the
+# reference, capped at 1.0 so every engagement AT or beyond the reference
+# keeps the exact tuned behavior (the SM-2 duel bands).
+MULTIPATH_REF_RANGE_M = 20_000.0
 MULTIPATH_SIGMA_M = 60.0  # m: stationary per-axis RMS error at zero target
 #                           altitude (~3 mrad of low-elevation angle error
 #                           at 20 km — severe but documented multipath
@@ -221,6 +230,11 @@ class SamMissile:
         self.illuminator_pos_fn = illuminator_pos_fn
         # Multipath OU error state (m, world axes) — see MULTIPATH_* above.
         self._mp_x = self._mp_y = self._mp_z = 0.0
+        # Fire-control position for the multipath range scaling: the launch
+        # site (the tracking radar rides the launcher; SARH rounds override
+        # with the live illuminator each step).
+        self._fc_pos = (float(self.pos[0]), float(self.pos[1]),
+                        float(self.pos[2]))
         # Terminal lock state: next LOS re-check time, lock flag, and the
         # frozen guide point while masked (set at terminal handover).
         self._los_next_t = 0.0
@@ -303,6 +317,16 @@ class SamMissile:
         multipath region — no discontinuity at the threshold."""
         f = (MULTIPATH_ALT_M - float(self.target.pos[1])) / MULTIPATH_ALT_M
         sigma = MULTIPATH_SIGMA_M * min(max(f, 0.0), 1.0)
+        # Angle-error range scaling (see MULTIPATH_REF_RANGE_M): the sensor
+        # is the illuminating ship when one is wired (SARH), else the launch
+        # site (the fire-control radar rides the launcher).
+        ill = self.illuminator_pos_fn() if self.illuminator_pos_fn else None
+        fc = ill if ill is not None else self._fc_pos
+        tp0 = self.target.pos
+        srng = math.sqrt((float(tp0[0]) - float(fc[0])) ** 2
+                         + (float(tp0[1]) - float(fc[1])) ** 2
+                         + (float(tp0[2]) - float(fc[2])) ** 2)
+        sigma *= min(srng / MULTIPATH_REF_RANGE_M, 1.0)
         k = dt / MULTIPATH_TAU_S
         q = sigma * math.sqrt(2.0 * dt / MULTIPATH_TAU_S)
         rng = self.rng
