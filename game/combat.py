@@ -34,6 +34,7 @@ from __future__ import annotations
 from engine.mesh import Mesh
 from game.combat_end import CombatEndOverlay
 from game.controls import PLATFORMS_COMBAT, combat_platforms
+from game.flight_recorder import FlightRecorder
 from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
 from game.scoring import (
     compute_par, compute_scorecard, grade, new_telemetry,
@@ -126,6 +127,10 @@ class CombatState(SandboxState):
         # Player offensive rounds already counted as leakers (by id), so a round
         # is tallied ONCE the first time it enters its TERMINAL homing leg.
         self._leaker_seen: set[int] = set()
+        # Forensics path recorder (ACCURACY CONTRACT: exact per-tick positions
+        # at fixed sim-clock boundaries — the debrief plots 1:1 from this).
+        # Own rounds only; the sim never reads it (digest untouched).
+        self.flight_recorder = FlightRecorder()
 
     def _pantsir_ammo_total(self) -> int:
         """Pooled 57E6 rounds remaining across all Pantsir units (alive or
@@ -228,6 +233,8 @@ class CombatState(SandboxState):
                                             self._pantsir_engage_left - dt)
         self._pantsir_ammo_prev = ammo
         self._accumulate_telemetry()
+        # Exact fixed-step path sampling (this method runs once per PHYS_DT).
+        self.flight_recorder.update(self.world)
         self._check_end_state()
 
     # ------------------------------------------------------------- end screen
