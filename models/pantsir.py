@@ -109,7 +109,9 @@ RING_H    = 0.25   # m  height
 # for visual clarity; real Pantsir canisters angle ~0-10° in stowed position).
 # Blocks are offset ±X from the turret centre, at turret mid-height.
 # ---------------------------------------------------------------------------
-CAN_W = 0.32    # m  canister width/height (square cross-section)
+CAN_W = 0.38    # m  canister width/height (READABILITY: fattened from
+#                     the scale 0.32 so the 3x2 pack reads as tubes, not
+#                     a slatted slab, at gameplay distance)
 CAN_L = 3.20    # m  canister length
 
 # 3 rows (stacked vertically), 2 columns (fore-aft)
@@ -119,12 +121,15 @@ CAN_COL_DZ = CAN_L * 0.52    # fore-aft spacing centre-to-centre
 CAN_ROW_DY = CAN_W + 0.04    # vertical pitch
 
 # Block centre position relative to turret centre
-BLOCK_X    = TURRET_W * 0.5 + 0.05   # flush with / just outside the turret face
+BLOCK_X    = TURRET_W * 0.5 + 0.45   # stand-off: the packs must read as
+#                     SEPARATE angled blocks flanking the turret (flush
+#                     mounting merged them into the box — orbit critique)
 BLOCK_Y    = TURRET_Y + TURRET_H * 0.55   # roughly mid-height of the turret box
 BLOCK_Z    = TURRET_Z + 0.10
 
 # Slight upward elevation angle for canisters (cosmetic "ready" look)
-CAN_ELEV   = math.radians(8.0)   # 8° tip-up about ±X axis
+CAN_ELEV   = math.radians(20.0)  # cocked-up ready look — the real packs
+#                     sit visibly angled; 8 deg read as horizontal
 
 # Rail frame connecting the block to the turret (thin boxy strut each side)
 RAIL_W = TURRET_W * 0.5 + BLOCK_X + CAN_L * 0.2
@@ -136,8 +141,10 @@ RAIL_L = 0.25
 # Mounted at the outer/lower edge of the turret box, one barrel per "horn".
 # Real 2A38M: ~2.4 m barrel exposed, 30 mm bore.
 # ---------------------------------------------------------------------------
-BARREL_R   = 0.040   # m  radius (30 mm bore → ~80 mm OD with jacket)
-BARREL_L   = 2.50    # m  exposed barrel length
+BARREL_R   = 0.095   # m  radius (READABILITY: ~2.4x the scale jacket —
+#                     a 4 cm cylinder is subpixel at gameplay distance;
+#                     the twin gun horns are a Pantsir signature)
+BARREL_L   = 3.10    # m  exposed barrel length (slightly stretched)
 # Small gun housing box (autoloader drum behind the barrel)
 GUN_BOX    = (0.35, 0.38, 0.45)
 # Position (relative to origin): below the canister block, outboard of turret
@@ -149,9 +156,9 @@ BARREL_Z   = TURRET_Z + BARREL_L * 0.5 + 0.30  # tips point forward
 # Tracking radar (flat phased-array plate on turret front face)
 # 1E20 array ~0.8 × 0.8 m, 0.10 m thick, flush-mounted on the +Z face.
 # ---------------------------------------------------------------------------
-TRACK_W   = 0.82   # m
-TRACK_H   = 0.82   # m
-TRACK_T   = 0.10   # m  depth / thickness
+TRACK_W   = 0.95   # m
+TRACK_H   = 0.95   # m
+TRACK_T   = 0.18   # m  depth (stands PROUD of the face; flush was invisible)
 TRACK_Y   = TURRET_Y + TURRET_H * 0.55   # centred on the turret face
 TRACK_Z   = TURRET_Z + TURRET_L * 0.5 + TRACK_T * 0.5   # proud of the face
 

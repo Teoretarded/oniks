@@ -116,8 +116,9 @@ def _vls_field(b: MeshBuilder, z_center: float, cells: int,
     cells=32 → one 4×8 block; cells=64 → two 4×8 blocks side by side.
     Each block is 5 m wide × 8.5 m long, 0.4 m proud of the deck.
     """
-    panel_h = 0.4
-    panel_color = _DECK
+    panel_h = 0.5
+    panel_color = PALETTE["aircraft_dark"]   # cell field reads as a dark grid
+    #             inset (deck-tone made both fields invisible)
     if cells == 32:
         b.add_mesh(make_box(
             (5.0, panel_h, 8.5), panel_color,
@@ -136,18 +137,20 @@ def _gun_turret(b: MeshBuilder, deck_y: float) -> None:
     z_gun = 62.0  # fwd on forecastle
     barbette_y = deck_y + 0.9
     # barbette drum
-    b.add_mesh(make_cylinder(1.8, 1.8, 16, _SS, axis="y",
+    b.add_mesh(make_cylinder(2.2, 1.8, 16, _SS, axis="y",
                              offset=(0.0, barbette_y, z_gun)))
-    # gun shield (boxy shroud)
+    # gun shield (boxy shroud; READABILITY: scaled up ~1.4x — the stock
+    # 3.2 m box vanished at gameplay distance)
     b.add_mesh(make_box(
-        (3.2, 2.0, 3.6), _SS,
-        offset=(0.0, barbette_y + 1.0 + 1.0, z_gun),
+        (4.4, 2.8, 5.0), PALETTE["haze_gray_dark"],
+        offset=(0.0, barbette_y + 1.0 + 1.4, z_gun),
     ))
-    # gun barrel: thin cylinder angled up 5°
+    # gun barrel: fattened so it exists at distance (same doctrine as the
+    # Pantsir gun horns)
     b.add_mesh(
-        make_cylinder(0.18, 9.0, 8, _SS, axis="z"),
+        make_cylinder(0.30, 10.0, 8, PALETTE["haze_gray_dark"], axis="z"),
         rotation=rot_x(-math.radians(5.0)),
-        offset=(0.0, barbette_y + 2.5, z_gun + 2.5),
+        offset=(0.0, barbette_y + 2.9, z_gun + 3.0),
     )
 
 
@@ -198,9 +201,12 @@ def _superstructure(b: MeshBuilder, deck_y: float) -> None:
     panel_t   = 0.25  # thickness
     panel_y   = blk1_bot + blk1_h * 0.55
     panel_z   = blk1_z
-    panel_r   = 8.0   # radial offset from centreline to panel face
+    panel_r   = 10.3  # radial offset — MUST clear the deckhouse volume
+    #                 (8.0 * sin45 = 5.66 m sat INSIDE the 14 m-wide box: the
+    #                  panels were swallowed and invisible — orbit critique)
 
-    spy_color = PALETTE["haze_gray"]
+    spy_color = PALETTE["aircraft_dark"]  # the arrays read DARKER than the
+    #                 haze-gray house on the real ship; same tone = invisible
     # The SPY panels on an Arleigh Burke are on the four oblique faces of the
     # octagonal deckhouse.  We place them at ±45° from the ship's axis, tilted
     # 20° from vertical (leaning outboard/upward).
@@ -229,7 +235,7 @@ def _mast(b: MeshBuilder, deck_y: float) -> None:
     # main column, raked aft 5°
     col_h = 14.0
     b.add_mesh(
-        make_cylinder(0.3, col_h, 10, _SS, axis="y"),
+        make_cylinder(0.55, col_h, 10, PALETTE["haze_gray_dark"], axis="y"),
         rotation=rot_x(math.radians(5.0)),   # lean aft
         offset=(0.0, mast_base_y + col_h * 0.5, mast_z),
     )
