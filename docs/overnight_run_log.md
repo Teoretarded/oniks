@@ -294,6 +294,58 @@ CAMPAIGN from the main menu for the meta-loop. Balance flags: PAR rewards
 passivity (500 s of nothing = B), swarm launch range 25 vs 40 km design,
 back-plot buff feel, rear-band transports ~324 min sim transit.
 
+## SESSION 2026-07-03 (evening) — "Wardroom Dusk" UI implementation + prototype research (Fable 5, lean mode)
+
+**Headline:** the approved Claude-Design direction ("Wardroom Dusk", handoff
+pack extracted to `Assets of oinks/ui_design/handoff/` — spec + 10 mocks) is
+now IN THE GAME across every surface, in 7 render-only commits, with the sim
+digest byte-identical through all of them (`7d5716...06add`) and the fog color
+LAW strengthened (belief teal / own green / hostile dusk-red / brass =
+selection+weapons only). Plus 4 standalone HTML prototypes for the NEXT
+design round in `Assets of oinks/ui_prototypes/` (research-cited, not wired
+into the game).
+
+Commits (oldest first): `cab83bc` A1 token layer (palette port, plate/brass/
+hint chrome, BELIEF teal for estimates, brass locked-target bracket) ->
+`5b35ce4` A2 setup grouped plates (2-col grid, chip headers, boxed tab rail,
+brass START key) -> `2dbb62e` A3 AAR grade plate + VALUE-vs-PAR table (real
+compute_par bar per row; mock's fake ROUNDS-PAR + wrong LEAK/BACK-PLOT
+directions corrected; D-shame + S-glow) -> `0f0bbf7` A4 campaign hub (ladder
+chips, ledger bars, intel plate + DERIVED escalation caption; mock's false
+'NO RESUPPLY' copy corrected) -> `38d62b0` A5 battle HUD (platform plate w/
+status badge + tube boxes + in-plate EMCON, ink .93 calibration, INBOUND
+ranked cards w/ TTI drain bars, clock chip, CAM chip; banned 'S-300 ASSIGNED'
+dropped) -> `29a1554` A6 map symbology recolor (+ fixed pre-existing
+miscolor: friendly radar stations drew in enemy red) -> `b6ff789` F1 overlay
+two-column (one-column had outgrown 1080p).
+
+**Gates (every commit):** targeted tests + smoke_combat 84 PASS exit 0 +
+digest byte-identical + screenshots regenerated (tools/shoot_ui_reference.py)
+and orchestrator-reviewed against the mocks. Honest test updates where the
+DESIGN changed (ledger tuple shape, EMCON-in-plate containment regression);
+no logic assertion weakened.
+
+**Full suite (pytest -q -n auto): ONE real failure, PRE-EXISTING, not UI:**
+`test_pantsir_model.py::test_width_approx_3m` — the morning model-readability
+pass (1e912d6) moved the Pantsir canister packs outboard to 3.89 m vs the
+3.0 m ±20% reference pin (real vehicle ≈3.13 m). Filed as a spawn-task chip;
+needs a canister-offset re-tune, NOT a tolerance bump. (4 other pytest-cache
+entries were stale IDs from deleted tests; the phase5b flake passed this run.)
+
+**Task B — prototypes for the next Claude-Design round** (each header
+carries idea/sources/data-status; README.md summarizes):
+01 shot-debrief card (why each round died; needs a per-round event log),
+02 engagement-envelope bands + DLZ bracket (probe-measured bands exist),
+03 threat-priority stack w/ real NTDS engagement modifiers (honest TODAY:
+   own-interceptor pairing is own-truth), 04 sensor-confidence Q5..Q1 ladder
+(pure display mapping over existing confidence data).
+
+**Known nits (honest):** letter-tracking + the U+25B8/middot glyphs are
+un-renderable on the fixed ASCII atlas (spaced/ASCII stand-ins used);
+the map terrain palette (sea gradient / land tones per spec §2) is a
+render-level pass NOT done here (chrome/symbology only); mock 02 main-menu
+full restyle not separately implemented (token layer carries it).
+
 ## SESSION 2026-07-03 (daytime) — live-playtest bug burst + physics realism pass
 
 The user played; every report was a real engine bug (3/3):
