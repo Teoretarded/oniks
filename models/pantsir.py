@@ -147,8 +147,12 @@ BARREL_R   = 0.095   # m  radius (READABILITY: ~2.4x the scale jacket —
 BARREL_L   = 3.10    # m  exposed barrel length (slightly stretched)
 # Small gun housing box (autoloader drum behind the barrel)
 GUN_BOX    = (0.35, 0.38, 0.45)
-# Position (relative to origin): below the canister block, outboard of turret
-BARREL_X   = BLOCK_X + CAN_W * 0.5 + 0.08   # beyond canister block outer face
+# Position (relative to origin): directly BENEATH the canister block (the
+# real 2A38M horns sit under/inboard of the missile packs).  Mounting them
+# OUTBOARD of the packs pushed the hull bbox to 3.89 m — 30% over the 3.0 m
+# width contract (tests/test_pantsir_model.py); under the packs the widest
+# geometry is the canister retention rings (±1.71 m -> 3.42 m, in band).
+BARREL_X   = BLOCK_X                        # centred under the canister block
 BARREL_Y   = TURRET_Y + 0.60                 # low on the turret, above deck
 BARREL_Z   = TURRET_Z + BARREL_L * 0.5 + 0.30  # tips point forward
 
