@@ -2715,7 +2715,12 @@ class CombatWorld(WorldState):
             new = f.release_weapons(self.missiles, bases=self.air_bases)
             if not new:
                 continue
-            rec = next((mi for mi in self._cmd_missions
+            # NEWEST-first: a rearmed jet re-tasked while its previous
+            # mission's rounds are still flying is in TWO open missions;
+            # first-match booked the release to the OLD one, so the new
+            # mission completed with released==0 and its HARM BDA
+            # (mark_emitter_destroyed) never fired.
+            rec = next((mi for mi in reversed(self._cmd_missions)
                         if f in mi["fighters"]), None)
             if rec is not None:
                 rec["missiles"].extend(new)
@@ -2846,6 +2851,12 @@ class CombatWorld(WorldState):
             kstructs = structs_by_kind.get(kind, [])
             for i, lpos in enumerate(positions):
                 my_tubes = tubes[i * per:(i + 1) * per]
+                # A Buk TEL carries its 9S36 fire-control radar ON the
+                # vehicle: pair it into the descriptor so a relocate moves
+                # the radar with the TEL (it used to stay at the old pad).
+                radar = (self._buk_radars[i]
+                         if kind == "buk_tel" and i < len(self._buk_radars)
+                         else None)
                 # Mouth offset of each tube from THIS launcher's current pad
                 # (the pads are still the originals here, so the offset is exact;
                 # re-pinning tube pos = moved pad + offset reproduces the geometry
@@ -2860,6 +2871,7 @@ class CombatWorld(WorldState):
                     "tubes": my_tubes,
                     "offsets": offsets,
                     "structure": struct,
+                    "radar": radar,           # on-vehicle radar, or None
                     # relocate state — DEFAULT IDLE (byte-identical no-op)
                     "dest": None,             # (2,) target xz, or None
                     "committed": False,
@@ -2981,6 +2993,14 @@ class CombatWorld(WorldState):
                 t["committed"] = False        # re-arm this launcher's tube
             if struct is not None:
                 struct.pos = pad.copy()       # OBB recomputes from .pos per query
+            radar = d.get("radar")
+            if radar is not None and getattr(radar, "alive", True):
+                # The 9S36 rides ON the Buk TEL: move it with the vehicle so
+                # its coverage (and the emitter the enemy back-plots) tracks
+                # the new pad instead of haunting the old one.
+                radar.pos[0] = pad[0]
+                radar.pos[1] = pad[1]
+                radar.pos[2] = pad[2]
             d["committed"] = False
             d["dest"] = None
 

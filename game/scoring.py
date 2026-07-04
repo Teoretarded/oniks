@@ -52,13 +52,18 @@ def new_telemetry() -> dict:
     The shell mutates this in ``sim_step``:
       * ``rounds_fired`` += 1 on each player round that actually launched
         (a non-None return from request_launch / _request_sam_launch / salvo).
-      * ``leakers``      += 1 when a player round reaches terminal/hit
-        (the go-low payoff: rounds that got through to their target).
+      * ``offensive_fired`` += 1 for the OFFENSIVE subset (Oniks/Zircon/
+        swarm cruise rounds — not SAM intercepts): the leak-rate denominator.
+        A SAM shot can never "leak", so mixing it into the denominator
+        diluted the go-low merit every time the player defended themselves.
+      * ``leakers``      += 1 when a player OFFENSIVE round reaches
+        terminal/hit (the go-low payoff: rounds that got through).
       * ``first_fix_t``  latched (once) to ``world.sim_time`` the first time the
         PLAYER contact picture holds an enemy surface contact (recon->fire
         opening move).  Stays ``None`` if the enemy was never fixed.
     """
-    return {"rounds_fired": 0, "leakers": 0, "first_fix_t": None}
+    return {"rounds_fired": 0, "offensive_fired": 0, "leakers": 0,
+            "first_fix_t": None}
 
 
 def picture_has_actionable_contact(world) -> bool:
@@ -207,7 +212,12 @@ def compute_scorecard(world, telemetry: dict) -> ScoreCard:
     first_fix_t = telemetry.get("first_fix_t", None)
 
     efficiency = (kills / rounds_fired) if rounds_fired > 0 else 0.0
-    leak_rate = (leakers / rounds_fired) if rounds_fired > 0 else 0.0
+    # Leak rate is offensive-round arithmetic: leakers counts only offensive
+    # rounds, so the denominator must too (a legacy telemetry dict without
+    # the key falls back to rounds_fired — the historical behaviour).
+    offensive = telemetry.get("offensive_fired")
+    leak_denom = int(offensive) if offensive is not None else rounds_fired
+    leak_rate = (leakers / leak_denom) if leak_denom > 0 else 0.0
 
     # ---- back-plot (enemy belief, fog-honest) ---------------------------
     was_back_plotted = _read_back_plotted(world)

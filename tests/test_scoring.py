@@ -153,6 +153,7 @@ def test_perfect_world_grades_S():
     world = _perfect_world()
     tel = new_telemetry()
     tel["rounds_fired"] = 4
+    tel["offensive_fired"] = 4
     tel["kills"] = 6                # bookkeeping; compute_scorecard recomputes
     tel["leakers"] = 4
     tel["first_fix_t"] = 120.0     # early recon
@@ -165,6 +166,7 @@ def test_bad_world_grades_D():
     world = _bad_world()
     tel = new_telemetry()
     tel["rounds_fired"] = 30
+    tel["offensive_fired"] = 30
     tel["leakers"] = 2
     tel["first_fix_t"] = 1800.0    # found the enemy very late
     card = compute_scorecard(world, tel)
@@ -238,6 +240,7 @@ def test_leak_rate_and_efficiency_match_hand_values():
     world = _bad_world()                # 0 enemy ships dead (all alive)
     tel = new_telemetry()
     tel["rounds_fired"] = 10
+    tel["offensive_fired"] = 10
     tel["leakers"] = 4
     card = compute_scorecard(world, tel)
     # leak_rate = leakers / rounds_fired = 4 / 10
@@ -252,6 +255,7 @@ def test_efficiency_counts_all_enemy_assets():
     world = _perfect_world()
     tel = new_telemetry()
     tel["rounds_fired"] = 4
+    tel["offensive_fired"] = 4
     card = compute_scorecard(world, tel)
     assert card.kills == 6
     assert card.efficiency == pytest.approx(6.0 / 4.0)
@@ -414,6 +418,7 @@ def _graded_card():
     world = _perfect_world()
     tel = new_telemetry()
     tel["rounds_fired"] = 4
+    tel["offensive_fired"] = 4
     tel["leakers"] = 4
     tel["first_fix_t"] = 120.0
     card = compute_scorecard(world, tel)

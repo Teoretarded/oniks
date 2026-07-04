@@ -535,7 +535,11 @@ class TacticalMap:
         self.selected_missile = None         # own round LMB-selected (RTG)
         self.selected_emitter = None         # emitter_id the ARM targets (M2-T4)
         self._panning = False
-        self._trails: dict[int, list] = {}   # id(missile) -> [(x, z), ...]
+        # id(missile) -> (missile, [(x, z), ...]).  The STRONG missile ref
+        # pins the object so CPython can never hand a new round the same
+        # id() while its trail lives — without it a dead round's trail could
+        # graft onto a freshly-allocated missile (id reuse).
+        self._trails: dict[int, tuple] = {}
 
         self.shader = Shader(MAP_VERT, MAP_FRAG)
         self.tex = 0                         # terrain texture: first open
@@ -563,7 +567,11 @@ class TacticalMap:
                 continue
             key = id(m)
             live.add(key)
-            trail = self._trails.setdefault(key, [])
+            entry = self._trails.get(key)
+            if entry is None or entry[0] is not m:
+                entry = (m, [])
+                self._trails[key] = entry
+            trail = entry[1]
             p = (float(m.pos[0]), float(m.pos[2]))
             if (not trail or math.hypot(p[0] - trail[-1][0],
                                         p[1] - trail[-1][1]) >= TRAIL_SPACING_M):
@@ -1103,13 +1111,22 @@ class TacticalMap:
 
     def _seeker_cone(self) -> None:
         """Seeker-basket preview: the acquisition wedge the missile sweeps
-        approaching the target point along the final route leg. Oniks only —
-        an air target has no surface acquisition basket."""
+        approaching the target point along the final route leg — drawn from
+        the SELECTED round's own seeker (Zircon 60 km/30 deg, swarm
+        12 km/40 deg...); it was hardcoded to the Oniks wedge, so the player
+        planned final legs against a basket the round didn't have.  An air
+        target has no surface acquisition basket."""
         sandbox = self.sandbox
         tp = sandbox.target_point
         if tp is None or self._selected_is_air():
             return
-        weapon = ONIKS
+        from sim.arsenal import SWARM, ZIRCON
+        if sandbox.active_platform == "swarm":
+            weapon = SWARM
+        elif getattr(sandbox, "oniks_weapon", "oniks") == "zircon":
+            weapon = ZIRCON
+        else:
+            weapon = ONIKS      # oniks; asbm/kh31p keep the legacy preview
         tx, tz = float(tp[0]), float(tp[2])
         ox, oz = (sandbox.waypoints[-1] if sandbox.waypoints
                   else (BASE_POS[0], BASE_POS[2]))
@@ -1174,7 +1191,7 @@ class TacticalMap:
         for m in self.sandbox.world.missiles:
             if getattr(m, "is_hostile", False):
                 continue        # fog of war: hostile rounds show as contacts
-            for tx, tz in self._trails.get(id(m), ()):
+            for tx, tz in self._trails.get(id(m), (None, ()))[1]:
                 sx, sy = self.view.world_to_screen((tx, tz))
                 if self._on_screen(sx, sy, pad=2.0):
                     self.text.draw_rect(sx - t * 0.5, sy - t * 0.5, t, t,

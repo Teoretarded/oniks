@@ -165,3 +165,111 @@ def test_drone_waypoint_inside_turn_circle_is_captured():
         if drone._loitering or drone._wp_idx >= 1:
             break
     assert drone._wp_idx >= 1, "close-abeam waypoint must be captured"
+
+
+# --- second wave: fog / scoring / UI-contract fixes --------------------------------
+
+def test_killer_observed_for_launch_warning_round():
+    """A launch-warning killer (enemy SM-2/AIM-9X) is on the player picture
+    its whole flight: observed by construction, even though its track was
+    dropped the same step it died (the old lookup always missed)."""
+    from game.flight_recorder import FlightRecorder
+
+    class _Sam:
+        launch_warning = True
+        aircraft_id = "sm2_00"
+
+    class _World:
+        contacts = None
+
+    assert FlightRecorder._killer_observed(_Sam(), _World())
+
+
+def test_tally_hides_unobserved_loss_class_mid_battle():
+    from game.forensics import tally
+    recs = [{"cause": {"code": "sam", "detail": "sm2", "observed": False}}]
+    mid = tally(recs, battle_over=False)
+    assert mid["intercepted"] == 0          # class not leaked mid-battle
+    assert mid["unconfirmed"] == 1
+    post = tally(recs, battle_over=True)
+    assert post["intercepted"] == 1         # post-battle reconstruction
+
+
+def test_leak_rate_uses_offensive_denominator():
+    from game.scoring import compute_scorecard, new_telemetry
+
+    class _W:
+        ships = []
+        structures = []
+        enemy_radars = []
+        airfield = None
+        victorious = False
+        commander = None
+
+    tel = new_telemetry()
+    tel["rounds_fired"] = 10                # 6 SAM shots + 4 Oniks
+    tel["offensive_fired"] = 4
+    tel["leakers"] = 4
+    card = compute_scorecard(_W(), tel)
+    assert card.leak_rate == 1.0            # 4-of-4 offensive got through
+
+
+def test_ready_tube_count_bounds_by_selected_round_pool():
+    from game.salvo import ready_tube_count
+
+    class _W:
+        _s300_tubes = [{"reload_left": 0.0} for _ in range(4)]
+        sam_ammo = 0
+        sam_ammo_40n6 = 3
+
+    assert ready_tube_count(_W(), "s300", sam_round="40n6") == 3
+    assert ready_tube_count(_W(), "s300", sam_round="48n6") == 0
+
+
+def test_salvo_rounds_carry_the_plotted_waypoints():
+    from game.salvo import SalvoQueue
+
+    class _W:
+        def __init__(self):
+            self.calls = []
+
+        def launch(self, profile, aim, waypoints=(), weapon_id="oniks"):
+            self.calls.append(tuple(waypoints))
+            return object()
+
+    w = _W()
+    q = SalvoQueue()
+    q.start("bastion", count=2, target_point=(0.0, 0.0, 1_000.0),
+            waypoints=((5_000.0, 5_000.0),))
+    q.tick(10.0, w)                          # both beats fall due
+    assert w.calls
+    assert all(c == ((5_000.0, 5_000.0),) for c in w.calls)
+
+
+def test_rebind_from_unbound_row_never_silently_unbinds(tmp_path):
+    import pygame
+    from game.keybinds import Keybinds, RESERVED_KEYS, _DEFS
+    kb = Keybinds(str(tmp_path / "settings.json"))
+    used = ({k for k in kb.keys.values() if k is not None}
+            | set(RESERVED_KEYS))
+    free = next(k for k in (pygame.K_F7, pygame.K_F8, pygame.K_F9,
+                            pygame.K_SEMICOLON, pygame.K_QUOTE)
+                if k not in used)
+    b = "map"
+    assert kb.rebind(b, free)                # move b OFF its default
+    a = "launch"
+    kb.keys[a] = None                        # an unbound row
+    assert kb.rebind(a, free)                # a takes b's key
+    assert kb.keys[a] == free
+    # b fell back to its now-free default instead of a silent None unbind.
+    assert kb.keys[b] == _DEFS[b].default
+
+
+def test_unbound_row_persists_across_reload(tmp_path):
+    from game.keybinds import Keybinds
+    path = str(tmp_path / "settings.json")
+    kb = Keybinds(path)
+    kb.keys["screenshot"] = None
+    kb.save()
+    kb2 = Keybinds(path)
+    assert kb2.keys["screenshot"] is None

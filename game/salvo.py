@@ -87,7 +87,7 @@ FAN_TAG = 17
 
 # --- Pure helpers -------------------------------------------------------------
 
-def ready_tube_count(world, platform: str) -> int:
+def ready_tube_count(world, platform: str, sam_round: str = "48n6") -> int:
     """Number of READY (loaded + re-cocked) tubes for ``platform`` — the size
     of the salvo the player can fire RIGHT NOW.
 
@@ -107,7 +107,10 @@ def ready_tube_count(world, platform: str) -> int:
         recocked = sum(1 for t in tubes
                        if t.get("reload_left", 0.0) <= 0.0
                        and not t.get("committed") and not t.get("dead"))
-        return min(recocked, max(0, int(getattr(world, "sam_ammo", 0))))
+        # Bound by the SELECTED round's pool — bounding a 40N6 salvo by the
+        # 48N6 stock mis-sized the ripple whenever the pools diverged.
+        pool_attr = "sam_ammo_40n6" if sam_round == "40n6" else "sam_ammo"
+        return min(recocked, max(0, int(getattr(world, pool_attr, 0))))
     tubes = getattr(world, "_oniks_tubes", None)
     if not tubes:
         return 0
@@ -185,6 +188,7 @@ class SalvoQueue:
         self.target_id = None          # air track id (s300)
         self.round_id = "48n6"
         self.weapon_id = "oniks"
+        self.waypoints = ()            # planned route (bastion rounds 2..N)
         self._seed = 0
         self._ordinal = 0              # rounds already fired this salvo (FAN)
         self._offsets = None           # per-round launch offsets (TOT); else None
@@ -194,7 +198,8 @@ class SalvoQueue:
     def start(self, platform: str, *, mode: str = "ripple", count: int,
               interval: float = RIPPLE_INTERVAL_S, profile: str = "hi-lo",
               target_point=None, target_id=None, round_id: str = "48n6",
-              weapon_id: str = "oniks", seed: int = 0, offsets=None) -> bool:
+              weapon_id: str = "oniks", seed: int = 0, offsets=None,
+              waypoints=()) -> bool:
         """Arm a salvo of ``count`` rounds on ``platform``.  Returns False (and
         does not arm) when there is nothing to fire (count <= 0).  ``offsets``,
         when given (TOT), are the per-round launch delays from :func:`tot_delays`
@@ -220,6 +225,7 @@ class SalvoQueue:
         self.target_id = target_id
         self.round_id = round_id
         self.weapon_id = weapon_id
+        self.waypoints = tuple(waypoints)
         self._seed = int(seed)
         self._offsets = (sorted(float(o) for o in offsets)
                          if offsets is not None else None)
@@ -281,4 +287,8 @@ class SalvoQueue:
         aim = self.target_point
         if self.mode == "fan":
             aim = self.target_point + fan_offset(self._seed, ordinal)
-        return world.launch(self.profile, aim, weapon_id=self.weapon_id)
+        # Rounds 2..N fly the SAME plotted route as the first (they used to
+        # launch with waypoints=() and fly straight into whatever picket the
+        # player had routed around).
+        return world.launch(self.profile, aim, waypoints=self.waypoints,
+                            weapon_id=self.weapon_id)

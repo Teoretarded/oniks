@@ -230,10 +230,22 @@ class Keybinds:
         if other == action_id:
             return True                       # no-op: already bound
         if other is not None:
-            self.keys[other] = self.keys[action_id]
+            self.keys[other] = self._displaced_key(action_id, other)
         self.keys[action_id] = key
         self.save()
         return True
+
+    def _displaced_key(self, action_id: str, other: str) -> int | None:
+        """The key ``other`` receives when ``action_id`` takes its key.
+        Normally the plain swap (this action's old key) — but when the old
+        key is None (an UNBOUND row), a bare swap silently unbound ``other``
+        in violation of the injective-swap contract; fall back to ``other``'s
+        default when that key is free, else honestly None."""
+        old = self.keys[action_id]
+        if old is not None:
+            return old
+        default = _DEFS[other].default
+        return default if self.action_for(default) is None else None
 
     def reset_row(self, action_id: str) -> None:
         """R on a settings row: back to the default, swapping with whoever
@@ -243,7 +255,7 @@ class Keybinds:
             return
         other = self.action_for(default)
         if other is not None and other != action_id:
-            self.keys[other] = self.keys[action_id]
+            self.keys[other] = self._displaced_key(action_id, other)
         self.keys[action_id] = default
         self.save()
 
@@ -273,7 +285,11 @@ class Keybinds:
             return
         wanted: dict[str, int | None] = {}
         for a in ACTIONS:                     # unknown ids simply ignored
-            key = _key_from_value(bindings.get(a.id))
+            raw = bindings.get(a.id)
+            if raw == "UNBOUND" and not a.reserved:
+                wanted[a.id] = None           # an explicit unbind persists
+                continue
+            key = _key_from_value(raw)
             if a.reserved or key is None or key in RESERVED_KEYS:
                 key = a.default               # reserved rows stay pinned
             wanted[a.id] = key
@@ -287,8 +303,12 @@ class Keybinds:
             self.keys[a.id] = key
 
     def save(self) -> None:
-        bindings = {aid: pygame.key.name(k)
-                    for aid, k in self.keys.items() if k is not None}
+        # An unbound row is written as the explicit "UNBOUND" sentinel —
+        # omitting it made the row silently revert to its default on the
+        # next launch (older loaders read the sentinel as a bad value and
+        # fall back to the default, so the file stays backward-compatible).
+        bindings = {aid: (pygame.key.name(k) if k is not None else "UNBOUND")
+                    for aid, k in self.keys.items()}
         payload = {"version": SETTINGS_VERSION, "bindings": bindings}
         directory = os.path.dirname(self.path)
         if directory:

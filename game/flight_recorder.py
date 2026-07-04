@@ -170,6 +170,14 @@ class FlightRecorder:
         same fixed step the death is recorded — at most one tick late)."""
         if killer is None:
             return False
+        # A LAUNCH-WARNING round (enemy SM-2 / AIM-9X) is injected into the
+        # player picture the INSTANT it fires and stays there its whole
+        # flight — but its track is dropped the same world.step it dies, so
+        # the at-kill-time lookup below ALWAYS missed it and every SAM/A2A
+        # kill closed as unobserved.  The player watched that interceptor
+        # the entire engagement: it is observed by construction.
+        if getattr(killer, "launch_warning", False):
+            return True
         kid = getattr(killer, "aircraft_id", None)
         if kid is None:
             kid = getattr(killer, "ship_id", None)

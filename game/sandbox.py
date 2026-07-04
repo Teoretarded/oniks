@@ -1022,7 +1022,8 @@ class SandboxState(GameState):
             # queued bastion beats call world.launch, which knows no "kh31p"
             # and silently fired ONIKS rounds at the stale surface aim point.
             return self.request_launch()
-        ready = ready_tube_count(self.world, platform)
+        ready = ready_tube_count(self.world, platform,
+                                 sam_round=getattr(self, "sam_round", "48n6"))
         if ready <= 0:
             # Let request_launch surface the precise empty/reload/no-target hint.
             self.request_launch()
@@ -1070,7 +1071,7 @@ class SandboxState(GameState):
             "bastion", mode=self.salvo_mode, count=remaining,
             interval=RIPPLE_INTERVAL_S, profile=self.profile,
             target_point=self.target_point, weapon_id=self.oniks_weapon,
-            seed=seed, offsets=offsets)
+            seed=seed, offsets=offsets, waypoints=tuple(self.waypoints))
 
     def _tick_salvo(self, dt: float) -> None:
         """Advance the salvo BEFORE world.step so a due round enters this frame.
@@ -1096,7 +1097,12 @@ class SandboxState(GameState):
         (no flame until the hang-apex ignition)."""
         self.followed = m
         self.rig.retarget()
-        if isinstance(m, SamMissile):
+        # AsbmMissile subclasses SamMissile for the flight machine but fires
+        # from the Bastion battery — a hot muzzle launch like the docstring
+        # says, not the S-300 cold puff (the bare isinstance routed a
+        # salvo-queued ASBM to the wrong presentation).
+        from sim.asbm import AsbmMissile
+        if isinstance(m, SamMissile) and not isinstance(m, AsbmMissile):
             self._launch_puff(m.pos)
             self._spawn_cover_debris(m.pos)
             self.app.audio.play("launch", pos=m.pos)

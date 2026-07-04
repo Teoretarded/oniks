@@ -177,6 +177,8 @@ class CombatState(SandboxState):
         m = super().request_launch()
         if m is not None:
             self._telemetry["rounds_fired"] += 1
+            if self._is_player_offensive(m):
+                self._telemetry["offensive_fired"] += 1
         return m
 
     # NOTE: _request_sam_launch is deliberately NOT overridden with a counter:
@@ -196,6 +198,7 @@ class CombatState(SandboxState):
         extra = len(self._player_round_ids() - before) - 1
         if extra > 0:
             self._telemetry["rounds_fired"] += extra
+            self._telemetry["offensive_fired"] += extra  # cruise rounds all
         return m
 
     def _tick_salvo(self, dt: float) -> None:
@@ -208,8 +211,12 @@ class CombatState(SandboxState):
         there, not here (it was launched before this tick's diff window)."""
         before = self._player_round_ids()
         super()._tick_salvo(dt)
-        after = self._player_round_ids()
-        self._telemetry["rounds_fired"] += len(after - before)
+        added = [m for m in getattr(self.world, "missiles", ())
+                 if not getattr(m, "is_hostile", False)
+                 and id(m) not in before]
+        self._telemetry["rounds_fired"] += len(added)
+        self._telemetry["offensive_fired"] += sum(
+            1 for m in added if self._is_player_offensive(m))
 
     def _player_round_ids(self) -> set:
         """Ids of the player's OWN live rounds currently in ``world.missiles``
@@ -250,9 +257,6 @@ class CombatState(SandboxState):
         ammo = self._pantsir_ammo_total()
         if ammo < self._pantsir_ammo_prev:
             self._pantsir_engage_left = PANTSIR_ENGAGE_FLASH_S
-        elif self._pantsir_engage_left > 0.0:
-            self._pantsir_engage_left = max(0.0,
-                                            self._pantsir_engage_left - dt)
         self._pantsir_ammo_prev = ammo
         self._accumulate_telemetry()
         # Exact fixed-step path sampling (this method runs once per PHYS_DT).
@@ -397,6 +401,12 @@ class CombatState(SandboxState):
         The forensics ledger outranks both branches (it opens over the map
         AND over the AAR); the map screen gains the side-rail DEBRIEF
         button, drawn OUTSIDE the map canvas."""
+        # The ENGAGING flash is a HUD affordance: it drains in REAL seconds
+        # here (the relatch on an ammo drop stays in sim_step).  The old
+        # sim-dt decrement made the 1.5 s flash last ~25 ms real at 64x warp.
+        if self._pantsir_engage_left > 0.0:
+            self._pantsir_engage_left = max(
+                0.0, self._pantsir_engage_left - max(0.0, float(dt_real)))
         if self.forensics_open:
             self.controls.update(dt_real)        # free-cam still flies
             self.rig.update(dt_real, self.followed)

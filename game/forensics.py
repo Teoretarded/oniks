@@ -91,10 +91,16 @@ def _weapon_name(detail) -> str:
     return _WEAPON_NAMES.get(str(detail), str(detail).upper())
 
 
-def tally(recs) -> dict:
+def tally(recs, battle_over: bool = True) -> dict:
     """The counter row, derived from recorder causes only (no invented
     numbers): fired / hit / intercepted / other loss / observed /
-    unconfirmed.  Live rounds count only toward FIRED."""
+    unconfirmed.  Live rounds count only toward FIRED.
+
+    FOG: mid-battle (``battle_over=False``) an UNOBSERVED loss counts only
+    toward FIRED + UNCONFIRMED — classifying it as INTERCEPTED while its
+    own stub reads "LOST?" leaked the loss CLASS before the sensors
+    justified it.  Post-battle everything is classified (the default, so
+    every existing caller/test is byte-identical)."""
     t = {"fired": len(recs), "hit": 0, "intercepted": 0, "other": 0,
          "observed": 0, "unconfirmed": 0}
     for rec in recs:
@@ -104,10 +110,11 @@ def tally(recs) -> dict:
         code = cause["code"]
         if code == "hit":
             t["hit"] += 1
-        elif code in _INTERCEPT_CODES:
-            t["intercepted"] += 1
-        else:
-            t["other"] += 1
+        elif battle_over or cause["observed"]:
+            if code in _INTERCEPT_CODES:
+                t["intercepted"] += 1
+            else:
+                t["other"] += 1
         if cause["observed"]:
             t["observed"] += 1
         else:
@@ -332,7 +339,7 @@ class ForensicsScreen:
         y += 12
 
         # Counter row + clerk's note (derived numbers only).
-        y = self._counter_row(text, x0, y, inner_w, recs)
+        y = self._counter_row(text, x0, y, inner_w, recs, battle_over)
 
         # Stub row.
         y = self._stub_row(text, x0, y, inner_w, recs, battle_over)
@@ -418,8 +425,9 @@ class ForensicsScreen:
 
     # ------------------------------------------------------------- counters
 
-    def _counter_row(self, text, x0, y, inner_w, recs) -> int:
-        t = tally(recs)
+    def _counter_row(self, text, x0, y, inner_w, recs,
+                     battle_over: bool = True) -> int:
+        t = tally(recs, battle_over)
         boxes = (("FIRED", t["fired"], PAPER_INK, PAPER_INK),
                  ("HIT", t["hit"], INK_GREEN, INK_GREEN),
                  ("INTERCEPTED", t["intercepted"], INK_RED, INK_RED),
@@ -790,9 +798,13 @@ class ForensicsScreen:
             y += lh + 12
 
         # Same-cause cross-reference (derived from the cause channel only).
-        if cause is not None:
+        # FOG: mid-battle the grouping may only span OBSERVED causes —
+        # keying an unobserved "LOST?" sheet on its true cause under an
+        # observed sheet leaked attribution the sensors never justified.
+        if cause is not None and (battle_over or cause["observed"]):
             same = [r for r in recs
                     if r is not rec and r.get("cause") is not None
+                    and (battle_over or r["cause"]["observed"])
                     and r["cause"]["code"] == cause["code"]
                     and r["cause"]["detail"] == cause["detail"]]
             if same:

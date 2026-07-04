@@ -386,15 +386,18 @@ def _s300_battery_rows(world):
     pool_has_round = (ammo48 + ammo40) > 0
     pool_text = f"48N6 {ammo48}  40N6 {ammo40}"
     pool_col = ARMED_COL if pool_has_round else RELOAD_COL
-    # When BOTH pools are dry the shared refill timer is the longer of the two
-    # (each pool re-stocks on its own counter; the player reads the soonest the
-    # battery is loadable again, i.e. the max remaining wait until any round
-    # returns — surface the larger so the readout never under-promises).
+    # When BOTH pools are dry, the tubes go LOADED again the moment EITHER
+    # pool refills (tube_state keys on the combined stock) — so the honest
+    # countdown is the SOONEST running timer, not the max (which overstated
+    # the wait by up to a full refill cycle and had players holding fire).
+    # A timer at 0 while dry means that pool has no refill armed: ignore it.
     refill_left = 0.0
     if not pool_has_round:
-        refill_left = max(
+        timers = [t for t in (
             float(getattr(world, "_s300_48n6_mag_reload_left", 0.0)),
             float(getattr(world, "_s300_40n6_mag_reload_left", 0.0)))
+            if t > 0.0]
+        refill_left = min(timers) if timers else 0.0
     rows = []
     for i, slice_ in enumerate(_group_tubes(tubes, len(positions))):
         cells = [(tube_state(t, pool_has_round=pool_has_round),
@@ -956,6 +959,15 @@ def _missile_target_pos(m):
         return ship.pos
     tgt = getattr(m, "target", None)
     if tgt is not None:
+        # FOG: a SAM guides on the dead-reckoned contact estimate until its
+        # TERMINAL seeker tracks truth — read the round's OWN guidance
+        # picture (_target_state) rather than tgt.pos, which handed the HUD
+        # free truth telemetry (a wandering stale track on the map while the
+        # RNG row counted down against the target's real position).
+        state_fn = getattr(m, "_target_state", None)
+        if state_fn is not None:
+            tx, ty, tz = state_fn()[:3]
+            return np.array([tx, ty, tz], dtype=np.float64)
         return tgt.pos
     tp = getattr(m, "target_point", None)
     if tp is not None:
