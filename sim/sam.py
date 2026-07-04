@@ -28,7 +28,7 @@ import math
 import numpy as np
 
 from sim.guidance import pn_accel
-from sim.missile import _surface_at
+from sim.missile import _surface_at, _swept_surface_hit
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar)
 from sim.radar import terrain_blocks
@@ -429,6 +429,11 @@ class SamMissile:
         object (``Missile``, future drone) — if ``kill`` is absent the fuse
         sets ``target.alive = False`` directly, which is the common alive-flag
         contract shared across all sim objects."""
+        if not getattr(self.target, "alive", True):
+            # A sister round / the gun already killed it this step: never
+            # fuse over a corpse — the old path re-killed the frozen truth
+            # pos and OVERWROTE its death_cause/killed_by forensics stamp.
+            return False
         tp = self.target.pos
         ax, ay, az = self.prev_pos.tolist()
         bx, by, bz = self.pos.tolist()
@@ -470,6 +475,14 @@ class SamMissile:
 
     def update(self, dt, world):
         if not self.alive:
+            return
+        # Break off when the assigned target is already dead (shoot-shoot
+        # doctrine: the FIRST round or the gun got it).  The old behaviour
+        # kept PN-homing on the corpse's frozen truth pos and "killed" it a
+        # second time — double kill events + corrupted forensics stamps.
+        if not getattr(self.target, "alive", True):
+            self.self_destructed = True
+            self._die(self.pos.copy())
             return
         w = self.weapon
         if self.phase == SPH_EJECT and self.t == 0.0:
@@ -599,11 +612,15 @@ class SamMissile:
         if self._fuse_check():
             return
 
-        # --- surface impact (terrain query skipped above the world ceiling) ---
-        if py <= TERRAIN_MAX_HEIGHT:
-            surface = _surface_at(world, px, pz)
-            if py <= surface:
-                self.pos[1] = surface
+        # --- surface impact (terrain query skipped above the world ceiling;
+        # SWEPT segment test so a Mach-3+ round cannot tunnel one substep
+        # past a cliff face — mirrors sim/missile.py) ---
+        if min(alt, py) <= TERRAIN_MAX_HEIGHT:
+            hit = _swept_surface_hit(world, px0, alt, pz0, px, py, pz)
+            if hit is not None:
+                self.pos[0] = hit[0]
+                self.pos[1] = hit[1]
+                self.pos[2] = hit[2]
                 self._die(self.pos.copy())
                 return
 

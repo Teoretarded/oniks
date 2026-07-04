@@ -685,6 +685,12 @@ class Fighter:
         # The world sets it each step (it owns the missile list); update() then
         # breaks perpendicular + dives while it is set.
         self._evade_threat = None
+        # Measured vertical rate (m/s) of the LAST update step: the flight
+        # model moves pos[1] directly (evade dive, RTB glide, intercept
+        # snap-up), so velocity() must report the real rate — a hardcoded
+        # vy=0 fed the player SAM's PN a target velocity wrong by up to
+        # FIGHTER_EVADE_DIVE_MPS exactly when the fighter breaks.
+        self._vy = 0.0
 
     # -----------------------------------------------------------------------
     # Duck-type interface (ContactBoard / seeker)
@@ -707,7 +713,9 @@ class Fighter:
         elif self.state == FS_LANDING:
             vy = -FIGHTER_DESCENT_RATE_MPS
         else:
-            vy = 0.0
+            # Measured rate from the last step: the evade dive / RTB glide /
+            # intercept snap-up all move pos[1] outside the state ladder.
+            vy = self._vy
         return np.array([hx * sp, vy, hz * sp], dtype=np.float64)
 
     @property
@@ -1300,7 +1308,17 @@ class Fighter:
     # -----------------------------------------------------------------------
 
     def update(self, dt: float, bases: Optional[list[AirBase]] = None) -> None:
-        """Advance one sim step.  ``bases`` must be provided for RTB decisions."""
+        """Advance one sim step.  ``bases`` must be provided for RTB decisions.
+        Wraps the state machine so the MEASURED vertical rate (``_vy``, read
+        by ``velocity()``) is stamped on every exit path."""
+        y0 = float(self.pos[1])
+        try:
+            self._update_states(dt, bases)
+        finally:
+            self._vy = (float(self.pos[1]) - y0) / dt if dt > 0.0 else 0.0
+
+    def _update_states(self, dt: float,
+                       bases: Optional[list[AirBase]] = None) -> None:
         if self.state == FS_GONE:
             return
 

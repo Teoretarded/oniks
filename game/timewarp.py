@@ -89,6 +89,7 @@ class TimeWarpDirector:
         # auto-warp OFF leaves the requested scale untouched, see sandbox).
         self._eff_oct = 0.0
         self._dwell_left = 0.0          # real-time s remaining at the 1x hold
+        self._cause: str | None = None  # latched drop-cause tag for the HUD
 
     @property
     def effective(self) -> float:
@@ -100,30 +101,50 @@ class TimeWarpDirector:
         """True while a drop/dwell is holding the warp at (or easing to) 1x."""
         return self._dwell_left > 0.0
 
+    @property
+    def cause(self) -> str | None:
+        """The LATCHED cause tag of the active drop ('INBOUND'/'TERMINAL'/
+        'INTERCEPT'/'LAUNCH').  Unlike re-evaluating ``drop_cause`` every
+        frame, the latch holds through the DWELL debounce — the HUD tag
+        cannot flicker off while the warp is still parked at 1x — and clears
+        only once the dwell expires."""
+        return self._cause
+
     def reset(self, scale: float = 1.0) -> None:
         """Snap the effective scale (no ease) — used when auto-warp is toggled
         on so the indicator starts from the current requested rate, not a
         stale eased value."""
         self._eff_oct = _log2(max(1.0, scale))
         self._dwell_left = 0.0
+        self._cause = None
 
     def tick(self, dt_real: float, requested_scale: float,
-             drop_active: bool) -> float:
+             drop_active: bool, cause: str | None = None) -> float:
         """Advance one real frame and return the effective scale.
 
         ``drop_active`` is the OR of the launch-cinematic lock and the fog-safe
         drop predicates (passed in by the sandbox).  While it is True the warp
         eases to 1x and the dwell timer is (re)armed; once it clears the warp
         holds 1x until the dwell expires, then eases back to ``requested``.
+
+        ``cause`` is the current drop-cause tag; it is latched while the drop
+        (and its dwell) holds so the HUD label stays stable frame-to-frame.
+        ``None`` during a drop keeps the previous latch (defensive: legacy
+        callers that never pass a cause keep their exact old behaviour).
         """
         dt = max(0.0, float(dt_real))
         if drop_active:
             self._dwell_left = DWELL_S          # re-arm the debounce each frame
+            if cause is not None:
+                self._cause = cause             # latch the live cause
             target_oct = 0.0                    # ease toward 1x
         elif self._dwell_left > 0.0:
             self._dwell_left = max(0.0, self._dwell_left - dt)
+            if self._dwell_left <= 0.0:
+                self._cause = None              # dwell just expired
             target_oct = 0.0                    # hold 1x through the dwell
         else:
+            self._cause = None                  # dwell over: clear the latch
             target_oct = _log2(max(1.0, requested_scale))
         self._ease_toward(target_oct, dt)
         return self.effective

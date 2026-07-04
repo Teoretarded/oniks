@@ -1017,6 +1017,11 @@ class SandboxState(GameState):
         platform = self.active_platform
         if platform not in ("bastion", "s300"):
             return self.request_launch()        # no salvo for these platforms
+        if platform == "bastion" and self.oniks_weapon == "kh31p":
+            # The ARM homes on a selected EMITTER via its own launch path;
+            # queued bastion beats call world.launch, which knows no "kh31p"
+            # and silently fired ONIKS rounds at the stale surface aim point.
+            return self.request_launch()
         ready = ready_tube_count(self.world, platform)
         if ready <= 0:
             # Let request_launch surface the precise empty/reload/no-target hint.

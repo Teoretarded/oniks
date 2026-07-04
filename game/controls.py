@@ -29,7 +29,7 @@ from __future__ import annotations
 import pygame
 
 from game.cameras import FREE_SPEEDS
-from game.timewarp import TimeWarpDirector
+from game.timewarp import TimeWarpDirector, drop_cause
 
 # Time-acceleration ladder stepped by - / = .  M6 AUTO-TIME-WARP extends it
 # past 16x to (1,2,4,8,16,32,64); the App loop caps at 64 sim steps/frame, so
@@ -286,4 +286,11 @@ class SandboxControls:
             self.free.update(dt_real)
         if self.auto_warp:
             drop = self.sandbox.warp_drop_active()
-            self.warp_director.tick(dt_real, self.requested_scale, drop)
+            # Latch the cause into the director: the event predicates name it
+            # (INBOUND/TERMINAL/INTERCEPT); a drop with no firing predicate is
+            # the launch-cinematic / salvo lock.  The HUD reads the LATCHED
+            # tag so it cannot flicker off during the dwell hold.
+            cause = (drop_cause(self.sandbox.world) or "LAUNCH") if drop \
+                else None
+            self.warp_director.tick(dt_real, self.requested_scale, drop,
+                                    cause=cause)

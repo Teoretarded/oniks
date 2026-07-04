@@ -93,6 +93,7 @@ def test_evade_window_lengthens_under_threat():
                         kalibr_ammo=4, base_xz=(0.0, 0.0))
         sub.state = SUB_LAUNCH
         sub._enter(SUB_LAUNCH)
+        sub._apply_state_depth()            # already risen to launch depth
         sub.step(DT, threat_level=threat)   # fires this tick (sets _evade_window)
         return sub._evade_window
     w0 = evade_window(0.0)

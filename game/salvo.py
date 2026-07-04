@@ -104,13 +104,16 @@ def ready_tube_count(world, platform: str) -> int:
         tubes = getattr(world, "_s300_tubes", None)
         if not tubes:
             return 0
-        recocked = sum(1 for t in tubes if t.get("reload_left", 0.0) <= 0.0)
+        recocked = sum(1 for t in tubes
+                       if t.get("reload_left", 0.0) <= 0.0
+                       and not t.get("committed") and not t.get("dead"))
         return min(recocked, max(0, int(getattr(world, "sam_ammo", 0))))
     tubes = getattr(world, "_oniks_tubes", None)
     if not tubes:
         return 0
     return sum(1 for t in tubes
-               if t.get("loaded") and t.get("reload_left", 0.0) <= 0.0)
+               if t.get("loaded") and t.get("reload_left", 0.0) <= 0.0
+               and not t.get("committed") and not t.get("dead"))
 
 
 def fan_offset(seed: int, ordinal: int) -> np.ndarray:

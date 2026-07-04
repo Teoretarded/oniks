@@ -544,8 +544,14 @@ class ReconDrone:
         dz = float(wz) - self.pos[2]
         dist = math.hypot(dx, dz)
 
-        # Advance waypoint when within one second of travel distance
-        if dist < DRONE_SPEED_MPS * 1.0:
+        # Advance when within one second of travel distance OR inside the
+        # minimum turn radius (speed / turn-rate = 640 m, +5% margin): a
+        # waypoint dropped inside the turning circle is kinematically
+        # unreachable, and the old 160 m-only gate trapped the drone in a
+        # permanent orbit around it (route stalled, loiter never entered).
+        capture = max(DRONE_SPEED_MPS * 1.0,
+                      DRONE_SPEED_MPS / DRONE_TURN_RATE_RPS * 1.05)
+        if dist < capture:
             self._wp_idx += 1
             if self._wp_idx >= len(self._route):
                 # Finished last waypoint — enter loiter

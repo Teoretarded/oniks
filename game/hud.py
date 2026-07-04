@@ -25,7 +25,6 @@ import numpy as np
 
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.keybinds import ACTIONS
-from game.timewarp import drop_cause
 from sim.contacts import classify as _classify
 from sim.contacts import track_quality as _track_quality
 import game.states as _S
@@ -76,6 +75,7 @@ RADAR_EMITTING = "EMITTING"
 RADAR_SILENT = "SILENT"
 RADAR_DESTROYED = "DESTROYED"
 DEFEAT_TEXT = "BASTION DESTROYED - DEFEAT"
+DEFEAT_TEXT_BEACHHEAD = "BEACHHEAD ESTABLISHED - DEFEAT"
 VICTORY_TEXT = "ENEMY FORCE DESTROYED - VICTORY"
 DEFEAT_Y_FRAC = 0.24        # banner center height as a fraction of the screen
 DEFEAT_PAD_X = 28           # px panel padding around the banner text
@@ -1008,7 +1008,12 @@ class HUD:
         else:
             self._launcher_block(sandbox)
         if getattr(sandbox.world, "defeated", False):
-            self._banner(w, h, DEFEAT_TEXT, DANGER_COL)
+            # Honest cause: a beachhead loss reads its own banner, not the
+            # bastion string (mirrors the end-screen defeat_cause map).
+            cause = getattr(sandbox.world, "defeat_cause", None)
+            self._banner(w, h,
+                         DEFEAT_TEXT_BEACHHEAD if cause == "beachhead"
+                         else DEFEAT_TEXT, DANGER_COL)
         elif getattr(sandbox.world, "victorious", False):
             self._banner(w, h, VICTORY_TEXT, ARMED_COL)
         self._clock_chip(sandbox, w)
@@ -1358,7 +1363,11 @@ class HUD:
         # tells the player WHY time slowed, and '^ramping' marks the ease back.
         if getattr(sandbox.controls, "auto_warp", False):
             txt = f"x{eff:g}"
-            cause = drop_cause(sandbox.world)
+            # LATCHED cause from the warp director (not a fresh drop_cause
+            # recompute): the tag holds steady through the DWELL debounce
+            # instead of flickering off while the warp still sits at 1x.
+            director = getattr(sandbox.controls, "warp_director", None)
+            cause = director.cause if director is not None else None
             if cause is not None or sandbox.warp_drop_active():
                 txt += f" (auto: {cause or 'LAUNCH'})"
             elif eff < requested - 1e-3:

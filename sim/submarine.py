@@ -132,6 +132,7 @@ class Submarine:
 
         self.state = SUB_DEEP_TRANSIT
         self._state_t = 0.0          # time-in-state accumulator
+        self._fire_t = 0.0           # time-in-state when the salvo fired
         self._salvo_cd = 0.0         # salvo cooldown
         self._evade_window = SUB_EVADE_S
         self._fired_this_launch = False
@@ -245,17 +246,27 @@ class Submarine:
                 self._enter(SUB_LAUNCH)
 
         elif self.state == SUB_LAUNCH:
-            # Rise to launch depth; brief noisy dwell; fire ONCE.
+            # Rise to launch depth; brief noisy dwell; fire ONCE — at the
+            # SHALLOW launch depth.  The old gate fired on the FIRST tick
+            # (still at ~-120 m transit depth) and exited on a dwell clock
+            # shorter than the ~26 s rise, so the documented shallow-launch
+            # exposure window never actually happened.
             self._rise_to(dt, SUB_LAUNCH_DEPTH_M)
-            if not self._fired_this_launch and self.kalibr_ammo > 0:
+            at_depth = float(self.pos[1]) >= SUB_LAUNCH_DEPTH_M - 1.0
+            if (at_depth and not self._fired_this_launch
+                    and self.kalibr_ammo > 0):
                 self._fired_this_launch = True
+                self._fire_t = self._state_t
                 self.launch_transient = True
                 bx, bz = self._base_xz
                 fire_aim = (bx, bz, 0.0)
                 # Lengthen the evade if prosecuted (symmetric fairness loop).
                 self._evade_window = (SUB_EVADE_S
                                       + SUB_EVADE_THREAT_S * float(threat_level))
-            if self._state_t >= SUB_LAUNCH_DWELL_S:
+            # The noisy dwell counts from the FIRE, not the state entry (the
+            # rise itself is the approach, not the exposure window).
+            if (self._fired_this_launch
+                    and self._state_t >= self._fire_t + SUB_LAUNCH_DWELL_S):
                 self._salvo_cd = max(0.0, SUB_SALVO_PERIOD_S + self._cd_jitter)
                 self._enter(SUB_EVADE)
 
@@ -277,6 +288,7 @@ class Submarine:
         self._state_t = 0.0
         if new_state == SUB_LAUNCH:
             self._fired_this_launch = False
+            self._fire_t = 0.0
 
     def _creep(self, dt: float, speed: float, toward_base: bool) -> None:
         """Move horizontally toward (or away from) the base + slew depth toward

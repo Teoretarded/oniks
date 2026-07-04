@@ -229,6 +229,41 @@ def _surface_at(world, x: float, z: float) -> float:
     return max(float(world.terrain_height_at(x, z)), 0.0)
 
 
+# Swept surface-impact sampling: a fast round crosses more than
+# SWEEP_SAMPLE_M in one 120 Hz substep (Zircon ~13 m at Mach 4.5, SM-2
+# ~10 m at Mach 3.5) and an endpoint-only test lets it tunnel past a
+# coastal cliff whose crest lies between the step's endpoints.  Steps
+# <= SWEEP_SAMPLE_M add no interior samples, so slower rounds (Oniks
+# ~7 m/step at Mach 2.5) keep the legacy single query byte-for-byte.
+SWEEP_SAMPLE_M = 8.0
+
+
+def _swept_surface_hit(world, x0, y0, z0, x1, y1, z1):
+    """First surface crossing along the straight step (x0,y0,z0)->(x1,y1,z1):
+    interior samples every <= SWEEP_SAMPLE_M, then the exact endpoint (kept
+    LAST so a step short enough to need no interior samples reproduces the
+    legacy endpoint-only behaviour exactly).  Returns the impact point
+    ``(x, surface_height, z)`` or ``None``.  Samples above the world's
+    terrain ceiling skip the heightfield query (same perf gate as before)."""
+    dx, dy, dz = x1 - x0, y1 - y0, z1 - z0
+    n = int(math.sqrt(dx * dx + dy * dy + dz * dz) / SWEEP_SAMPLE_M)
+    for i in range(1, n + 1):
+        f = i / (n + 1)
+        sy = y0 + dy * f
+        if sy > TERRAIN_MAX_HEIGHT:
+            continue
+        sx = x0 + dx * f
+        sz = z0 + dz * f
+        s = _surface_at(world, sx, sz)
+        if sy <= s:
+            return sx, s, sz
+    if y1 <= TERRAIN_MAX_HEIGHT:
+        s = _surface_at(world, x1, z1)
+        if y1 <= s:
+            return x1, s, z1
+    return None
+
+
 def _steer_heading_scalar(vx: float, vz: float, desired_heading: float):
     """guidance.steer_heading_accel on plain floats: returns the (x, z)
     lateral-accel components (the y component is always 0). Identical
@@ -547,7 +582,8 @@ class Missile:
                 continue
             best, best_d = ship, d
         if best is not None:
-            self.locked_ship = best   # once locked, stays locked
+            self.locked_ship = best   # locked while the hull stays alive
+                                      # (the terminal branch drops a dead lock)
 
     def _skim_ref(self, alt, vs, world):
         """(altitude, vertical speed) for the terminal skim hold, measured
@@ -592,6 +628,13 @@ class Missile:
                                      DESCENT_KP, DESCENT_KD,
                                      ALT_MAX_A * self._descent_scale) + GRAVITY
         else:   # PH_TERMINAL
+            # Re-lock on a dead target: a lead round of the salvo can sink the
+            # locked hull mid-flight (ALIVE/BURNING -> SINKING/GONE); the lock
+            # is dropped so _acquire_lock redistributes onto a LIVE ship in
+            # the seeker cone instead of flying PN onto the wreck.
+            if (self.locked_ship is not None
+                    and not getattr(self.locked_ship, "alive", True)):
+                self.locked_ship = None
             if self.locked_ship is None:
                 self._acquire_lock(world, speed)
             tgt = self.locked_ship
@@ -826,11 +869,15 @@ class Missile:
         # --- impact (terrain, or the water surface at y = 0) ---
         # Above the world's strict terrain ceiling no surface can be hit, so
         # the heightfield query is skipped (Task 22 perf: saves the query for
-        # the whole climb/cruise of a hi profile).
-        if py <= TERRAIN_MAX_HEIGHT:
-            surface = _surface_at(world, px, pz)
-            if py <= surface:
-                self.pos[1] = surface
+        # the whole climb/cruise of a hi profile).  SWEPT segment test: fast
+        # rounds sample interior points of the step too, so a hypersonic
+        # diver cannot tunnel one substep past a coastal cliff face.
+        if min(py0, py) <= TERRAIN_MAX_HEIGHT:
+            hit = _swept_surface_hit(world, px0, py0, pz0, px, py, pz)
+            if hit is not None:
+                self.pos[0] = hit[0]
+                self.pos[1] = hit[1]
+                self.pos[2] = hit[2]
                 self.impact_pos = self.pos.copy()
                 self.phase = PH_DEAD
                 self.alive = False

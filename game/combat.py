@@ -179,11 +179,23 @@ class CombatState(SandboxState):
             self._telemetry["rounds_fired"] += 1
         return m
 
-    def _request_sam_launch(self):
-        """S-300 single-fire: count ONE round on a real (non-None) launch."""
-        m = super()._request_sam_launch()
-        if m is not None:
-            self._telemetry["rounds_fired"] += 1
+    # NOTE: _request_sam_launch is deliberately NOT overridden with a counter:
+    # sandbox.request_launch dispatches to it INTERNALLY for the s300 platform,
+    # so the request_launch wrapper above already counts that round — a second
+    # counter here double-counted every S-300 shot (halving efficiency /
+    # leak_rate on the AAR grade).
+
+    def _request_swarm_launch(self):
+        """SWARM bundle-fire spawns one round PER READY CELL but returns only
+        the first (the camera subject): count the extra cells here — the
+        request_launch wrapper counts the returned first round.  Without this
+        a 6-cell bundle scored as ONE round fired (leak_rate could exceed
+        100% and efficiency inflated ~6x)."""
+        before = self._player_round_ids()
+        m = super()._request_swarm_launch()
+        extra = len(self._player_round_ids() - before) - 1
+        if extra > 0:
+            self._telemetry["rounds_fired"] += extra
         return m
 
     def _tick_salvo(self, dt: float) -> None:
@@ -292,7 +304,9 @@ class CombatState(SandboxState):
             campaign_cb=self._campaign_continue if in_campaign else None,
             par=getattr(self, "_final_par", None),
             end_time=float(getattr(self.world, "sim_time", 0.0)),
-            debrief_cb=self._open_forensics)
+            debrief_cb=self._open_forensics,
+            defeat_cause=(None if victory
+                          else getattr(self.world, "defeat_cause", None)))
         overlay.enter()
         self._end_overlay = overlay
 

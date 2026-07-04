@@ -122,6 +122,14 @@ def failed_axes(card, par):
     return out
 
 
+# DEFEAT subtitle per lose clause (world.defeat_cause).  'bastion' is the
+# fallback for None/unknown so every legacy caller keeps the historic string.
+_DEFEAT_SUBTITLES = {
+    "bastion":   "ALL BASTION TELs DESTROYED",
+    "beachhead": "BEACHHEAD ESTABLISHED",
+}
+
+
 class CombatEndOverlay(GameState):
     """VICTORY or DEFEAT overlay over the frozen final combat frame.
 
@@ -161,11 +169,16 @@ class CombatEndOverlay(GameState):
         par=None,
         end_time=None,
         debrief_cb=None,
+        defeat_cause=None,
     ):
         super().__init__(app)
         self._gl   = None
         self.text  = None
         self.victory = victory
+        # Which lose clause tripped ('bastion' | 'beachhead' | None) — drives
+        # the DEFEAT subtitle so a beachhead loss no longer reads the bastion
+        # string.  None keeps the legacy bastion wording (smoke/tool callers).
+        self.defeat_cause = defeat_cause
         self.scorecard = scorecard
         self.par = par                  # game.scoring.Par (None: no bar shown)
         self.end_time = end_time        # sim clock at the decision (header)
@@ -301,7 +314,11 @@ class CombatEndOverlay(GameState):
         banner_text = "VICTORY" if self.victory else "DEFEAT"
         banner_col  = OK_COL if self.victory else DANGER
         text.draw_text(px + PAD, py + PAD, banner_text, banner_col, HEADER_SIZE)
-        sub = "MISSION COMPLETE" if self.victory else "ALL BASTION TELs DESTROYED"
+        if self.victory:
+            sub = "MISSION COMPLETE"
+        else:
+            sub = _DEFEAT_SUBTITLES.get(self.defeat_cause,
+                                        _DEFEAT_SUBTITLES["bastion"])
         if self.end_time is not None:
             sub += f" - T+{_fmt_mmss(self.end_time)}"
         sw = text.text_width(sub, SMALL_SIZE)

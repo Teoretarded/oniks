@@ -653,7 +653,7 @@ class TacticalMap:
             if drone is not None and len(drone.route) < MAX_WAYPOINTS:
                 drone.append_waypoint(wp)
                 self.sandbox.app.audio.ui_click()
-        elif self.sandbox.active_platform == "s300":
+        elif self.sandbox.active_platform in ("s300", "buk"):
             self.sandbox.show_hint(SAM_NO_WAYPOINTS_HINT)
         elif add_waypoint(self.sandbox.waypoints, wp):
             self.sandbox.app.audio.ui_click()
@@ -673,7 +673,7 @@ class TacticalMap:
                 drone.clear_route()
                 self.sandbox.app.audio.ui_click()
             return
-        if self.sandbox.active_platform == "s300":
+        if self.sandbox.active_platform in ("s300", "buk"):
             return      # no plan chain to clear; don't wipe the hidden bastion plan
         clear_waypoints(self.sandbox.waypoints)
         self.sandbox.app.audio.ui_click()
@@ -722,7 +722,10 @@ class TacticalMap:
             self.selected_emitter = pick_emitter(
                 self.view, world.emitter_contacts, pos)
             return
-        air = sandbox.active_platform == "s300"
+        # The Buk is a SAM battery too: without it in the air-pick tuple the
+        # buk platform could never select an air target on the map (SPACE
+        # then dead-ended on "SELECT AIR TARGET" forever).
+        air = sandbox.active_platform in ("s300", "buk")
         sid = pick_contact(self.view, world.contacts, world.sim_time, pos,
                            air_only=air)
         self.selected_contact = sid
@@ -1053,6 +1056,11 @@ class TacticalMap:
         """(x, z) of the active platform (route chain / bearing origin)."""
         if self.sandbox.active_platform == "s300":
             return (SAM_SITE_POS[0], SAM_SITE_POS[2])
+        if self.sandbox.active_platform == "buk":
+            # The Buk battery sits at its own site — bearings/ranges from the
+            # base pad disagreed with the HUD's own Buk plate.
+            from world.combat import BUK_SITE_XZ
+            return (BUK_SITE_XZ[0], BUK_SITE_XZ[1])
         return (BASE_POS[0], BASE_POS[2])
 
     def _plan_chain(self) -> None:
@@ -1490,6 +1498,15 @@ class TacticalMap:
             status, col, _name, ammo_text = s300_round_panel(world,
                                                              sam_round)
             line = (f"S-300 {status}   RND {sam_round.upper()}   "
+                    f"{ammo_text}   {self._target_text()}")
+        elif sandbox.active_platform == "buk":
+            # M5: the Buk gets its own strip — falling through to the else
+            # displayed the BASTION's ARMED/RELOADING/profile while the Buk
+            # was the active platform.
+            from game.hud import buk_round_panel
+            buk_round = getattr(sandbox, "buk_round", "9m317")
+            status, col, _name, ammo_text = buk_round_panel(world, buk_round)
+            line = (f"BUK {status}   RND {buk_round.upper()}   "
                     f"{ammo_text}   {self._target_text()}")
         else:
             if world.launcher_armed:

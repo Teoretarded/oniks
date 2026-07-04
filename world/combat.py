@@ -2680,8 +2680,10 @@ class CombatWorld(WorldState):
         for ship in ordered:
             if isinstance(ship, Carrier):
                 continue                     # carriers carry no TLAM
+            # getattr guard: LCACs ride in self.ships but carry no TLAM bank
+            # (a bare attribute read crashed the salvo mid-landing).
             while (len(rounds) < SALVO_SIZE and ship.alive
-                   and ship.tomahawk_ammo > 0):
+                   and getattr(ship, "tomahawk_ammo", 0) > 0):
                 deck = ship.pos + np.array([0.0, VLS_DECK_M, 0.0])
                 m = StrikeMissile(
                     TOMAHAWK, deck,
@@ -2863,6 +2865,26 @@ class CombatWorld(WorldState):
                     "committed": False,
                     "move_left_s": 0.0,
                 })
+        # A destroyed firing TEL must STOP FIRING: chain an on_destroyed onto
+        # each descriptor's Structure marking its tube slice DEAD (and dropping
+        # any loaded round — the canisters die with the vehicle).  Without
+        # this, every enemy SEAD/back-plot strike on a TEL was cosmetic: the
+        # rubble kept firing at full rate.  Chains (never replaces) the
+        # existing callback — the Buk TEL's 9S36 radar kill stays live.
+        for d in reg:
+            struct = d["structure"]
+            if struct is None:
+                continue
+            prev = struct.on_destroyed
+
+            def _tubes_dead(s, _d=d, _prev=prev):
+                for t in _d["tubes"]:
+                    t["dead"] = True
+                    t["loaded"] = False
+                if _prev is not None:
+                    _prev(s)
+
+            struct.on_destroyed = _tubes_dead
         return reg
 
     def _relocatable_for(self, platform):
@@ -2876,12 +2898,15 @@ class CombatWorld(WorldState):
         return None
 
     def _launcher_committed(self, tube) -> bool:
-        """True while the tube's launcher is COMMITTED to a relocate (driving or
-        in the emplace/displace dwell).  Read via a per-tube flag so the existing
-        per-tube arm/launch loops gain only an 'and not committed' clause; the
-        flag is absent until a relocate is ordered, so the default is False
-        (byte-identical)."""
-        return bool(tube.get("committed", False))
+        """True while the tube is UNAVAILABLE: its launcher is COMMITTED to a
+        relocate (driving or in the emplace/displace dwell) — OR the tube is
+        DEAD because its TEL Structure was destroyed (the registry's
+        on_destroyed marks the slice).  Every launch gate / armed property in
+        all three batteries routes through this predicate, so a killed TEL
+        stops firing everywhere at once.  Both flags are absent until set, so
+        the default battle is byte-identical."""
+        return bool(tube.get("committed", False)) or bool(tube.get("dead",
+                                                                   False))
 
     def request_relocate(self, platform, dest_xz) -> bool:
         """Order a firing TEL to SHOOT-AND-SCOOT to ``dest_xz`` (a map xz).
@@ -2935,6 +2960,15 @@ class CombatWorld(WorldState):
             d["move_left_s"] = max(0.0, d["move_left_s"] - dt)
             if d["move_left_s"] > 0.0:
                 continue                      # still displacing / driving / emplacing
+            # Killed mid-drive: the wreck stays where it was hit — never move
+            # a dead Structure to the new pad or re-arm its (dead) tubes.
+            struct = d["structure"]
+            if struct is not None and not struct.alive:
+                for t in d["tubes"]:
+                    t["committed"] = False    # dead flag still blocks the gates
+                d["committed"] = False
+                d["dest"] = None
+                continue
             # --- ARRIVAL: snap pad + tubes + Structure to the new pad ---
             dest = d["dest"]
             ny = float(terrain_height_scalar(float(dest[0]), float(dest[1])))
@@ -2945,7 +2979,6 @@ class CombatWorld(WorldState):
             for t, off in zip(d["tubes"], d["offsets"]):
                 t["pos"] = pad + off          # recompute mouth from the moved pad
                 t["committed"] = False        # re-arm this launcher's tube
-            struct = d["structure"]
             if struct is not None:
                 struct.pos = pad.copy()       # OBB recomputes from .pos per query
             d["committed"] = False
@@ -3247,7 +3280,8 @@ class CombatWorld(WorldState):
         for t in self._oniks_tubes:
             if t["reload_left"] > 0.0:
                 t["reload_left"] = max(0.0, t["reload_left"] - dt)
-            if not t["loaded"] and t["reload_left"] <= 0.0:
+            if (not t["loaded"] and t["reload_left"] <= 0.0
+                    and not t.get("dead", False)):
                 loaded = sum(1 for u in self._oniks_tubes if u["loaded"])
                 if (self._oniks_ammo or 0) - loaded > 0:
                     t["loaded"] = True
