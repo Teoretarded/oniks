@@ -354,6 +354,7 @@ class SandboxState(GameState):
         self.renderer = app.renderer
         self.world = self._build_world()
         self.camera = Camera()
+        self._pip_cam = Camera()     # the map's LAUNCH CINEMA viewport
         self.rig = CameraRig(self.camera)
         self.sky = Sky()
         self.ocean = Ocean()
@@ -564,6 +565,25 @@ class SandboxState(GameState):
         (it stamps the battle ledger and bundles its trail) — graceful
         no-op hint in SANDBOX, same convention as toggle_forensics."""
         self.show_hint("BUG REPORT: COMBAT ONLY")
+
+    def toggle_map_layout(self) -> None:
+        """F4 (map_layout binding): flip the tactical map BOARD <-> CLASSIC
+        (the 2026-07-05 command-board test's revert switch, persisted)."""
+        prefs = getattr(self.app, "ui_prefs", None)
+        if prefs is None:
+            return
+        new = prefs.toggle_map_layout()
+        self.show_hint(f"MAP LAYOUT: {new.upper()}")
+        self.app.audio.ui_click()
+
+    def toggle_launch_cinema(self) -> None:
+        """F5 (launch_cinema binding): the launch-cinema PiP on the map."""
+        prefs = getattr(self.app, "ui_prefs", None)
+        if prefs is None:
+            return
+        new = prefs.toggle_launch_cinema()
+        self.show_hint("LAUNCH CINEMA: " + ("ON" if new else "OFF"))
+        self.app.audio.ui_click()
 
     def toggle_battery_panel(self) -> None:
         """O (battery_panel binding): toggle the EXPANDED per-battery STATUS
@@ -1534,8 +1554,67 @@ class SandboxState(GameState):
             if self.controls_overlay:
                 self.hud._controls_overlay(self, w, h)
                 self.hud.text.flush(w, h)
+            # LAUNCH CINEMA PiP (2026-07-05, F5/chip toggle): a corner
+            # viewport showing the launching round cinematically while the
+            # cinematic lock is live.
+            if self._launch_pip_active():
+                self._draw_launch_pip(w, h)
         elif self.hud_visible:
             self.hud.draw(self, w, h)
+
+    def _launch_pip_active(self) -> bool:
+        """The map LAUNCH CINEMA PiP runs only while the pref is ON and a
+        launch cinematic is actually playing (the same realtime-lock window
+        that pins the time scale to 1x)."""
+        prefs = getattr(self.app, "ui_prefs", None)
+        if prefs is None or not prefs.get("launch_cinema"):
+            return False
+        return launch_realtime_lock(self.world.missiles)
+
+    def _draw_launch_pip(self, w: int, h: int) -> None:
+        """Second scene pass into a scissored corner viewport: a side-on
+        cinematic of the newest own round leaving the rail, over the map.
+        Fill cost is the small viewport; it runs ONLY for the seconds the
+        launch cinematic is live.  Toggle: F5 or the board's CINEMA chip."""
+        m = next((mm for mm in reversed(self.world.missiles)
+                  if not getattr(mm, "is_hostile", False)), None)
+        if m is None:
+            return
+        from OpenGL import GL as gl
+
+        from game.states import ACCENT_DIM, FAINT
+        pw, ph = max(64, int(w * 0.24)), max(64, int(h * 0.26))
+        px, py = w - pw - 16, h - ph - 110      # above the corner readout
+        v = _vhat(m)
+        side = np.array([v[2], 0.0, -v[0]])
+        n = math.hypot(side[0], side[2])
+        side = side / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+        eye = m.pos + side * 60.0 - v * 25.0 + _UP * 18.0
+        self._pip_cam.set_look(eye, m.pos)
+        gly = h - py - ph                       # GL origin: bottom-left
+        gl.glEnable(gl.GL_SCISSOR_TEST)
+        gl.glScissor(px, gly, pw, ph)
+        gl.glViewport(px, gly, pw, ph)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        cam = self.camera
+        self.camera = self._pip_cam
+        try:
+            self._draw_scene(pw, ph)
+        finally:
+            self.camera = cam
+            gl.glDisable(gl.GL_SCISSOR_TEST)
+            gl.glViewport(0, 0, w, h)
+        # Frame + caption, drawn in the normal full-screen batch.
+        text = self.text
+        text.draw_lines([(px, py), (px + pw, py), (px + pw, py + ph),
+                         (px, py + ph), (px, py)], (*ACCENT_DIM, 1.0), 1.0)
+        from engine.text import SMALL_SIZE
+        label = "LAUNCH CINEMA [F5]"
+        text.draw_text(px + 8, py + ph - text.line_height(SMALL_SIZE) - 4,
+                       label, FAINT, SMALL_SIZE)
+        text.flush(w, h)
+        self.ui.add("map.launch_cinema", px, py, pw, ph,
+                    code="game/sandbox.py:_draw_launch_pip")
 
     def render_frozen(self) -> None:
         """The 3D scene exactly as last framed — no input/rig/audio updates,

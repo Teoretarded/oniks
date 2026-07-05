@@ -289,6 +289,10 @@ class SandboxControls:
             app.screenshot_requested = True
         elif action == "bug_report":
             sandbox.report_bug()
+        elif action == "map_layout":
+            sandbox.toggle_map_layout()
+        elif action == "launch_cinema":
+            sandbox.toggle_launch_cinema()
         elif action == "controls_overlay":  # reserved: always F1
             sandbox.toggle_controls_overlay()
 

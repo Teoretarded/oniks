@@ -115,6 +115,13 @@ ACTIONS: tuple[ActionDef, ...] = (
     # NEVER pauses under it.  J is unclaimed by every other default; in
     # SANDBOX (no flight recorder) the action is a graceful no-op.
     ActionDef("forensics", "FORENSICS / DEBRIEF", "SIMULATION", pygame.K_j),
+    # Command-board map test (2026-07-05): F4 flips the tactical map between
+    # the new BOARD layout and the CLASSIC one (persisted, the revert
+    # switch); F5 toggles the launch-cinema PiP on the map.  Both free keys.
+    ActionDef("map_layout", "MAP LAYOUT BOARD/CLASSIC", "SIMULATION",
+              pygame.K_F4),
+    ActionDef("launch_cinema", "LAUNCH CINEMA (MAP)", "SIMULATION",
+              pygame.K_F5),
     # M6 AUTO-TIME-WARP: T toggles event-aware auto pacing — the - / = ladder
     # sets the TARGET warp and the sim auto-drops to 1x on important events
     # (inbound detected / own terminal / intercept), then eases back.  T was

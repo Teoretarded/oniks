@@ -62,6 +62,8 @@ class App:
         self.bug_shot_path = None           # F3: bug-report screenshot dest
         self.running = True                 # cleared by QUIT / menu QUIT
         self.keybinds = Keybinds()          # persisted action->key table
+        from game.ui_prefs import UiPrefs
+        self.ui_prefs = UiPrefs()           # map layout / launch cinema
         self.states = StateMachine()
         self.sandbox = None                 # live game session (RESUME target)
         self.campaign = None                # CampaignState (lazily loaded)
