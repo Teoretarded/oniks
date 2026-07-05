@@ -825,8 +825,17 @@ def drone_panel_rows(world) -> list[tuple]:
             ("RESPAWN", f"{int(np.ceil(left - 1e-9))} s", RELOAD_COL),
         ]
     speed = float(np.hypot(drone.vel[0], drone.vel[2]))
+    route = getattr(drone, "route", ())
     rows = [
         ("STATUS", "AIRBORNE", ARMED_COL),
+        # Tasking state (playtest 2026-07-05): an untasked drone loiters
+        # over the base and finds NOTHING — the fleet sits beyond the
+        # radar horizon, so a silent loiter must never read as 'working'.
+        # Amber call-to-action while the route is empty; WPT count once
+        # tasked (own-force telemetry, no fog).
+        ("TASKING", (f"{len(route)} WPT" if route
+                     else "NONE - RMB ON MAP TO TASK"),
+         VALUE_COL if route else RELOAD_COL),
         ("ALT", f"{drone.pos[1]:,.0f} m", VALUE_COL),
         ("SPD", f"{speed:,.0f} m/s", VALUE_COL),
         ("SENSORS",
@@ -1038,11 +1047,14 @@ class HUD:
             self._controls_overlay(sandbox, w, h)
         self.text.flush(w, h)
 
-    def draw_flight_block(self, sandbox, m) -> None:
+    def draw_flight_block(self, sandbox, m) -> float:
         """Queue (no flush) the flight telemetry block for ``m``: the
         tactical map calls this for the LMB-selected round (Task RTG) so its
-        telemetry shows in the same HUD flight block while the map is open."""
-        self._flight_block(sandbox, m)
+        telemetry shows in the same HUD flight block while the map is open.
+        Returns the plate height so the caller can dock panels BELOW it
+        (the contact card used to draw straight through this plate —
+        playtest overlap, 2026-07-05)."""
+        return self._flight_block(sandbox, m)
 
     # ---------------------------------------------------------------- blocks
 
@@ -1069,9 +1081,13 @@ class HUD:
         text.draw_text(x + pad_x + cw + gap,
                        y + 7 + (body_h - small_h) // 2, scale,
                        _S.FAINT, SMALL_SIZE)
+        ui = getattr(sandbox, "ui", None)
+        if ui is not None:
+            ui.add("hud.clock_chip", x, y, bw, bh,
+                   code="game/hud.py:_clock_chip")
 
     def _block(self, header: str, rows, cells=None, status=None,
-               emcon=None) -> float:
+               emcon=None, reg=None) -> float:
         """The PLATFORM PLATE (mock 04): header row (brass platform name +
         family-tinted status badge) over a brass-capped rule, label/value
         rows right-aligned (a truthy 4th row element marks the selected-
@@ -1092,6 +1108,25 @@ class HUD:
                   + emcon_band + PANEL_PAD)
         draw_panel(text, MARGIN, MARGIN, PANEL_W, height, alpha=PANEL_ALPHA,
                    fill=_S.PLATE_INK, ticks=False)
+        # UI registry (mouse parity + F3 tagging, 2026-07-05): ``reg`` is
+        # (sandbox, name, header_action, body_action).  The plate registers
+        # whole (click-consuming), then a header zone and a body zone that
+        # dispatch the SAME action ids the key bindings fire — e.g. the
+        # bastion plate header TABs platforms, its body cycles the weapon.
+        if reg is not None:
+            sandbox, name, header_action, body_action = reg
+            ui = getattr(sandbox, "ui", None)
+            if ui is not None:
+                code = "game/hud.py:_block"
+                ui.add(name, MARGIN, MARGIN, PANEL_W, height, code=code)
+                if header_action:
+                    ui.add(name + ".header", MARGIN, MARGIN, PANEL_W,
+                           head_band, action=header_action, parent=name,
+                           code=code)
+                if body_action:
+                    ui.add(name + ".body", MARGIN, MARGIN + head_band,
+                           PANEL_W, height - head_band, action=body_action,
+                           parent=name, code=code)
         tx = MARGIN + PANEL_PAD
         inner_w = PANEL_W - 2 * PANEL_PAD
         ty = MARGIN + 10
@@ -1211,8 +1246,9 @@ class HUD:
             rows.append(("PROP",
                          f"{100.0 * m.propellant / m.weapon.propellant_mass:.0f}%",
                          VALUE_COL))
-        self._block(m.weapon.display_name.upper(), rows,
-                    status=(label, phase_col))
+        return self._block(m.weapon.display_name.upper(), rows,
+                           status=(label, phase_col),
+                           reg=(sandbox, "hud.flight_block", None, None))
 
     def _launcher_block(self, sandbox) -> None:
         """Active platform's launcher status while nothing is followed."""
@@ -1237,7 +1273,9 @@ class HUD:
             status = (rows[0][1], rows[0][2])
             rows = rows[1:]
         self._block("RECON DRONE", rows, status=status,
-                    emcon=emissions_exposure(world))
+                    emcon=emissions_exposure(world),
+                    reg=(sandbox, "hud.plate.drone", "cycle_platform",
+                         "jam"))
 
     def _bastion_block(self, sandbox) -> None:
         world = sandbox.world
@@ -1293,7 +1331,9 @@ class HUD:
         self._block(BASTION.display_name.upper(), rows,
                     cells=tube_cells(world, "bastion"),
                     status=(status, col),
-                    emcon=emissions_exposure(world))
+                    emcon=emissions_exposure(world),
+                    reg=(sandbox, "hud.plate.bastion", "cycle_platform",
+                         "oniks_weapon"))
 
     def _s300_block(self, sandbox) -> None:
         world = sandbox.world
@@ -1325,7 +1365,9 @@ class HUD:
         self._block(S300_TEL.display_name.upper(), rows,
                     cells=tube_cells(world, "s300"),
                     status=(status, col),
-                    emcon=emissions_exposure(world))
+                    emcon=emissions_exposure(world),
+                    reg=(sandbox, "hud.plate.s300", "cycle_platform",
+                         "sam_round"))
 
     def _buk_block(self, sandbox) -> None:
         """M5 Buk mid-SAM platform panel (mirror of _s300_block): the selected
@@ -1354,7 +1396,9 @@ class HUD:
         self._block(BUK_TEL.display_name.upper(), rows,
                     cells=tube_cells(world, "buk"),
                     status=(status, col),
-                    emcon=emissions_exposure(world))
+                    emcon=emissions_exposure(world),
+                    reg=(sandbox, "hud.plate.buk", "cycle_platform",
+                         "sam_round"))
 
     @staticmethod
     def _target_summary(sandbox, origin) -> str:
@@ -1508,15 +1552,17 @@ class HUD:
             text.draw_text(x + 2, y, more, (*_S.HOSTILE_AGED, 0.8),
                            SMALL_SIZE)
 
-    def _intel_panel(self, world, selected_contact, origin_xz, x, y) -> None:
+    def _intel_panel(self, world, selected_contact, origin_xz, x, y):
         """Docked contact-intel panel from ``contact_intel`` (M1): the
         sensor-derived track inspector (CLASS / ID / course / a confidence
         gauge / a bearing rose). Nothing when no contact is selected or the
-        track has dropped. Queues into the shared TextRenderer (NO flush)."""
+        track has dropped. Queues into the shared TextRenderer (NO flush).
+        Returns the drawn panel height (px), or None when nothing drew —
+        the map registers the rect and stacks panels from it."""
         intel = contact_intel(world, selected_contact, origin_xz,
                               world.sim_time)
         if intel is None:
-            return
+            return None
         # Fixed-height panel: header rule + the value rows + the confidence
         # gauge, with a bearing rose docked on the right.  TYPE shows the
         # ladder-earned label (UNK -> MSL -> SM6, classification spec) and
@@ -1553,18 +1599,27 @@ class HUD:
             self.text.draw_text(tx, ty, label, LABEL_COL)
             self.text.draw_text(tx + INTEL_VALUE_X, ty, value, _S.BELIEF)
             ty += INTEL_LINE_H
-        # Confidence gauge: amber while a live fix, dimmer as it fades.
+        # Fix-freshness gauge (relabeled from the bare 'CONF' bar — playtest
+        # 2026-07-05: 'it keeps counting down, it makes no sense').  The bar
+        # IS the age of the last radar fix: full on a fresh sweep, draining
+        # between sweeps, snapping back on the next fix.  The seconds ride
+        # next to it so the drain explains itself.
         ty += 4
-        self.text.draw_text(tx, ty - 2, "CONF", LABEL_COL)
+        self.text.draw_text(tx, ty - 2, "FIX", LABEL_COL)
         gauge_col = OK_COL if intel["confidence"] >= 0.8 else WARN
+        age_txt = f"{intel['age']:.0f}S"
+        age_w = self.text.text_width(age_txt, SMALL_SIZE) + 8
         _gauge_bar(self.text, tx + INTEL_VALUE_X, ty,
-                   INTEL_W - 2 * INTEL_PAD - INTEL_VALUE_X, INTEL_GAUGE_H,
-                   intel["confidence"], gauge_col)
+                   INTEL_W - 2 * INTEL_PAD - INTEL_VALUE_X - age_w,
+                   INTEL_GAUGE_H, intel["confidence"], gauge_col)
+        self.text.draw_text(x + INTEL_W - INTEL_PAD - age_w + 8, ty - 2,
+                            age_txt, LABEL_COL, SMALL_SIZE)
         # Track-quality ladder chip (proto 04): five ascending bars, filled
         # to Q, in the BELIEF teal family (a sensor grade, never truth).
+        # 'POS' names what is graded: position quality from staleness.
         ty += INTEL_GAUGE_H + 8
-        self.text.draw_text(tx, ty - 2, f"Q{intel['quality']}", LABEL_COL,
-                            SMALL_SIZE)
+        self.text.draw_text(tx, ty - 2, f"POS Q{intel['quality']}",
+                            LABEL_COL, SMALL_SIZE)
         q = int(intel["quality"])
         bx = tx + INTEL_VALUE_X
         for i in range(5):
@@ -1575,6 +1630,7 @@ class HUD:
             else:
                 self.text.draw_rect(bx + i * 9, ty + 12 - bar_h, 6, bar_h,
                                     (*_S.LINE_COL, 0.9))
+        return height
 
     # ----------------------------------------------- hints + corner labels
 

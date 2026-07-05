@@ -171,6 +171,9 @@ class CombatState(SandboxState):
         self.recorder = CommandRecorder(self.ledger, lambda: self._tick)
         self.recorder.tap(self.world)
         self._ledgered_losses: set[int] = set()
+        # F3 BUG-REPORT ANNOTATE mode (v2): None when closed, else the
+        # dict report_bug() builds (note buffer, tag list, pending shot).
+        self._bug_ui: dict | None = None
 
     def _pantsir_ammo_total(self) -> int:
         """Pooled 57E6 rounds remaining across all Pantsir units (alive or
@@ -455,16 +458,80 @@ class CombatState(SandboxState):
                 observed=bool(cause.get("observed", False)))
 
     def report_bug(self) -> None:
-        """F3: file a BLACK BOX bug report — THE SIM NEVER PAUSES.  Stamps
-        a MARK into the ledger, bundles report.md + ledger.jsonl +
-        commands.json into bug_reports/bug_NNN/, asks the App to drop this
-        frame's back buffer into the same folder, and flashes the folder
-        path as the HUD hint.  The report states recorded facts only (the
-        fog-honest track summary, the command/denial trail) — never
-        anything the sim didn't produce."""
+        """F3: open BUG-REPORT ANNOTATE mode (v2, 2026-07-05).
+
+        The flow the operator asked for: F3 freezes the moment (the sim
+        PAUSES — this is meta tooling, the pause-menu precedent, restored
+        on exit), a CLEAN screenshot of this exact frame is captured before
+        the overlay appears, then the operator TYPES the issue, optionally
+        CLICKS on-screen panels to tag them (name + rect + code site from
+        the UI registry), and ENTER files the bundle — report.md +
+        ledger.jsonl + commands.json + screenshot.png in bug_reports/
+        bug_NNN/.  ESC cancels.  The report states recorded facts only."""
+        if self._bug_ui is not None:
+            return                              # already annotating
+        if self.forensics_open:
+            self.forensics_open = False         # annotate over the live view
+        base = getattr(self.app, "bug_report_dir", "bug_reports")
+        os.makedirs(base, exist_ok=True)
+        shot = os.path.join(base, "_pending_shot.png")
+        # The App saves the back buffer AFTER this frame renders — and the
+        # overlay only starts drawing on the NEXT frame ("armed" gate), so
+        # the shot shows exactly what the operator saw, no overlay on top.
+        self.app.bug_shot_path = shot
+        self._bug_ui = {"note": "", "tags": [], "shot": shot,
+                        "prev_paused": self.app.paused, "armed": True,
+                        "hover": None}
+        self.app.paused = True
+        self.app.audio.ui_click()
+
+    def _bug_ui_event(self, ev) -> None:
+        """All input while annotate mode is up: type the note, click to
+        toggle tags, ENTER files, ESC cancels."""
+        ui = self._bug_ui
+        if ev.type == pygame.MOUSEMOTION:
+            ui["hover"] = self.ui.hit(*ev.pos)
+        elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            item = self.ui.hit(*ev.pos)
+            if item is not None:
+                names = [t["name"] for t in ui["tags"]]
+                if item["name"] in names:
+                    ui["tags"] = [t for t in ui["tags"]
+                                  if t["name"] != item["name"]]
+                else:
+                    ui["tags"].append(
+                        {"name": item["name"],
+                         "rect": [int(v) for v in item["rect"]],
+                         "code": item["code"]})
+                self.app.audio.ui_click()
+        elif ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_ESCAPE:
+                self._bug_cancel()
+            elif ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._bug_file()
+            elif ev.key == pygame.K_BACKSPACE:
+                ui["note"] = ui["note"][:-1]
+            else:
+                ch = getattr(ev, "unicode", "")
+                if ch and 32 <= ord(ch) < 127 and len(ui["note"]) < 240:
+                    ui["note"] += ch
+
+    def _bug_cancel(self) -> None:
+        ui = self._bug_ui
+        try:
+            if os.path.exists(ui["shot"]):
+                os.remove(ui["shot"])
+        except OSError:
+            pass
+        self.app.paused = ui["prev_paused"]
+        self._bug_ui = None
+        self.show_hint("BUG REPORT CANCELLED")
+
+    def _bug_file(self) -> None:
+        ui = self._bug_ui
         world = self.world
         t = float(getattr(world, "sim_time", 0.0))
-        self.ledger.mark(t, self._tick, note="BUG")
+        self.ledger.mark(t, self._tick, note=ui["note"] or "BUG")
         tracks = []
         for cid, trk in list(world.contacts.tracks.items())[:16]:
             tracks.append({"id": cid, "kind": trk.get("kind") or "-",
@@ -474,17 +541,66 @@ class CombatState(SandboxState):
         ctx = {"t": t, "tick": self._tick,
                "platform": self.active_platform,
                "selection": (f"contact={sel}" if sel is not None else ""),
-               "note": "",
+               "note": ui["note"],
+               "tags": ui["tags"],
                "tracks": tracks,
                "screenshot": "screenshot.png"}
         base = getattr(self.app, "bug_report_dir", "bug_reports")
         report = write_bug_report(base, self.ledger, ctx)
         folder = os.path.dirname(report)
-        # Saved by the App loop right after this frame renders (same
-        # read-pixels path as F2 — works on hidden windows too).
-        self.app.bug_shot_path = os.path.join(folder, "screenshot.png")
+        try:
+            if os.path.exists(ui["shot"]):
+                os.replace(ui["shot"],
+                           os.path.join(folder, "screenshot.png"))
+        except OSError:
+            pass
+        self.app.paused = ui["prev_paused"]
+        self._bug_ui = None
         self.show_hint(f"BUG REPORT FILED - {folder}", seconds=4.0)
         self.app.audio.ui_click()
+
+    def _render_bug_tail(self, w: int, h: int) -> None:
+        """End-of-render hook for every render branch: draw the annotate
+        overlay (once past the clean-screenshot frame) and clear the arm."""
+        if self._bug_ui is None:
+            return
+        if not self._bug_ui["armed"]:
+            self._draw_bug_overlay(w, h)
+        self._bug_ui["armed"] = False
+
+    def _draw_bug_overlay(self, w: int, h: int) -> None:
+        """The annotate sheet: soft dim (panels stay readable for tagging),
+        brass outlines on tagged panels, a faint outline under the cursor,
+        and the paper entry bar along the bottom (Wardroom paper tokens)."""
+        from engine.text import SMALL_SIZE
+        from game.states import (ACCENT, BELIEF, PAPER_BG, PAPER_INK,
+                                 PAPER_MUTED)
+        text = self.text
+        ui = self._bug_ui
+        text.draw_rect(0, 0, w, h, (0.0, 0.0, 0.0, 0.30))
+        hover = ui.get("hover")
+        if hover is not None:
+            x0, y0, x1, y1 = hover["rect"]
+            text.draw_lines([(x0, y0), (x1, y0), (x1, y1), (x0, y1),
+                             (x0, y0)], (*BELIEF, 0.8), 1.0)
+        for tg in ui["tags"]:
+            x0, y0, x1, y1 = tg["rect"]
+            text.draw_lines([(x0, y0), (x1, y0), (x1, y1), (x0, y1),
+                             (x0, y0)], (*ACCENT, 1.0), 2.0)
+        bar_h = 104
+        by = h - bar_h - 8
+        text.draw_rect(8, by, w - 16, bar_h, (*PAPER_BG, 0.97))
+        text.draw_text(24, by + 10,
+                       "BUG REPORT - SIM PAUSED - TYPE THE ISSUE",
+                       PAPER_INK, SMALL_SIZE)
+        note = (ui["note"] + "_")[-110:]
+        text.draw_text(24, by + 34, note, PAPER_INK)
+        tags = ("TAGGED: " + ", ".join(t["name"] for t in ui["tags"])
+                if ui["tags"] else "CLICK A PANEL TO TAG IT")
+        text.draw_text(24, by + 62, tags[:140], PAPER_MUTED, SMALL_SIZE)
+        text.draw_text(24, by + 82, "ENTER FILE   ESC CANCEL",
+                       PAPER_MUTED, SMALL_SIZE)
+        text.flush(w, h)
 
     # ------------------------------------------------------------- forensics
 
@@ -505,6 +621,11 @@ class CombatState(SandboxState):
         end overlay once the battle is decided (its option rows + ESC);
         otherwise the normal sandbox controls.  The map side-rail DEBRIEF
         button claims its click before the map layer eats it."""
+        if self._bug_ui is not None and not self._bug_ui["armed"]:
+            # Annotate mode owns ALL input until filed/cancelled (the sim
+            # is paused; nothing tactical can be missed underneath).
+            self._bug_ui_event(ev)
+            return
         if self.forensics_open:
             if self.forensics.handle_event(ev):
                 return
@@ -549,6 +670,7 @@ class CombatState(SandboxState):
             if self.controls_overlay:            # F1 works over the sheet
                 self.hud._controls_overlay(self, w, h)
                 self.hud.text.flush(w, h)
+            self._render_bug_tail(w, h)
             return
         if self._end_overlay is not None:
             self.controls.update(dt_real)        # free-cam still flies
@@ -559,11 +681,13 @@ class CombatState(SandboxState):
             w, h = self.window.size()
             self._draw_scene(w, h)
             self._end_overlay.render(dt_real)
+            self._render_bug_tail(w, h)
             return
         super().render(dt_real)
+        w, h = self.window.size()
         if self.map_open:
-            w, h = self.window.size()
             self._draw_map_rail(w, h)
+        self._render_bug_tail(w, h)
 
     def _draw_map_rail(self, w: int, h: int) -> None:
         """Side-rail DEBRIEF button on the tactical-map screen — docked on
@@ -583,6 +707,8 @@ class CombatState(SandboxState):
         from game.states import TEXT_COL
         text.draw_text(bx + 14, by + 9, label, TEXT_COL, SMALL_SIZE)
         self._rail_rect = (bx, by, bx + bw, by + bh)
+        self.ui.add("map.debrief_rail", bx, by, bw, bh,
+                    code="game/combat.py:_draw_map_rail")
         text.flush(w, h)
 
     def _build_meshes(self) -> None:

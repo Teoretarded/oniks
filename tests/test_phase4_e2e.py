@@ -383,7 +383,9 @@ def test_drone_panel_rows_airborne_and_down():
     w = CombatWorld()
     rows = drone_panel_rows(w)
     labels = [r[0] for r in rows]
-    assert labels == ["STATUS", "ALT", "SPD", "SENSORS", "RWR"]
+    # TASKING added 2026-07-05 (untasked-loiter cue) — honest pin update,
+    # the row set GREW, nothing was removed.
+    assert labels == ["STATUS", "TASKING", "ALT", "SPD", "SENSORS", "RWR"]
     assert rows[0][1] == "AIRBORNE"
     assert rows[-1][1] == "CLEAR"
     w.drone.kill()
@@ -392,3 +394,17 @@ def test_drone_panel_rows_airborne_and_down():
     assert [r[0] for r in rows] == ["STATUS", "RESPAWN"]
     assert rows[0][1] == "DOWN"
     assert rows[1][1].endswith(" s")
+
+
+def test_drone_panel_tasking_row_flags_the_untasked_loiter():
+    """Playtest 2026-07-05: an untasked drone silently finds NOTHING (the
+    fleet sits beyond the radar horizon) and the player read the empty sea
+    as 'detection broke'.  The panel must state the tasking state: amber
+    call-to-action while the route is empty, green WPT count once tasked."""
+    w = CombatWorld()
+    rows = dict((r[0], (r[1], r[2])) for r in drone_panel_rows(w))
+    assert "TASKING" in rows
+    assert rows["TASKING"][0] == "NONE - RMB ON MAP TO TASK"
+    w.drone.set_route([(0.0, 200_000.0), (50_000.0, 250_000.0)])
+    rows = dict((r[0], (r[1], r[2])) for r in drone_panel_rows(w))
+    assert rows["TASKING"][0] == "2 WPT"

@@ -827,9 +827,25 @@ class TacticalMap:
         self._drone_overlay()
         self._asw_overlay()
         self._chrome(w, h)
+        flight_h = 0.0
         if self.selected_missile is not None:    # Task RTG: live telemetry
-            self.sandbox.hud.draw_flight_block(self.sandbox,
-                                               self.selected_missile)
+            flight_h = self.sandbox.hud.draw_flight_block(
+                self.sandbox, self.selected_missile)
+        # Contact card AFTER the flight block, docked BELOW it when both are
+        # up (they used to draw through each other at the same top-left
+        # corner — playtest overlap, 2026-07-05).  16 = hud.MARGIN.
+        if self.selected_contact is not None:
+            intel_y = (max(INTEL_PANEL_Y, 16 + int(flight_h) + 8)
+                       if flight_h else INTEL_PANEL_Y)
+            ih = self.sandbox.hud._intel_panel(self.sandbox.world,
+                                               self.selected_contact,
+                                               self._platform_origin(),
+                                               INTEL_PANEL_X, intel_y)
+            if ih:
+                from game.hud import INTEL_W
+                self.sandbox.ui.add("map.intel_panel", INTEL_PANEL_X,
+                                    intel_y, INTEL_W, ih,
+                                    code="game/hud.py:_intel_panel")
         self.text.flush(w, h)
 
     # ------------------------------------------------------ terrain texture
@@ -1499,9 +1515,17 @@ class TacticalMap:
         if sandbox.active_platform == "drone":
             drone = getattr(world, "drone", None)
             if drone is not None and drone.alive:
-                line = (f"DRONE AIRBORNE   ALT {drone.pos[1] / 1e3:.1f} km   "
-                        f"WPT {len(drone.route)}   RECON ONLY")
-                col = ARMED_COL
+                if drone.route:
+                    line = (f"DRONE AIRBORNE   ALT {drone.pos[1] / 1e3:.1f} "
+                            f"km   WPT {len(drone.route)}   RECON ONLY")
+                    col = ARMED_COL
+                else:
+                    # Untasked-loiter cue (playtest 2026-07-05): an untasked
+                    # drone finds NOTHING beyond the radar horizon — say so
+                    # where the tasking happens, in amber.
+                    line = ("DRONE LOITERING - NO ROUTE   "
+                            "RMB PLACES RECON WAYPOINTS")
+                    col = RELOAD_COL
             else:
                 left = getattr(world, "drone_respawn_left", 0.0)
                 line = (f"DRONE DOWN   RESPAWN "
@@ -1574,14 +1598,11 @@ class TacticalMap:
 
         # M1 fog-of-war surfaces, queued into THIS batch (the map flushes once
         # at the end of draw() — never flush here, that would double-flush):
-        #  * the right-edge threat strip, TTI-origined on the player base;
-        #  * the docked contact-intel panel for the LMB-selected track.
+        # the right-edge threat strip, TTI-origined on the player base.
+        # (The contact-intel panel moved to draw() so it can dock BELOW the
+        # selected round's flight block instead of overlapping it.)
         hud = self.sandbox.hud
         hud._threat_strip(self.sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
-        if self.selected_contact is not None:
-            hud._intel_panel(world, self.selected_contact,
-                             self._platform_origin(),
-                             INTEL_PANEL_X, INTEL_PANEL_Y)
 
     def _target_text(self) -> str:
         tp = self.sandbox.target_point
