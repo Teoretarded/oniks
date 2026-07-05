@@ -449,3 +449,68 @@ compared against renders/ledger2_final_debrief.png.
 **Backlog surfaced:** stub row caps at 14 + '+N MORE' (no scroll yet);
 sensor-lane/BLACK BOX/SENSORS panes await design; top-down has no coast
 outline (terrain-derived overlay would be honest — render pass needed).
+
+---
+
+## Session 2026-07-05 (day) — BLACK BOX: battle ledger, F3 bug report, bit-exact replay, scenario forge
+
+**Mission:** make the game testable BY AN AI without a human playing —
+build items 1-3 of docs/research/ai_testability_roadmap_2026-07-05.md
+(battle ledger w/ denial channel, command record/replay + bug-flag key,
+scenario forge), solo (no agent fleet), lean + TDD.
+
+**Shipped (game/blackbox.py, world/scenario.py, wiring):**
+- BATTLE LEDGER: every COMBAT battle writes blackbox/battle_<stamp>_s<seed>
+  .jsonl (App hidden=True stays disk-silent; ledgers are also in-memory for
+  fake-app tests). Records: header (full CombatConfig + seed + short git
+  commit + schema v1), cmd (EVERY player world-verb call with RESOLVED args
+  + ok/DENIED, no matter the path — keyboard, map, or salvo beat: the
+  recorder taps the world verbs themselves), hint (EVERY HUD hint verbatim
+  = the denial/refusal channel), evt (the drained world effect events that
+  previously vanished after the particle pass), toggle (radar EMCON / drone
+  jam), loss (flight-recorder close-outs w/ fog-honest cause), hash
+  (state digest every 600 ticks — the Factorio CRC pattern), mark (F3),
+  end (outcome + grade). Sim NEVER reads any of it.
+- COMMAND RECORD/REPLAY: game/blackbox.replay_battle rebuilds the world
+  from the header config and re-applies the cmd/toggle log at the recorded
+  ticks; tools/replay_battle.py verifies every hash record (exit 1 on
+  mismatch — divergence = recording gap or determinism regression, never
+  absorbed), prints the event/hint/loss timeline, and --to-tick N stops at
+  the flagged moment and dumps deep state (rounds, ships, fog picture).
+  Tick convention LOCKED: tick = completed world steps at command time;
+  replay applies tick-n records before step n+1.
+- F3 REPORT BUG (new ActionDef, SYSTEM group, F1 auto-lists; SANDBOX =
+  graceful no-op hint): stamps a MARK, bundles bug_reports/bug_NNN/
+  (report.md field-ledger sheet + ledger.jsonl + commands.json +
+  screenshot.png saved by the App loop after the frame renders). The sheet
+  states RECORDED FACTS ONLY: seed/commit, active platform/selection,
+  fog-honest track summary, last commands w/ ok/DENIED, last hints
+  verbatim, the repro command line. THE SIM NEVER PAUSES.
+- SCENARIO FORGE (world/scenario.py, test/dev-facing only — nothing in the
+  game shell imports it): spawn_inbound() fires the REAL StrikeMissile the
+  enemy fires (TOMAHAWK VLS eject / JASSM air-drop release, same flags +
+  belly-of-tower aim as EnemyStrikeController); run_until(cond, timeout)
+  steps + drains like the live loop; set_battery() adjusts owned pools.
+  Canned predicates: first_hostile_air_track (fog-honest), battle_over.
+- MEASURED while building: a 45 km sea-skimming Tomahawk is first tracked
+  at ~4.8 km / T+174 s (the go-low horizon mechanic, working as designed) —
+  forge tests pinned to measured geometry, not wishes.
+
+**TDD:** 22 new tests red-first (tests/test_blackbox.py 13,
+tests/test_scenario_forge.py 7, tests/test_controls.py 2). Replay
+round-trip asserts state_digest equality; tamper test asserts a dropped
+command IS detected; tap-purity test asserts a tapped world evolves
+byte-identically to an untapped one.
+
+**Gates:** digest `7d5716..06add` byte-identical; smoke 84 PASS / 0 FAIL;
+targeted 93 green; live probe tools/probe_blackbox_live.py ALL PASS
+(real KEYDOWN path -> ledger -> denial -> toggle -> F3 bundle w/
+screenshot -> replay_battle exit 0, all hashes verified); full suite run
+recorded in this session's final report.
+
+**Backlog surfaced:** BLACK BOX forensics pane still AWAITING DESIGN — the
+ledger's evt/cmd/mark stream is its natural data source (user's approved
+direction: chronological color-coded event strip, clickable -> flight
+profile); an operator-note field on F3 (typed text) needs a text-input
+affordance the engine UI doesn't have yet; soak bot + golden stat bands =
+roadmap items 6-7.
