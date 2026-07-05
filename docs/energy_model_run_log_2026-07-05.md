@@ -71,3 +71,5 @@ launch_sequences_2026-07-05.md, launch_visuals_particles_2026-07-05.md.
 - Pantsir real boost 55 kN/1.5 s vs game 18 kN/3.5 s (flagged, unchanged).
 - Launch strips for more weapons (tomahawk/buk/pantsir need combat-world
   spawn recipes in the render tool).
+
+## FINAL (2026-07-06): full suite -n auto GREEN (exit 0, ~1300 tests) after wave 4. Satisfaction loop exit: tests + perf (12.58 ms/16 on the RTX 3050) + reviewed launch strips all passing in the same iteration. Digest df9dbde3...7b2321 confirmed stable through wave 4.
