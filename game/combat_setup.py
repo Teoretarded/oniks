@@ -273,6 +273,31 @@ for _pg, _prows in zip(_PAGE_GROUPS, _PAGES):
         "group row counts must cover every row except START"
 
 
+# ------------------------------------------------- mouse parity (2026-07-05)
+
+def tab_rail_rects(w_px: int, head_lh: int, small_lh: int) -> list:
+    """Pure tab-rail hit geometry: [(page_index, (x0, y0, x1, y1)), ...].
+    Single source of truth — render draws the rail FROM these rects and
+    handle_event hit-tests the SAME rects, so click and pixels can't drift."""
+    x = (w_px - SETUP_CONTENT_W) // 2
+    rail_y = 40 + head_lh + 12
+    rail_h = small_lh + 18
+    tab_w = SETUP_CONTENT_W / len(_PAGE_NAMES)
+    return [(i, (round(x + i * tab_w), rail_y,
+                 round(x + (i + 1) * tab_w), rail_y + rail_h))
+            for i in range(len(_PAGE_NAMES))]
+
+
+def step_direction(value_x0: float, value_x1: float, click_x: float,
+                   button: int) -> int:
+    """Mouse-step direction for a '< value >' cell: RMB always decrements;
+    LMB on the '<' third decrements, anywhere else (the value / '>')
+    increments — 'click it to make it two' is the natural gesture."""
+    if button == 3:
+        return -1
+    return -1 if click_x <= value_x0 + (value_x1 - value_x0) / 3.0 else 1
+
+
 class CombatSetupState(GameState):
     """Two-page setup screen for configuring a COMBAT session.
 
@@ -315,6 +340,10 @@ class CombatSetupState(GameState):
 
         # Per-render hit rectangles: [(row_index, (x0, y0, x1, y1))]
         self._hit_rects: list = []
+        # Mouse parity (2026-07-05): tab-rail page rects + per-row value-cell
+        # x-spans for click-stepping (filled at render; empty pre-render).
+        self._tab_rects: list = []
+        self._value_rects: dict = {}
 
     # ------------------------------------------------------------------ enter
 
@@ -364,10 +393,35 @@ class CombatSetupState(GameState):
                 self._sel = hit
                 self._cancel_seed_edit()
                 self.app.audio.ui_click()
-        elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+        elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button in (1, 3):
+            # Tab rail first (mouse parity 2026-07-05): click a page name to
+            # jump there — same effect as the TAB key.
+            for pi, (tx0, ty0, tx1, ty1) in self._tab_rects:
+                if tx0 <= ev.pos[0] <= tx1 and ty0 <= ev.pos[1] <= ty1:
+                    if pi != self._page:
+                        self._page = pi
+                        self._sel = 0
+                        self._cancel_seed_edit()
+                        self.app.audio.ui_click()
+                    return
             hit = self._hit(ev.pos)
-            if hit is not None:
-                self._sel = hit
+            if hit is None:
+                return
+            self._sel = hit
+            kind = self._current_row().get("kind")
+            if kind in ("stepper", "seed"):
+                # Click steps the value in place — parity with LEFT/RIGHT.
+                # (Hover already focused the row, so its '< value >' cell
+                # was drawn and its span recorded.)  Typing digits on the
+                # seed row still opens the edit buffer as before.
+                span = self._value_rects.get(hit)
+                if span is not None:
+                    self._adjust(step_direction(span[0], span[1],
+                                                ev.pos[0], ev.button))
+                else:
+                    self._adjust(-1 if ev.button == 3 else 1)
+                return
+            if ev.button == 1:
                 self._activate_current()
 
     def _handle_key(self, key: int, unicode: str) -> None:
@@ -512,6 +566,7 @@ class CombatSetupState(GameState):
         text = self.text
         x = (w - SETUP_CONTENT_W) // 2
         self._hit_rects = []
+        self._value_rects = {}
 
         head_lh  = text.line_height(HEADER_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
@@ -532,22 +587,24 @@ class CombatSetupState(GameState):
 
         # --- Tab rail: contiguous boxed tabs on a darker rail; the active tab
         # carries the plate-selected fill + a 3px brass bar along its bottom.
-        rail_y = 40 + head_lh + 12
-        rail_h = small_lh + 18
-        tab_w = SETUP_CONTENT_W / len(_PAGE_NAMES)
+        # Drawn FROM the shared hit geometry (tab_rail_rects) so the click
+        # targets and the pixels can never drift (mouse parity 2026-07-05).
+        self._tab_rects = tab_rail_rects(w, head_lh, small_lh)
+        rail_y = self._tab_rects[0][1][1]
+        rail_h = self._tab_rects[0][1][3] - rail_y
         text.draw_rect(x, rail_y, SETUP_CONTENT_W, rail_h, (*TAB_RAIL_BG, 1.0))
-        for i, name in enumerate(_PAGE_NAMES):
-            tx0 = round(x + i * tab_w)
+        for (i, (tx0, _ty0, tx1, _ty1)), name in zip(self._tab_rects,
+                                                     _PAGE_NAMES):
             if i:
                 text.draw_lines([(tx0, rail_y), (tx0, rail_y + rail_h)],
                                 (*LINE_COL, 1.0), 1.0)
             active = (i == self._page)
             if active:
-                text.draw_rect(tx0, rail_y, round(tab_w), rail_h, (*BG2, 1.0))
-                text.draw_rect(tx0, rail_y + rail_h - 3, round(tab_w), 3,
+                text.draw_rect(tx0, rail_y, tx1 - tx0, rail_h, (*BG2, 1.0))
+                text.draw_rect(tx0, rail_y + rail_h - 3, tx1 - tx0, 3,
                                (*ACCENT, 1.0))
             tw = text.text_width(name, SMALL_SIZE)
-            text.draw_text(round(tx0 + (tab_w - tw) / 2),
+            text.draw_text(round(tx0 + (tx1 - tx0 - tw) / 2),
                            rail_y + (rail_h - small_lh) // 2, name,
                            ACCENT if active else MUTED, SMALL_SIZE)
         text.draw_lines([(x, rail_y), (x + SETUP_CONTENT_W, rail_y),
@@ -632,6 +689,8 @@ class CombatSetupState(GameState):
                 val_col  = TEXT_COL
             vw = text.text_width(display)
             text.draw_text(x + w - PAD - vw, ty, display, val_col)
+            if selected and not self._seed_editing:
+                self._value_rects[idx] = (x + w - PAD - vw, x + w - PAD)
 
         elif kind == "stepper":
             text.draw_text(x + PAD, ty, label, label_col)
@@ -657,5 +716,10 @@ class CombatSetupState(GameState):
                 val_col = DISABLED if val_str in ("0", "NONE") else TEXT_COL
             vw = text.text_width(display)
             text.draw_text(x + w - PAD - vw, ty, display, val_col)
+            if selected:
+                # Click-step span (mouse parity 2026-07-05): hover already
+                # focused the row, so the drawn '< value >' cell IS the span
+                # the next click steps through step_direction.
+                self._value_rects[idx] = (x + w - PAD - vw, x + w - PAD)
 
         self._hit_rects.append((idx, (x, y, x + w, y + ROW_H)))

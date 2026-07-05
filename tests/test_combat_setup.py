@@ -543,3 +543,51 @@ def test_end_input_blocked_during_flash(end_victory):
 
 def test_end_effective_time_scale_zero(end_victory):
     assert end_victory.effective_time_scale() == 0.0
+
+
+# ------------------------------------------------- mouse parity (2026-07-05)
+# Playtest: 'I want to be able to click on everything' — the tab rail and
+# the stepper values gain LMB/RMB parity with TAB and LEFT/RIGHT.  Keyboard
+# paths unchanged (the law: keyboard path for every mouse affordance).
+
+def mouse_event(pos, button=1):
+    return pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=pos, button=button)
+
+
+def test_tab_rail_rects_cover_the_four_pages():
+    from game.combat_setup import tab_rail_rects
+    rects = tab_rail_rects(1600, 36, 23)
+    assert [i for i, _ in rects] == [0, 1, 2, 3]
+    xs = [r for _, r in rects]
+    for (ax0, _, ax1, _), (bx0, _, bx1, _) in zip(xs, xs[1:]):
+        assert ax1 == bx0                    # contiguous rail, no gaps
+    assert all(y1 > y0 for _, (_, y0, _, y1) in rects)
+
+
+def test_tab_rail_click_switches_page(setup):
+    from game.combat_setup import tab_rail_rects
+    setup._tab_rects = tab_rail_rects(1600, 36, 23)
+    pi, (x0, y0, x1, y1) = setup._tab_rects[2]
+    setup.handle_event(mouse_event(((x0 + x1) // 2, (y0 + y1) // 2)))
+    assert setup._page == 2
+    assert setup._sel == 0
+
+
+def test_step_direction_zones():
+    from game.combat_setup import step_direction
+    assert step_direction(60, 90, 62, 1) == -1    # '<' third decrements
+    assert step_direction(60, 90, 85, 1) == +1    # value/'>' side increments
+    assert step_direction(60, 90, 85, 3) == -1    # RMB always decrements
+
+
+def test_stepper_value_click_steps_the_field(setup):
+    rows = setup._rows()
+    idx = next(i for i, r in enumerate(rows) if r.get("kind") == "stepper")
+    field = rows[idx]["field"]
+    before = setup._fields[field]
+    setup._hit_rects = [(idx, (0, 0, 200, 20))]
+    setup._value_rects = {idx: (120, 180)}
+    setup.handle_event(mouse_event((170, 10), button=1))   # right zone: +
+    assert setup._fields[field] == before + rows[idx]["step"]
+    setup.handle_event(mouse_event((170, 10), button=3))   # RMB: -
+    assert setup._fields[field] == before

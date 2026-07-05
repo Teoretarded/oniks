@@ -180,6 +180,19 @@ class SandboxControls:
         consumed = sandbox.map_open and sandbox.tactical_map.handle_event(ev)
         if not consumed and ev.type == pygame.KEYDOWN:
             self._handle_key(ev.key)
+        # Mouse parity (2026-07-05): a LMB on a registered HUD panel
+        # dispatches its bound ACTION through the same dispatcher the key
+        # path uses (one dispatcher — click and key can never diverge).
+        # A registered panel with no action still consumes the click: a
+        # click on a plate must never start a camera drag behind it.
+        if (not consumed and not sandbox.map_open
+                and ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
+            ui = getattr(sandbox, "ui", None)
+            item = ui.hit(*ev.pos) if ui is not None else None
+            if item is not None:
+                if item.get("action"):
+                    self.dispatch_action(item["action"])
+                return
         # Orbit drags die on ANY button-up, even one the map consumed, so
         # opening the map mid-drag can never wedge the rotate state.
         if ev.type == pygame.MOUSEBUTTONUP and ev.button in (1, 3):
@@ -213,9 +226,13 @@ class SandboxControls:
 
     def _handle_key(self, key) -> None:
         """Resolve the key through the binding table and dispatch."""
+        self.dispatch_action(self.sandbox.app.keybinds.action_for(key))
+
+    def dispatch_action(self, action) -> None:
+        """The ONE action dispatcher — key bindings and registered-panel
+        clicks both land here, so mouse and keyboard cannot drift."""
         sandbox = self.sandbox
         app = sandbox.app
-        action = app.keybinds.action_for(key)
         if action == "menu":                # reserved: always ESC
             app.open_pause()                # sim freezes; RESUME continues
         elif action == "map":

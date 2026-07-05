@@ -280,3 +280,31 @@ def test_bug_report_default_binding_is_f3(tmp_path):
     kb = Keybinds(str(tmp_path / "settings.json"))
     assert kb.key_for("bug_report") == pygame.K_F3
     assert kb.action_for(pygame.K_F3) == "bug_report"
+
+
+def test_hud_click_dispatches_the_registered_action(ctl):
+    """Mouse parity (2026-07-05): a LMB on a registered UI rect dispatches
+    the SAME action id the key binding fires — one dispatcher, no drift."""
+    from game.ui_registry import UiRegistry
+    sb = ctl.sandbox
+    sb.ui = UiRegistry()
+    sb.ui.begin_frame()
+    sb.ui.add("hud.plate.body", 16, 46, 300, 170, action="salvo_mode")
+    ev = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(100, 100))
+    ctl.handle_event(ev)
+    assert sb.log == ["salvo_mode"]
+
+
+def test_hud_click_on_actionless_panel_is_consumed_not_camera(ctl):
+    """A click on a registered info panel (no action) is still consumed —
+    it must never fall through and start a camera drag behind the plate."""
+    from game.ui_registry import UiRegistry
+    sb = ctl.sandbox
+    sb.ui = UiRegistry()
+    sb.ui.begin_frame()
+    sb.ui.add("hud.flight_block", 16, 16, 300, 200)
+    sb.rig.mode = "orbit"
+    ev = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(100, 100))
+    ctl.handle_event(ev)
+    assert sb.log == []
+    assert ctl._orbit_drag is False
