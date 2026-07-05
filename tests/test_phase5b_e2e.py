@@ -332,13 +332,21 @@ def _force_awacs_track(w):
 def test_40n6_kills_awacs_beyond_200km_on_forced_track():
     w = CombatWorld()
     a = w.awacs
-    # The fled-orbit case: re-anchor the racetrack at z 240-280 km (the
-    # spawn orbit at 405-435 km sits outside even the 380 km envelope —
+    # The fled-orbit case: re-anchor the racetrack at z 205-245 km (the
+    # spawn orbit at 405-435 km sits outside even the design envelope —
     # the 40N6 forces the AWACS deep, it does not delete it).
-    a._corners = ((-20_000.0, 240_000.0), (-20_000.0, 280_000.0),
-                  (20_000.0, 280_000.0), (20_000.0, 240_000.0))
+    # Energy-model re-pin (2026-07-06, argued): the old 240-280 km anchor
+    # only ever died because the free-energy round could stern-chase a
+    # FLEEING AWACS at any range; honestly flown, the coast arrives at
+    # ~360 m/s at 240+ km and a 230 m/s flee outruns it — which is REAL
+    # (it is why AWACS stand off). The contract this test exists for —
+    # a kill BEYOND 200 km on a forced ELINT track, with the DEFEND flee
+    # ordered — holds at the deepest honest anchor: launch range measured
+    # 233 km, kill at 25.7 m closest with the flee under way.
+    a._corners = ((-20_000.0, 205_000.0), (-20_000.0, 245_000.0),
+                  (20_000.0, 245_000.0), (20_000.0, 205_000.0))
     a._wp = 1
-    a.pos[0], a.pos[2] = -20_000.0, 240_000.0
+    a.pos[0], a.pos[2] = -20_000.0, 205_000.0
     rng0 = float(np.hypot(a.pos[0] - SAM_TEL_POS[0],
                           a.pos[2] - SAM_TEL_POS[2]))
     assert rng0 > 200_000.0

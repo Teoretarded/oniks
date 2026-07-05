@@ -29,6 +29,7 @@ import numpy as np
 
 from sim.aero import (ALPHA_TAX, AP_TAU_SAM, CL_MAX_SAM, QS_FLOOR, lag_gain,
                       q_scalar)
+from sim.physics import DENSITY_SCALE_HEIGHT, RHO0
 from sim.guidance import pn_accel
 from sim.missile import _surface_at, _swept_surface_hit
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
@@ -84,7 +85,12 @@ AOA_COS = math.cos(AOA_MAX)
 # matters early in boost, where the closing speed is tiny and an uncapped
 # t_go would lead a crossing target by hundreds of kilometers.
 TGO_CLOSING_FLOOR = 50.0       # m/s
-TGO_MAX = 90.0                 # s
+# Lead cap 40 s (energy re-tune 2026-07-06; was 90): against an ORBITING
+# target a long lead swings the predicted point tens of km every turn and
+# the round S-curves after ghost leads — free before induced drag,
+# measured -9 m/s^2 (3.6x trim) on a 240 km AWACS coast. 40 s still tames
+# the early-boost tiny-closing-speed blowup the cap exists for.
+TGO_MAX = 40.0                 # s
 
 # Loft shaping (energy management): the commanded altitude sits above the
 # aim point by ``loft_gain`` per meter of ground range-to-go beyond the fade
@@ -127,11 +133,42 @@ MID_GAIN = 2.2                 # 1/s of angle error
 # PN; the terminal phase is untouched by this cap.
 MID_MAX_A_G = 4.0              # g of midcourse lateral correction
 
+# Energy cruise (2026-07-06): a coasting round's drag is minimized where
+# parasite == induced, i.e. at qS* = sqrt(k_ind/CD0) * L — and since the
+# optimum q is CONSTANT, the optimal ALTITUDE descends as the round slows
+# (induced trim drag grows as 1/v^2: a fixed 33 km coast melts itself in a
+# death spiral — measured: a 240 km 40N6 shot died 68 km short at a clean
+# 1-g trim). The loft bias is capped at the current drag-optimal altitude
+# plus a per-round allowance derived from the loft identity (the 40N6
+# deliberately rides above optimum — its tall arc IS its discriminator;
+# the cost is accepted and its motor re-based for it).
+COAST_CD0 = 0.30               # the supersonic-plateau CD0 the optimum uses
+COAST_OVER_OPT_FRAC = 0.25     # allowance = frac * (loft_bias_max - 14 km)
+
 # Follow-the-fall margin: the plunge is followed only while the round is
 # still this far ABOVE its (biased) aim altitude — below it, the normal
 # clamped glide-slope steering resumes so an air target's altitude plane
 # is levelled onto, never plunged through.
 FALL_FOLLOW_MARGIN_M = 3_000.0
+
+# Midcourse aim-direction filter (energy model 2026-07-06): a stale
+# uplinked track refreshes in JUMPS (the 1 Hz ELINT cadence), and chasing
+# each jump with a 4 g correction pulse was free before induced drag —
+# measured: a 240 km 40N6 coast bled at -9 m/s^2 (3.6x its honest 1-g trim
+# rate) purely on track jitter and died 64 km short. Real command uplinks
+# are filtered; the aim direction is smoothed on this time constant
+# (legitimate intercept geometry changes over tens of seconds pass
+# untouched). Terminal PN is NOT filtered.
+MID_AIM_TAU_S = 2.0
+
+# Terminal PN navigation constant 5 (energy re-tune 2026-07-06; module
+# default is 4): a DECELERATING interceptor carries a standing PN bias
+# miss proportional to its decel (Zarchan) — free-energy rounds never
+# decelerated in terminal, honest ones do (measured: clean control
+# closest 18.6 m, a hair inside the 20 m fuse; stealth-noise runs
+# clustered 22-31 m, just outside). N=5 is the classic counter real
+# interceptors fly for exactly this bias.
+TERMINAL_PN_GAIN = 5.0
 
 # Terminal autopilot bandwidth (gain scheduling, mirrors sim/missile.py
 # TERMINAL_AP_TAU): the endgame runs the tightest loop the airframe allows
@@ -290,6 +327,11 @@ class SamMissile:
         self._ap_tau = (sam_def.autopilot_tau if sam_def.autopilot_tau > 0.0
                         else AP_TAU_SAM)
         self._ap_x = self._ap_y = self._ap_z = 0.0  # achieved-accel lag state
+        # Energy-cruise state (see COAST_CD0): sqrt(k/CD0) and the per-round
+        # above-optimum allowance, precomputed once.
+        self._qs_opt_per_lift = math.sqrt(self._k_ind / COAST_CD0)
+        self._coast_over_opt = max(
+            0.0, (sam_def.loft_bias_max - 14_000.0) * COAST_OVER_OPT_FRAC)
         self._turn_rate = 0.0    # rad/s live path rotation (tilt slew state)
         # Body attitude: dead vertical in the tube; the renderer orients the
         # airframe by this, NOT by the velocity vector.
@@ -421,6 +463,19 @@ class SamMissile:
         w = self.weapon                # per-round loft (48N6 medium / 40N6 high)
         bias = min(w.loft_gain * max(rg - w.loft_fade_range, 0.0),
                    w.loft_bias_max)
+        # Energy cruise: never command a coast above the drag-optimal
+        # altitude (+ the per-round allowance) for the CURRENT speed — the
+        # optimum descends as the round slows (see COAST_CD0 note).
+        if bias > 0.0:
+            spd2 = vx * vx + vy * vy + vz * vz
+            if spd2 > 1.0:
+                rho_opt = (2.0 * self._qs_opt_per_lift * self.mass * GRAVITY
+                           / (w.ref_area * spd2))
+                if rho_opt < RHO0:
+                    h_opt = (-DENSITY_SCALE_HEIGHT
+                             * math.log(rho_opt / RHO0)
+                             + self._coast_over_opt)
+                    bias = min(bias, max(0.0, h_opt - ty))
         # Reentry rule (energy model 2026-07-05): a DESCENDING round never
         # chases the loft bias back UP — the bias shapes the ascent/coast;
         # fighting gravity on the way down only bleeds the dive (measured:
@@ -582,6 +637,7 @@ class SamMissile:
             self.vel[1] = w.eject_speed        # catapult: straight up
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
+        self._dt_last = dt                     # aim-filter step size
         if self.rng is not None:               # multipath tracking error
             self._update_multipath(dt)
 
@@ -670,7 +726,8 @@ class SamMissile:
             else:
                 tpos = self._lock_pos          # coast on the frozen estimate
                 tvel = np.zeros(3)
-            g = pn_accel(self.pos, self.vel, tpos, tvel)
+            g = pn_accel(self.pos, self.vel, tpos, tvel,
+                         n_gain=TERMINAL_PN_GAIN)
             gx, gy, gz = g.tolist()
             gy += GRAVITY                      # gravity compensation
             gmax = w.max_g * GRAVITY

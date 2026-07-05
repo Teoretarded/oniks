@@ -617,8 +617,12 @@ N40N6 = SamDef(
     # Same catapult cold-launch sequence as the 48N6 (same TEL family, same
     # delay unit: 1.5 s hang before ignition).
     eject_speed=18.0, eject_time=1.5,
-    # Larger motor for 380 km reach (see derivation above).
-    motor_thrust=280_000.0, motor_time=18.0, isp=240.0,
+    # Larger motor for the long reach (see derivation above). isp 258:
+    # modern large-solid band (energy re-base 2026-07-06 — the honest
+    # 1-g trim drag on the 200 km+ coast costs ~600-700 m/s; at isp 240
+    # the round died 47 km short of a 240 km AWACS on its speed floor);
+    # motor_time = 2142 kg / (280 kN / (258*9.81)) = 19.4 s.
+    motor_thrust=280_000.0, motor_time=19.4, isp=258.0,
     ref_area=0.208,    # same diameter as 48N6: pi * (0.515/2)^2
     max_g=20.0,        # slightly lower agility than 48N6 (heavier airframe)
     fuse_radius=25.0,
@@ -631,7 +635,11 @@ N40N6 = SamDef(
     # 20 km SARH gate).
     terminal_range=25_000.0,
     max_range=380_000.0,
-    self_destruct_t=380.0, self_destruct_speed=250.0,
+    # Timer 460 s (energy re-base 2026-07-06; was 380): the honest
+    # energy-cruise coast is slower — a 240 km shot reached terminal at
+    # t=380.0 still closing and the CLOCK killed it. Range is gated by the
+    # 250 m/s speed floor; the timer only reaps perpetual drifters.
+    self_destruct_t=460.0, self_destruct_speed=250.0,
     # Engagement floor 4,000 m: active seeker + high-loft geometry is
     # effectively blind/wasted below this altitude — the seeker dome looks
     # mostly DOWN in the loft and cannot resolve low-altitude clutter at

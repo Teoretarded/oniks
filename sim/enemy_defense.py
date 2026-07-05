@@ -138,7 +138,15 @@ SM6_MIN_RANGE_M = 50_000.0       # m: SM-6 reaches OUT (50-240 km); the SM-2's
 # edge cell to 7/15 and 3/15 with the close cell pinned ~0.93-1.0.
 # Clean-guidance control kills at all three ranges (the misses ARE the
 # noise).  Locked two-sided by tests/test_phase4_e2e.py.
-STEALTH_SNR_SIGMA_MAX_M = 60.0   # m per-axis OU RMS at the detection edge
+# ENERGY-MODEL RE-TUNE (2026-07-06): the felt miss is the wander the
+# LAGGED PN cannot remove — the 0.15 s terminal autopilot lag (sim/aero)
+# roughly doubled the felt miss per unit sigma (measured at sigma 60:
+# close-in shots clustered 23-31 m against the 20 m fuse, kill fraction
+# 0.47 vs the >=0.75 design band; the clean control still hit at 14.6 m,
+# so the misses ARE still the noise). sigma 40 restores the DESIGN shape
+# (near-certain up close, ~1/3 at the envelope edge) under the honest
+# autopilot.
+STEALTH_SNR_SIGMA_MAX_M = 40.0   # m per-axis OU RMS at the detection edge
 STEALTH_SNR_RANGE_EXP = 3.0      # sigma ~ (R / R_detect)^3 (see above)
 STEALTH_SNR_TAU_S = 0.7          # s correlation (scintillation/track loop)
 
