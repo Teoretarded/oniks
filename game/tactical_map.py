@@ -540,6 +540,13 @@ class TacticalMap:
         # id() while its trail lives — without it a dead round's trail could
         # graft onto a freshly-allocated missile (id reuse).
         self._trails: dict[int, tuple] = {}
+        # COMMAND BOARD (2026-07-05, behind ui_prefs map_layout): per-render
+        # click rects for the left CONTACTS rows, the LAUNCH key and the
+        # BOARD/CINEMA chips; the intel card dock the panels computed.
+        self._board_contact_rects: list = []   # (sid, (x0,y0,x1,y1))
+        self._board_launch_rect = None
+        self._board_chip_rects: list = []      # (name, rect)
+        self._board_intel_y = INTEL_PANEL_Y
 
         self.shader = Shader(MAP_VERT, MAP_FRAG)
         self.tex = 0                         # terrain texture: first open
@@ -610,6 +617,8 @@ class TacticalMap:
             self.view.zoom_at(pygame.mouse.get_pos(), ZOOM_STEP ** (-ev.y))
             return True
         if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == 1 and self._board_click(ev.pos):
+                return True              # a BOARD panel consumed the click
             if ev.button == 1:
                 self._click_target(ev.pos)
                 self.sandbox.app.audio.ui_click()
@@ -827,16 +836,28 @@ class TacticalMap:
         self._drone_overlay()
         self._asw_overlay()
         self._chrome(w, h)
+        board = self._board_mode()
+        if board:
+            self._board_panels(w, h)
         flight_h = 0.0
         if self.selected_missile is not None:    # Task RTG: live telemetry
+            # BOARD mode: the left column belongs to CONTACTS/SENSORS — the
+            # flight block joins the column flow below them (oracle-caught
+            # overlap, 2026-07-05); CLASSIC keeps the top-left dock.
+            fo = ((INTEL_PANEL_X, self._board_intel_y) if board else None)
             flight_h = self.sandbox.hud.draw_flight_block(
-                self.sandbox, self.selected_missile)
+                self.sandbox, self.selected_missile, origin=fo)
+            if board and flight_h:
+                self._board_intel_y += int(flight_h) + 8
         # Contact card AFTER the flight block, docked BELOW it when both are
         # up (they used to draw through each other at the same top-left
         # corner — playtest overlap, 2026-07-05).  16 = hud.MARGIN.
+        # BOARD mode: the card docks under the left panel column instead.
         if self.selected_contact is not None:
             intel_y = (max(INTEL_PANEL_Y, 16 + int(flight_h) + 8)
                        if flight_h else INTEL_PANEL_Y)
+            if board:
+                intel_y = max(self._board_intel_y, intel_y)
             ih = self.sandbox.hud._intel_panel(self.sandbox.world,
                                                self.selected_contact,
                                                self._platform_origin(),
@@ -847,6 +868,166 @@ class TacticalMap:
                                     intel_y, INTEL_W, ih,
                                     code="game/hud.py:_intel_panel")
         self.text.flush(w, h)
+
+    # ------------------------------------------------------- command board
+
+    def _board_mode(self) -> bool:
+        """True when the 2026-07-05 COMMAND BOARD layout is selected (the
+        persisted ui_prefs switch; F4 flips it live)."""
+        prefs = getattr(self.sandbox.app, "ui_prefs", None)
+        return prefs is not None and prefs.get("map_layout") == "board"
+
+    def _board_click(self, pos) -> bool:
+        """LMB routing for the BOARD panels — consumed BEFORE the canvas
+        pick so a click on a panel never also targets the sea behind it."""
+        if not self._board_mode():
+            return False
+        x, y = pos
+        for sid, (x0, y0, x1, y1) in self._board_contact_rects:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                self.selected_contact = (None if sid == self.selected_contact
+                                         else sid)
+                self.sandbox.app.audio.ui_click()
+                return True
+        r = self._board_launch_rect
+        if r is not None and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+            self.sandbox.request_launch()     # the SAME verb SPACE fires
+            return True
+        for name, (x0, y0, x1, y1) in self._board_chip_rects:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if name == "layout":
+                    self.sandbox.toggle_map_layout()
+                else:
+                    self.sandbox.toggle_launch_cinema()
+                return True
+        return False
+
+    def _board_panels(self, w: int, h: int) -> None:
+        """The COMMAND BOARD furniture (mock 2a's LAYOUT in the game's own
+        wardroom tokens — no glow, no invented data): left CONTACTS list +
+        SENSOR PICTURE, top-center threat cards, right platform plate with
+        its tube grid + a brass LAUNCH key, and the two mode chips.  Every
+        value comes from pure fog-honest builders (game/hud.py)."""
+        from engine.text import BODY_SIZE, SMALL_SIZE
+        from game.hud import (MARGIN, PANEL_W, board_contact_rows,
+                              sensor_picture_rows, threat_rows)
+        from game.states import (ACCENT, BELIEF, BG2, DANGER, FAINT,
+                                 LINE_COL, draw_brass_key, draw_panel,
+                                 draw_plate_header)
+        sandbox = self.sandbox
+        world = sandbox.world
+        text = self.text
+        now = float(getattr(world, "sim_time", 0.0))
+        small_lh = text.line_height(SMALL_SIZE)
+        body_lh = text.line_height(BODY_SIZE)
+        ui = sandbox.ui
+
+        # ---- LEFT: CONTACTS plate -----------------------------------------
+        px, py = INTEL_PANEL_X, 96
+        pw = 300
+        rows = board_contact_rows(world, self._platform_origin(), now)
+        row_h = small_lh + 10
+        head_band = 12 + small_lh + 7
+        ch = head_band + max(1, len(rows)) * row_h + 10
+        draw_panel(text, px, py, pw, ch, ticks=False)
+        draw_plate_header(text, px + 10, py + 12, pw - 20,
+                          f"CONTACTS - {len(rows)} TRK", BELIEF)
+        self._board_contact_rects = []
+        ry = py + head_band
+        if not rows:
+            text.draw_text(px + 12, ry + 4, "NO TRACKS", FAINT,
+                           SMALL_SIZE)
+        for r in rows:
+            sel = r["sid"] == self.selected_contact
+            if sel:
+                text.draw_rect(px + 1, ry, pw - 2, row_h, (*BG2, 1.0))
+                text.draw_rect(px + 1, ry, 3, row_h, (*ACCENT, 1.0))
+            col = (DANGER if r["hostile_wpn"] else BELIEF)
+            text.draw_text(px + 12, ry + 5, r["label"][:8], col, SMALL_SIZE)
+            info = f"{r['brg']:03d}  {r['rng_km']:5.0f}KM  Q{r['q']}"
+            iw = text.text_width(info, SMALL_SIZE)
+            text.draw_text(px + pw - 12 - iw, ry + 5, info,
+                           col if r["hostile_wpn"] else FAINT,
+                           SMALL_SIZE)
+            self._board_contact_rects.append(
+                (r["sid"], (px, ry, px + pw, ry + row_h)))
+            ui.add(f"map.board.contact.{r['sid']}", px, ry, pw, row_h,
+                   parent="map.board.contacts",
+                   code="game/tactical_map.py:_board_panels")
+            ry += row_h
+        ui.add("map.board.contacts", px, py, pw, ch,
+               code="game/tactical_map.py:_board_panels")
+
+        # ---- LEFT: SENSOR PICTURE plate ------------------------------------
+        sy = py + ch + 10
+        srows = sensor_picture_rows(world)
+        sh = head_band + len(srows) * row_h + 10
+        draw_panel(text, px, sy, pw, sh, ticks=False)
+        draw_plate_header(text, px + 10, sy + 12, pw - 20,
+                          "SENSOR PICTURE", BELIEF)
+        ry = sy + head_band
+        for label, value, col in srows:
+            text.draw_text(px + 12, ry + 5, label, FAINT, SMALL_SIZE)
+            vw = text.text_width(value, SMALL_SIZE)
+            text.draw_text(px + pw - 12 - vw, ry + 5, value, col, SMALL_SIZE)
+            ry += row_h
+        ui.add("map.board.sensors", px, sy, pw, sh,
+               code="game/tactical_map.py:_board_panels")
+        self._board_intel_y = sy + sh + 10
+
+        # ---- TOP-CENTER: threat cards (no ASSIGNED labels — fog law) ------
+        cards = threat_rows(world, (BASE_POS[0], BASE_POS[2]), now)[:3]
+        cw_card, chh = 210, head_band + small_lh * 2 + 16
+        total = len(cards) * (cw_card + 10) - 10
+        cx0 = (w - total) // 2 if cards else 0
+        for i, tr in enumerate(cards):
+            cx = cx0 + i * (cw_card + 10)
+            sev_col = (DANGER if tr.severity == "DANGER"
+                       else ACCENT if tr.severity == "WARN" else FAINT)
+            draw_panel(text, cx, 88, cw_card, chh, ticks=False)
+            draw_plate_header(text, cx + 10, 88 + 12, cw_card - 20,
+                              (tr.kind or "INBOUND").upper(), sev_col)
+            tti = ("--:--" if tr.tti is None
+                   else f"{int(tr.tti // 60):02d}:{int(tr.tti % 60):02d}")
+            text.draw_text(cx + 10, 88 + head_band + 4, tti, sev_col,
+                           BODY_SIZE)
+            brg = f"BRG {tr.brg:03d}  {tr.rng / 1e3:4.0f} KM"
+            bw2 = text.text_width(brg, SMALL_SIZE)
+            text.draw_text(cx + cw_card - 10 - bw2,
+                           88 + head_band + 4 + (body_lh - small_lh),
+                           brg, FAINT, SMALL_SIZE)
+            ui.add(f"map.board.threat.{i}", cx, 88, cw_card, chh,
+                   code="game/tactical_map.py:_board_panels")
+
+        # ---- RIGHT: the platform plate + LAUNCH key + chips ----------------
+        rx = w - PANEL_W - MARGIN
+        plate_h = sandbox.hud._launcher_block_at(sandbox, (rx, 96))
+        ky = 96 + int(plate_h) + 10
+        draw_brass_key(text, rx, ky, PANEL_W, 40,
+                       "SPACE > LAUNCH", focused=True, pressed=False)
+        self._board_launch_rect = (rx, ky, rx + PANEL_W, ky + 40)
+        ui.add("map.board.launch_key", rx, ky, PANEL_W, 40, action="launch",
+               code="game/tactical_map.py:_board_panels")
+        # Mode chips: the revert switch, on the board itself.
+        self._board_chip_rects = []
+        chip_y = ky + 50
+        prefs = getattr(sandbox.app, "ui_prefs", None)
+        cine = prefs is not None and prefs.get("launch_cinema")
+        for name, label in (("layout", "BOARD [F4]"),
+                            ("cinema", f"CINEMA {'ON' if cine else 'OFF'}"
+                                       " [F5]")):
+            lw2 = text.text_width(label, SMALL_SIZE) + 18
+            text.draw_rect(rx, chip_y, lw2, small_lh + 10, (*BG2, 0.9))
+            text.draw_lines([(rx, chip_y), (rx + lw2, chip_y),
+                             (rx + lw2, chip_y + small_lh + 10),
+                             (rx, chip_y + small_lh + 10), (rx, chip_y)],
+                            (*LINE_COL, 1.0), 1.0)
+            text.draw_text(rx + 9, chip_y + 5, label, FAINT, SMALL_SIZE)
+            self._board_chip_rects.append(
+                (name, (rx, chip_y, rx + lw2, chip_y + small_lh + 10)))
+            ui.add(f"map.board.chip.{name}", rx, chip_y, lw2, small_lh + 10,
+                   code="game/tactical_map.py:_board_panels")
+            rx += lw2 + 8
 
     # ------------------------------------------------------ terrain texture
 
@@ -1558,8 +1739,11 @@ class TacticalMap:
                 col = RELOAD_COL
             line = (f"{status}   {sandbox.profile.upper()}   "
                     f"WPT {len(sandbox.waypoints)}   {self._target_text()}")
-        lw = self.text.text_width(line)
-        self.text.draw_text((w - lw) * 0.5, 16 + head_h, line, col)
+        if not self._board_mode():
+            # BOARD mode: the right rail owns the platform status — the
+            # legacy center strip would collide with the threat cards.
+            lw = self.text.text_width(line)
+            self.text.draw_text((w - lw) * 0.5, 16 + head_h, line, col)
 
         # M5 ASW chrome: the finite buoy/ASW stocks (top-left, only when the
         # battle HAS them) + a bright modal tag while buoy-drop is armed.
@@ -1601,8 +1785,11 @@ class TacticalMap:
         # the right-edge threat strip, TTI-origined on the player base.
         # (The contact-intel panel moved to draw() so it can dock BELOW the
         # selected round's flight block instead of overlapping it.)
-        hud = self.sandbox.hud
-        hud._threat_strip(self.sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
+        # COMMAND BOARD mode replaces the strip with its top-center cards
+        # (its right rail owns that edge — no double furniture).
+        if not self._board_mode():
+            hud = self.sandbox.hud
+            hud._threat_strip(self.sandbox, (BASE_POS[0], BASE_POS[2]), w, h)
 
     def _target_text(self) -> str:
         tp = self.sandbox.target_point

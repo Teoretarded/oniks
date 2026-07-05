@@ -702,7 +702,12 @@ class CombatState(SandboxState):
         lh = text.line_height(SMALL_SIZE)
         bw = lw + 28
         bh = lh + 18
-        bx, by = 12, int(h * 0.5 - bh * 0.5)
+        # BOARD map mode: the left edge belongs to the CONTACTS/SENSOR
+        # column + the contact card — dock the rail at the bottom-left,
+        # above the hint bar, instead of mid-edge (oracle-caught overlap).
+        board = getattr(self.tactical_map, "_board_mode", lambda: False)()
+        bx = 12
+        by = (h - bh - 96) if board else int(h * 0.5 - bh * 0.5)
         draw_panel(text, bx, by, bw, bh)
         from game.states import TEXT_COL
         text.draw_text(bx + 14, by + 9, label, TEXT_COL, SMALL_SIZE)

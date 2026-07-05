@@ -496,6 +496,73 @@ def threat_rows(world, friendly_xz, now) -> list:
     return rows
 
 
+def board_contact_rows(world, origin_xz, now, limit: int = 12) -> list:
+    """The command-board CONTACTS list (2026-07-05) — pure, GL-free,
+    fog-honest: reads only the gated picture (tracks + estimated_pos).
+    Own IFF rounds are EXCLUDED (they live as map glyphs, not contacts).
+    Rows sort hostile WEAPON tracks first (by range — the closing threats),
+    then other air, then surface; each row carries the ladder-earned label,
+    bearing, range and the Q grade.  ``limit`` caps the list; the caller
+    shows '+N MORE' honesty when it truncates."""
+    from sim.contacts import OWN_KINDS
+    board = world.contacts
+    ox, oz = float(origin_xz[0]), float(origin_xz[1])
+    rows = []
+    for sid, trk in board.tracks.items():
+        kind = trk.get("kind")
+        if kind in OWN_KINDS:
+            continue
+        est = board.estimated_pos(sid, now)
+        dx, dz = est[0] - ox, est[2] - oz
+        rng = float(np.hypot(dx, dz))
+        stage, label = _classify(trk, now)
+        hostile_wpn = kind in HOSTILE_KINDS
+        is_air = bool(trk.get("is_air"))
+        rows.append({
+            "sid": sid, "label": label, "stage": stage,
+            "brg": _compass_bearing(float(dx), float(dz)),
+            "rng_km": round(rng / 1e3, 1),
+            "q": _track_quality(trk),
+            "air": is_air, "hostile_wpn": hostile_wpn,
+            "bucket": 0 if hostile_wpn else (1 if is_air else 2),
+        })
+    rows.sort(key=lambda r: (r["bucket"], r["rng_km"], r["sid"]))
+    return rows[:limit]
+
+
+def sensor_picture_rows(world) -> list:
+    """The command-board SENSOR PICTURE plate (2026-07-05) — pure,
+    own-force state only (emitters, stocks, drone tasking; no enemy
+    reads).  (label, value, color) rows, every value already shown
+    elsewhere in the game — this plate only gathers them."""
+    rows = []
+    radar = getattr(world, "radar_station", None)
+    if radar is not None:
+        if not getattr(radar, "alive", False):
+            rows.append(("RADAR", "DESTROYED", DANGER_COL))
+        elif getattr(radar, "emitting", False):
+            rows.append(("RADAR", "EMITTING", RELOAD_COL))
+        else:
+            rows.append(("RADAR", "SILENT", ARMED_COL))
+    elint = getattr(world, "elint", None)
+    if elint is not None:
+        rows.append(("ELINT", f"{len(elint.heard_emitters())} BEARINGS",
+                     VALUE_COL))
+    buoys = getattr(world, "sonobuoys", None)
+    if buoys is not None:
+        up = sum(1 for b in buoys if getattr(b, "alive", True))
+        rows.append(("BUOYS", f"{up} UP", VALUE_COL))
+    drone = getattr(world, "drone", None)
+    if drone is not None:
+        if not drone.alive:
+            rows.append(("DRONE", "DOWN", DANGER_COL))
+        elif getattr(drone, "route", ()):
+            rows.append(("DRONE", f"{len(drone.route)} WPT", VALUE_COL))
+        else:
+            rows.append(("DRONE", "LOITER - RMB TASK", RELOAD_COL))
+    return rows
+
+
 def contact_intel(world, sid, origin_xz, now):
     """The fog-of-war track inspector for the click-contact intel panel (M1,
     re-keyed by the classification spec) — pure, GL-free, deterministic.
@@ -1047,14 +1114,14 @@ class HUD:
             self._controls_overlay(sandbox, w, h)
         self.text.flush(w, h)
 
-    def draw_flight_block(self, sandbox, m) -> float:
+    def draw_flight_block(self, sandbox, m, origin=None) -> float:
         """Queue (no flush) the flight telemetry block for ``m``: the
         tactical map calls this for the LMB-selected round (Task RTG) so its
         telemetry shows in the same HUD flight block while the map is open.
         Returns the plate height so the caller can dock panels BELOW it
         (the contact card used to draw straight through this plate —
         playtest overlap, 2026-07-05)."""
-        return self._flight_block(sandbox, m)
+        return self._flight_block(sandbox, m, origin=origin)
 
     # ---------------------------------------------------------------- blocks
 
@@ -1086,8 +1153,13 @@ class HUD:
             ui.add("hud.clock_chip", x, y, bw, bh,
                    code="game/hud.py:_clock_chip")
 
+    def _launcher_block_at(self, sandbox, origin) -> float:
+        """The active platform's plate drawn at ``origin`` — the command
+        board's right rail (2026-07-05).  Returns the plate height."""
+        return float(self._launcher_block(sandbox, origin=origin) or 0.0)
+
     def _block(self, header: str, rows, cells=None, status=None,
-               emcon=None, reg=None) -> float:
+               emcon=None, reg=None, origin=None) -> float:
         """The PLATFORM PLATE (mock 04): header row (brass platform name +
         family-tinted status badge) over a brass-capped rule, label/value
         rows right-aligned (a truthy 4th row element marks the selected-
@@ -1096,8 +1168,11 @@ class HUD:
 
         ``cells`` is a ``tube_cells`` list (own-force only, [] in SANDBOX);
         ``status`` is an optional (text, color) badge; ``emcon`` an optional
-        (label, frac01, color) meter from emissions_exposure."""
+        (label, frac01, color) meter from emissions_exposure.  ``origin``
+        overrides the (MARGIN, MARGIN) top-left dock — the command-board
+        map (2026-07-05) draws the SAME plate on its right rail."""
         text = self.text
+        ox, oy = origin if origin is not None else (MARGIN, MARGIN)
         small_h = text.line_height(SMALL_SIZE)
         body_h = text.line_height(BODY_SIZE)
         tube_box_h = small_h + 12
@@ -1106,7 +1181,7 @@ class HUD:
         emcon_band = (small_h + 10) if emcon else 0
         height = (head_band + HEADER_GAP + len(rows) * LINE_H + tube_band
                   + emcon_band + PANEL_PAD)
-        draw_panel(text, MARGIN, MARGIN, PANEL_W, height, alpha=PANEL_ALPHA,
+        draw_panel(text, ox, oy, PANEL_W, height, alpha=PANEL_ALPHA,
                    fill=_S.PLATE_INK, ticks=False)
         # UI registry (mouse parity + F3 tagging, 2026-07-05): ``reg`` is
         # (sandbox, name, header_action, body_action).  The plate registers
@@ -1118,45 +1193,45 @@ class HUD:
             ui = getattr(sandbox, "ui", None)
             if ui is not None:
                 code = "game/hud.py:_block"
-                ui.add(name, MARGIN, MARGIN, PANEL_W, height, code=code)
+                ui.add(name, ox, oy, PANEL_W, height, code=code)
                 if header_action:
-                    ui.add(name + ".header", MARGIN, MARGIN, PANEL_W,
+                    ui.add(name + ".header", ox, oy, PANEL_W,
                            head_band, action=header_action, parent=name,
                            code=code)
                 if body_action:
-                    ui.add(name + ".body", MARGIN, MARGIN + head_band,
+                    ui.add(name + ".body", ox, oy + head_band,
                            PANEL_W, height - head_band, action=body_action,
                            parent=name, code=code)
-        tx = MARGIN + PANEL_PAD
+        tx = ox + PANEL_PAD
         inner_w = PANEL_W - 2 * PANEL_PAD
-        ty = MARGIN + 10
+        ty = oy + 10
         text.draw_text(tx, ty, header, HEADER_COL, SMALL_SIZE)
         if status is not None:
             s_text, s_col = status
             bw = round(text.text_width(s_text, SMALL_SIZE) + 14)
             bh = small_h + 4
-            bx = MARGIN + PANEL_W - PANEL_PAD - bw
+            bx = ox + PANEL_W - PANEL_PAD - bw
             by = ty - 2
             text.draw_rect(bx, by, bw, bh, (*s_col[:3], 0.14))
             text.draw_lines([(bx, by), (bx + bw, by), (bx + bw, by + bh),
                              (bx, by + bh), (bx, by)], (*s_col[:3], 0.9), 1.0)
             text.draw_text(bx + 7, ty, s_text, s_col, SMALL_SIZE)
         ty += small_h + 8
-        draw_header_rule(text, MARGIN + 1, ty, PANEL_W - 2)
+        draw_header_rule(text, ox + 1, ty, PANEL_W - 2)
         ty += 1 + HEADER_GAP
         for row in rows:
             label, value, col = row[0], row[1], row[2]
             selected = len(row) > 3 and row[3]
             vy = ty + (LINE_H - body_h) // 2
             if selected:
-                text.draw_rect(MARGIN + 1, ty, PANEL_W - 2, LINE_H,
+                text.draw_rect(ox + 1, ty, PANEL_W - 2, LINE_H,
                                (*_S.BG2, 1.0))
-                text.draw_rect(MARGIN + 1, ty, 3, LINE_H, (*ACCENT, 1.0))
+                text.draw_rect(ox + 1, ty, 3, LINE_H, (*ACCENT, 1.0))
             if label:
                 text.draw_text(tx, vy, label,
                                ACCENT if selected else LABEL_COL)
             vw = text.text_width(value)
-            text.draw_text(MARGIN + PANEL_W - PANEL_PAD - vw, vy, value, col)
+            text.draw_text(ox + PANEL_W - PANEL_PAD - vw, vy, value, col)
             ty += LINE_H
         if cells:
             ty += TUBE_ROW_GAP
@@ -1213,7 +1288,7 @@ class HUD:
                     text.draw_rect(bx + 2, y + box_h - 4, fw, 2,
                                    (*col[:3], 0.9))
 
-    def _flight_block(self, sandbox, m) -> None:
+    def _flight_block(self, sandbox, m, origin=None) -> float:
         """In-flight telemetry for the followed missile (Oniks or SAM).
         The flight phase is the plate's status badge (TERMINAL pops
         dusk-red); TIME/CLOCK live in the top-center clock chip."""
@@ -1248,20 +1323,20 @@ class HUD:
                          VALUE_COL))
         return self._block(m.weapon.display_name.upper(), rows,
                            status=(label, phase_col),
-                           reg=(sandbox, "hud.flight_block", None, None))
+                           reg=(sandbox, "hud.flight_block", None, None),
+                           origin=origin)
 
-    def _launcher_block(self, sandbox) -> None:
+    def _launcher_block(self, sandbox, origin=None) -> None:
         """Active platform's launcher status while nothing is followed."""
         if sandbox.active_platform == "drone":
-            self._drone_block(sandbox)
-        elif sandbox.active_platform == "s300":
-            self._s300_block(sandbox)
-        elif sandbox.active_platform == "buk":
-            self._buk_block(sandbox)
-        else:
-            self._bastion_block(sandbox)
+            return self._drone_block(sandbox, origin=origin)
+        if sandbox.active_platform == "s300":
+            return self._s300_block(sandbox, origin=origin)
+        if sandbox.active_platform == "buk":
+            return self._buk_block(sandbox, origin=origin)
+        return self._bastion_block(sandbox, origin=origin)
 
-    def _drone_block(self, sandbox) -> None:
+    def _drone_block(self, sandbox, origin=None) -> None:
         """Recon-drone platform panel (Phase 4): flight/sensor/RWR rows from
         the pure helper; the STATUS row is the plate's badge.  The EMCON
         meter rides inside the plate — the drone is where the EW pod goes
@@ -1272,12 +1347,12 @@ class HUD:
         if rows and rows[0][0] == "STATUS":
             status = (rows[0][1], rows[0][2])
             rows = rows[1:]
-        self._block("RECON DRONE", rows, status=status,
+        return self._block("RECON DRONE", rows, status=status,
                     emcon=emissions_exposure(world),
                     reg=(sandbox, "hud.plate.drone", "cycle_platform",
-                         "jam"))
+                         "jam"), origin=origin)
 
-    def _bastion_block(self, sandbox) -> None:
+    def _bastion_block(self, sandbox, origin=None) -> None:
         world = sandbox.world
         if getattr(world, "defeated", False):
             # COMBAT lose condition: the TEL structure is rubble — the
@@ -1328,14 +1403,14 @@ class HUD:
         if salvo is not None:
             rows.append(salvo)
         # M1-F4 tube boxes + M3-F5 in-plate EMCON meter (own-force).
-        self._block(BASTION.display_name.upper(), rows,
+        return self._block(BASTION.display_name.upper(), rows,
                     cells=tube_cells(world, "bastion"),
                     status=(status, col),
                     emcon=emissions_exposure(world),
                     reg=(sandbox, "hud.plate.bastion", "cycle_platform",
-                         "oniks_weapon"))
+                         "oniks_weapon"), origin=origin)
 
-    def _s300_block(self, sandbox) -> None:
+    def _s300_block(self, sandbox, origin=None) -> None:
         world = sandbox.world
         sam_round = getattr(sandbox, "sam_round", "48n6")
         status, col, name, ammo_text = s300_round_panel(world, sam_round)
@@ -1362,14 +1437,14 @@ class HUD:
         salvo = salvo_readout(sandbox)
         if salvo is not None:
             rows.append(salvo)
-        self._block(S300_TEL.display_name.upper(), rows,
+        return self._block(S300_TEL.display_name.upper(), rows,
                     cells=tube_cells(world, "s300"),
                     status=(status, col),
                     emcon=emissions_exposure(world),
                     reg=(sandbox, "hud.plate.s300", "cycle_platform",
-                         "sam_round"))
+                         "sam_round"), origin=origin)
 
-    def _buk_block(self, sandbox) -> None:
+    def _buk_block(self, sandbox, origin=None) -> None:
         """M5 Buk mid-SAM platform panel (mirror of _s300_block): the selected
         round's readiness + both pools from buk_round_panel, the target summary
         around the Buk site, and the per-tube battery row."""
@@ -1393,12 +1468,12 @@ class HUD:
             world, engaging=getattr(sandbox, "pantsir_engaging", False))
         if pantsir is not None:
             rows.append(pantsir)
-        self._block(BUK_TEL.display_name.upper(), rows,
+        return self._block(BUK_TEL.display_name.upper(), rows,
                     cells=tube_cells(world, "buk"),
                     status=(status, col),
                     emcon=emissions_exposure(world),
                     reg=(sandbox, "hud.plate.buk", "cycle_platform",
-                         "sam_round"))
+                         "sam_round"), origin=origin)
 
     @staticmethod
     def _target_summary(sandbox, origin) -> str:

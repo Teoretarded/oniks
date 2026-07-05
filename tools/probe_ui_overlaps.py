@@ -56,8 +56,15 @@ def main() -> int:
     tracks = list(state.world.contacts.tracks)
     state.tactical_map.selected_contact = tracks[0] if tracks else None
     state.render(1 / 60)
-    check("map + selected round + selected contact (playtest overlap case)",
+    check("map[BOARD] + selected round + selected contact (playtest case)",
           state.ui.overlaps())
+
+    # The revert switch's other side: CLASSIC layout, same situation.
+    app.ui_prefs.values["map_layout"] = "classic"   # in-memory only
+    state.render(1 / 60)
+    check("map[CLASSIC] + selected round + selected contact",
+          state.ui.overlaps())
+    app.ui_prefs.values["map_layout"] = "board"
 
     pygame.quit()
     print(f"[probe] {'ALL PASS' if not FAILS else f'{len(FAILS)} FAIL'}")
