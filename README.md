@@ -52,6 +52,7 @@ in game for the live table.
 | E / Q | free cam up / down (SHIFT fast, CTRL+SHIFT very fast) |
 | **SYSTEM** | |
 | F2 | screenshot to renders/ |
+| F3 | report bug (ledger mark + bundle to bug_reports/) |
 | F1 | controls overlay *(reserved)* |
 | ESC | menu / back *(reserved)* |
 

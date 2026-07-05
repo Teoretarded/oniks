@@ -81,6 +81,9 @@ class FakeSandbox:
     def request_asw(self):
         self.log.append("asw_launch")
 
+    def report_bug(self):
+        self.log.append("report_bug")
+
     def toggle_auto_warp(self):
         # M6 auto-time-warp: the key dispatches to the SandboxControls method
         # (the real sandbox forwards to it); record the dispatch here so the
@@ -263,3 +266,17 @@ def test_real_forwarder_routes_the_T_key_to_the_director(tmp_path):
     assert "ui_click" in sb.app.audio.calls      # forwarder's UX click fired
     ctl._handle_key(pygame.K_t)
     assert not ctl.auto_warp
+
+
+def test_bug_report_key_dispatches(ctl):
+    """F3 (bug_report binding, AI-testability build 2026-07-05) routes to
+    sandbox.report_bug — the flag-a-bug-while-playing affordance."""
+    sb = ctl.sandbox
+    ctl._handle_key(pygame.K_F3)
+    assert sb.log == ["report_bug"]
+
+
+def test_bug_report_default_binding_is_f3(tmp_path):
+    kb = Keybinds(str(tmp_path / "settings.json"))
+    assert kb.key_for("bug_report") == pygame.K_F3
+    assert kb.action_for(pygame.K_F3) == "bug_report"

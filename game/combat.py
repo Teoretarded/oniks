@@ -31,14 +31,21 @@ tests.
 
 from __future__ import annotations
 
+import os
+import time
+
 import pygame
 
 from engine.mesh import Mesh
+from game.blackbox import (
+    HASH_EVERY_TICKS, BattleLedger, CommandRecorder, git_commit,
+    write_bug_report,
+)
 from game.combat_end import CombatEndOverlay
 from game.controls import PLATFORMS_COMBAT, combat_platforms
 from game.flight_recorder import FlightRecorder
 from game.forensics import ForensicsScreen
-from game.sandbox import AIRCRAFT_DRAW_RANGE, SandboxState
+from game.sandbox import AIRCRAFT_DRAW_RANGE, HINT_SECONDS, SandboxState
 from game.scoring import (
     compute_par, compute_scorecard, grade, new_telemetry,
     picture_has_actionable_contact,
@@ -141,6 +148,29 @@ class CombatState(SandboxState):
         self.forensics = ForensicsScreen(self)
         self.forensics_open = False
         self._rail_rect = None       # map side-rail DEBRIEF button hit box
+        # BLACK BOX (AI-testability build 2026-07-05): the battle ledger +
+        # command recorder — every player world-verb call (keyboard, map or
+        # salvo beat) is recorded with resolved args at its sim tick, every
+        # refusal hint verbatim, every drained world event, a state hash
+        # every HASH_EVERY_TICKS.  Render/AAR-layer observers ONLY: the sim
+        # never reads any of it (digest-locked by tools/wf_m5_digest.py).
+        # The JSONL file appears only when the App carries a blackbox_dir
+        # (hidden batch tools and headless tests stay disk-silent).
+        self._tick = 0               # completed world steps (replay clock)
+        cfg = self._config or getattr(self.world, "_config", None)
+        led_dir = getattr(app, "blackbox_dir", None)
+        path = None
+        if led_dir:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            seed = int(getattr(cfg, "seed", 0) or 0)
+            path = os.path.join(led_dir, f"battle_{stamp}_s{seed}.jsonl")
+        self.ledger = BattleLedger(path)
+        self.ledger.header(
+            cfg, commit=git_commit(),
+            created=time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime()))
+        self.recorder = CommandRecorder(self.ledger, lambda: self._tick)
+        self.recorder.tap(self.world)
+        self._ledgered_losses: set[int] = set()
 
     def _pantsir_ammo_total(self) -> int:
         """Pooled 57E6 rounds remaining across all Pantsir units (alive or
@@ -261,6 +291,13 @@ class CombatState(SandboxState):
         self._accumulate_telemetry()
         # Exact fixed-step path sampling (this method runs once per PHYS_DT).
         self.flight_recorder.update(self.world)
+        # BLACK BOX: ledger newly-closed rounds (the recorder just classified
+        # them), advance the replay tick clock, and drop the periodic state
+        # hash (the determinism tripwire replay verifies against).
+        self._ledger_losses()
+        self._tick += 1
+        if self._tick % HASH_EVERY_TICKS == 0:
+            self.recorder.emit_hash(self.world)
         self._check_end_state()
 
     # ------------------------------------------------------------- end screen
@@ -313,6 +350,11 @@ class CombatState(SandboxState):
                           else getattr(self.world, "defeat_cause", None)))
         overlay.enter()
         self._end_overlay = overlay
+        # BLACK BOX: the outcome record (the file stays open — the sim and
+        # the ledger keep running under the AAR until the session ends).
+        self.ledger.end(float(getattr(self.world, "sim_time", 0.0)),
+                        "victory" if victory else "defeat",
+                        grade=str(getattr(card, "grade", "") or ""))
 
     def _campaign_advance(self) -> None:
         """Record the decided battle into the campaign: snapshot the ledger,
@@ -355,6 +397,94 @@ class CombatState(SandboxState):
             return card
         except Exception:
             return None
+
+    # ------------------------------------------------------------- black box
+
+    def show_hint(self, text: str, seconds: float = HINT_SECONDS) -> None:
+        """Every HUD hint is ALSO a ledger record: the hint line is the
+        game's denial/refusal channel verbatim ('S-300: NO READY TUBE...'),
+        which is exactly the trail a bug hunter greps first."""
+        super().show_hint(text, seconds)
+        led = getattr(self, "ledger", None)
+        if led is not None:
+            led.hint(float(getattr(self.world, "sim_time", 0.0)), text)
+
+    def _on_world_events(self, events) -> None:
+        """The drained effect events (ship_hit / sam_kill / base_hit...)
+        flow into the ledger with their sim time — the base class drains
+        them for particles only and they used to vanish."""
+        led = getattr(self, "ledger", None)
+        if led is None or not events:
+            return
+        t = float(getattr(self.world, "sim_time", 0.0))
+        for kind, pos in events:
+            led.evt(t, kind, pos)
+
+    def toggle_radar(self) -> None:
+        """Radar EMCON flips change the battle (ESM back-plot) — record the
+        applied state as a replayable toggle."""
+        radar = getattr(self.world, "radar_station", None)
+        before = getattr(radar, "emitting", None)
+        super().toggle_radar()
+        after = getattr(radar, "emitting", None)
+        if radar is not None and after != before:
+            self.recorder.toggle(self.world, "radar", bool(after))
+
+    def toggle_jam(self) -> None:
+        drone = getattr(self.world, "drone", None)
+        before = getattr(drone, "jam_active", None)
+        super().toggle_jam()
+        after = getattr(getattr(self.world, "drone", None), "jam_active",
+                        None)
+        if after is not None and after != before:
+            self.recorder.toggle(self.world, "jam", bool(after))
+
+    def _ledger_losses(self) -> None:
+        """Mirror each round's close-out (death anchor + cause) from the
+        flight recorder into the ledger — once, at the tick it closed."""
+        for key, rec in self.flight_recorder.tracks.items():
+            if rec.get("death") is None or key in self._ledgered_losses:
+                continue
+            self._ledgered_losses.add(key)
+            cause = rec.get("cause") or {}
+            self.ledger.loss(
+                float(rec["death"]["t"]), kind=str(rec.get("kind", "?")),
+                seq=int(rec.get("seq", 0)),
+                code=str(cause.get("code", "lost")),
+                detail=str(cause.get("detail", "") or ""),
+                observed=bool(cause.get("observed", False)))
+
+    def report_bug(self) -> None:
+        """F3: file a BLACK BOX bug report — THE SIM NEVER PAUSES.  Stamps
+        a MARK into the ledger, bundles report.md + ledger.jsonl +
+        commands.json into bug_reports/bug_NNN/, asks the App to drop this
+        frame's back buffer into the same folder, and flashes the folder
+        path as the HUD hint.  The report states recorded facts only (the
+        fog-honest track summary, the command/denial trail) — never
+        anything the sim didn't produce."""
+        world = self.world
+        t = float(getattr(world, "sim_time", 0.0))
+        self.ledger.mark(t, self._tick, note="BUG")
+        tracks = []
+        for cid, trk in list(world.contacts.tracks.items())[:16]:
+            tracks.append({"id": cid, "kind": trk.get("kind") or "-",
+                           "air": bool(trk.get("is_air")),
+                           "age_s": round(float(trk.get("age", 0.0)), 1)})
+        sel = self.tactical_map.selected_contact
+        ctx = {"t": t, "tick": self._tick,
+               "platform": self.active_platform,
+               "selection": (f"contact={sel}" if sel is not None else ""),
+               "note": "",
+               "tracks": tracks,
+               "screenshot": "screenshot.png"}
+        base = getattr(self.app, "bug_report_dir", "bug_reports")
+        report = write_bug_report(base, self.ledger, ctx)
+        folder = os.path.dirname(report)
+        # Saved by the App loop right after this frame renders (same
+        # read-pixels path as F2 — works on hidden windows too).
+        self.app.bug_shot_path = os.path.join(folder, "screenshot.png")
+        self.show_hint(f"BUG REPORT FILED - {folder}", seconds=4.0)
+        self.app.audio.ui_click()
 
     # ------------------------------------------------------------- forensics
 
@@ -492,6 +622,7 @@ class CombatState(SandboxState):
                                      struct.pos.copy()))
 
     def dispose(self) -> None:
+        self.ledger.close()
         self._mesh_drone.delete()
         self._mesh_fighter.delete()
         self._mesh_awacs.delete()

@@ -4,3 +4,5 @@ renders/
 sounds/*.wav
 .pytest_cache/
 cache/
+blackbox/
+bug_reports/

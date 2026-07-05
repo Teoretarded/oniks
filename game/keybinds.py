@@ -135,6 +135,13 @@ ACTIONS: tuple[ActionDef, ...] = (
     ActionDef("freecam_up", "FREE CAM UP", "CAMERA", pygame.K_e),
     ActionDef("freecam_down", "FREE CAM DOWN", "CAMERA", pygame.K_q),
     ActionDef("screenshot", "SCREENSHOT", "SYSTEM", pygame.K_F2),
+    # BLACK BOX bug flag (AI-testability build 2026-07-05): F3 files a bug
+    # report mid-battle — stamps a MARK into the battle ledger, bundles the
+    # command/denial/event trail + a screenshot into bug_reports/, and
+    # flashes the folder as a hint.  The sim NEVER pauses.  F3 was unclaimed
+    # by every prior default; in SANDBOX (no ledger) it is a graceful
+    # no-op hint, same convention as the other combat-only actions.
+    ActionDef("bug_report", "REPORT BUG", "SYSTEM", pygame.K_F3),
     ActionDef("controls_overlay", "CONTROLS OVERLAY", "SYSTEM", pygame.K_F1,
               reserved=True),
     ActionDef("menu", "MENU / BACK", "SYSTEM", pygame.K_ESCAPE,

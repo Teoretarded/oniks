@@ -548,6 +548,12 @@ class SandboxState(GameState):
         SANDBOX, same convention as the other combat-only actions."""
         self.show_hint("FORENSICS LEDGER: COMBAT ONLY")
 
+    def report_bug(self) -> None:
+        """F3 (bug_report binding): the BLACK BOX bug flag is COMBAT-only
+        (it stamps the battle ledger and bundles its trail) — graceful
+        no-op hint in SANDBOX, same convention as toggle_forensics."""
+        self.show_hint("BUG REPORT: COMBAT ONLY")
+
     def toggle_battery_panel(self) -> None:
         """O (battery_panel binding): toggle the EXPANDED per-battery STATUS
         PANEL (every player Oniks/S-300 tube's LOADED/RELOADING/EMPTY + the
@@ -1180,7 +1186,12 @@ class SandboxState(GameState):
             if key not in live:
                 del self._ramjet_acc[key]
 
-        for kind, pos in world.drain_events():
+        events = world.drain_events()
+        # Ledger tap (AI-testability build): CombatState records the drained
+        # effect events into the battle ledger; the base class ignores them.
+        # Pure observation — the effects loop below consumes the same list.
+        self._on_world_events(events)
+        for kind, pos in events:
             if kind == "ship_hit":
                 self.effects.explosion(pos, EXPLOSION_SCALE_SHIP,
                                        water=pos[1] < SHIP_HIT_SPLASH_MAX_Y)
@@ -1233,6 +1244,10 @@ class SandboxState(GameState):
         self._update_parts(dt)
         self._update_tel(dt)
         self.effects.update(dt)
+
+    def _on_world_events(self, events) -> None:
+        """Hook for the battle ledger (CombatState overrides).  The base
+        sandbox keeps no ledger — a deliberate no-op."""
 
     def _missile_effects(self, missiles, dt: float) -> None:
         """Exhaust trail feed + plume emission for every live missile.

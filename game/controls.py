@@ -270,6 +270,8 @@ class SandboxControls:
             self._scale_idx = min(len(TIME_SCALES) - 1, self._scale_idx + 1)
         elif action == "screenshot":
             app.screenshot_requested = True
+        elif action == "bug_report":
+            sandbox.report_bug()
         elif action == "controls_overlay":  # reserved: always F1
             sandbox.toggle_controls_overlay()
 

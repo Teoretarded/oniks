@@ -55,6 +55,11 @@ class App:
         self.paused = False
         self.frame_step = False             # N: one sim step while paused
         self.screenshot_requested = False   # F2: saved after render
+        # BLACK BOX (AI-testability build): where CombatState writes the
+        # per-battle ledger JSONL.  Hidden windows are batch tools
+        # (smoke/perf/screenshot harnesses) — they stay disk-silent.
+        self.blackbox_dir = None if hidden else "blackbox"
+        self.bug_shot_path = None           # F3: bug-report screenshot dest
         self.running = True                 # cleared by QUIT / menu QUIT
         self.keybinds = Keybinds()          # persisted action->key table
         self.states = StateMachine()
@@ -209,6 +214,16 @@ class App:
             if self.screenshot_requested:
                 self.screenshot_requested = False
                 print(f"[main] saved {self._save_screenshot()}")
+            if self.bug_shot_path:
+                # F3 bug report: the just-rendered frame into the report
+                # folder (same back-buffer read as F2).
+                path, self.bug_shot_path = self.bug_shot_path, None
+                try:
+                    pygame.image.save(
+                        self.window.read_pixels_to_surface(), path)
+                    print(f"[main] bug screenshot {path}")
+                except (OSError, pygame.error):
+                    pass                    # a failed shot never kills play
             self.window.swap()
             frames += 1
         elapsed = time.perf_counter() - t0
