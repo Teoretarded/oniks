@@ -514,3 +514,65 @@ direction: chronological color-coded event strip, clickable -> flight
 profile); an operator-note field on F3 (typed text) needs a text-input
 affordance the engine UI doesn't have yet; soak bot + golden stat bands =
 roadmap items 6-7.
+
+---
+
+## Session 2026-07-05 (afternoon) — playtest bug wave + mouse parity + F3 annotate mode
+
+**Trigger:** live user playtest of the morning's BLACK BOX build. Every
+report probed before touching code (probe-first law).
+
+**Confirmed + fixed (regression-locked):**
+- 40N6 FALSE FLOOR DENIAL: both launch_sam gates (world/world.py,
+  world/combat.py) + the sandbox hint gate judged the STALE raW fix
+  track["pos"][1]; the contact card displays the dead-reckoned estimate
+  (est 4.8 km vs fix 3.6 km on a climber) -> 'BELOW 4KM FLOOR' at a
+  displayed 4.7+ km. All three gates now judge estimated_pos — the number
+  the card shows. 2 new tests (sandbox + combat worlds); the zero-rate
+  low-target refusal tests still pass (two-sided).
+- 'SHIPS NOT DETECTED' = NOT a regression: probed 3 seeds x 15 sim-min —
+  the untasked drone loiters over the base (route [] by design since
+  Phase 4) and the fleet sits beyond the ~50 km radar horizon; the RMB
+  tasking path verified working through real events. Root cause is
+  DISCOVERABILITY: new amber TASKING row on the drone plate ('NONE - RMB
+  ON MAP TO TASK') + map chrome line 'DRONE LOITERING - NO ROUTE'.
+  (Measured for the record: a 45 km sea-skimmer is first TRACKED at
+  ~4.8 km/T+174 s — the go-low horizon working as designed; S-300 CAN
+  accept missile-track launches post-07-03 but geometry keeps skimmer
+  kills inside the ~20-25 km site envelope; Pantsir is the designed
+  base-area counter.)
+- CONTACT CARD overlapped the selected round's flight block on the map
+  (both docked top-left): the card now docks BELOW the block
+  (draw_flight_block returns its height). CONF relabeled FIX + seconds
+  readout (the draining bar = fix age between sweeps, snapping back per
+  fix); Q chip reads POS Qn.
+- TAB now retargets the camera onto the platform it selects (drone
+  platform -> the flying drone; before: camera stayed on the Bastion TEL).
+
+**Mouse parity (playtest: 'let me click on everything'):**
+- Setup screen: page tabs clickable (tab_rail_rects — ONE geometry for
+  pixels and hits), stepper/seed values click-step ('<' third / RMB = down,
+  value/'>' = up; step_direction pure + tested), hover still selects,
+  keyboard unchanged.
+- Battle HUD: new per-frame UI REGISTRY (game/ui_registry.py — name, rect,
+  bound ACTION id, code site, parent). Plates register header (TAB) +
+  body zones (bastion: weapon cycle B; s300/buk: round select V; drone:
+  EW pod G); clock chip, flight block, intel panel, map rail registered.
+  SandboxControls gained dispatch_action — key bindings and panel clicks
+  land in the SAME dispatcher (cannot drift); clicks on registered
+  panels never start camera drags.
+- LAYOUT ORACLE: registry.overlaps() + tools/probe_ui_overlaps.py — the
+  AI 'looks' at the rendered UI geometrically; the probe covers every
+  platform plate + the exact reported overlap case. ALL PASS.
+
+**F3 BUG REPORT v2 (annotate mode):** F3 pauses the sim (meta tooling —
+pause-menu precedent, restored on exit), captures a CLEAN pre-overlay
+screenshot, then the operator TYPES the issue in-game, CLICKS panels to
+tag them (brass outline; tag = name + rect + code site from the registry),
+ENTER files bug_reports/bug_NNN/ (report.md w/ note + TAGGED UI section +
+ledger.jsonl + commands.json + screenshot.png), ESC cancels.
+tools/probe_blackbox_live.py drives the whole flow through real KEYDOWNs:
+ALL PASS (incl. pause/restore + typed note in the report).
+
+**Gates:** digest 7d5716..06add byte-identical; smoke 84/84; 179 targeted
+green; full suite run split A/B (results in session report).
