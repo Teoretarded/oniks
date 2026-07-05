@@ -576,3 +576,54 @@ ALL PASS (incl. pause/restore + typed note in the report).
 
 **Gates:** digest 7d5716..06add byte-identical; smoke 84/84; 179 targeted
 green; full suite run split A/B (results in session report).
+
+---
+
+## Session 2026-07-05 (evening) — COMMAND BOARD map, new main menu, NCTR tier, launch cinema
+
+**The user's brief:** implement the design-round map LAYOUT but NOT its
+'AI-generated cyber' look ("its own unique style"); the new main menu;
+radar-signature platform identification depth; launch a cinematic corner
+view when firing from the map; everything chop-and-revertable.
+
+**Shipped (all behind/with the revert switch):**
+- game/ui_prefs.py: persisted UI prefs (%APPDATA%/ONIKS/ui_prefs.json,
+  keybinds-grade never-crash contract).  map_layout board/classic +
+  launch_cinema on/off.  F4 / F5 (new ActionDefs, F1 auto-lists) + on-board
+  chips flip them live.  CLASSIC layout fully preserved.
+- COMMAND BOARD map (mock 2a's LAYOUT in the game's OWN wardroom tokens —
+  flat plates, no glow, no invented data): left CONTACTS list (fog-honest
+  pure builder board_contact_rows — hostile weapons first, IFF rounds
+  excluded, ladder labels + Q grades; rows CLICK-select) + SENSOR PICTURE
+  plate (sensor_picture_rows); top-center threat cards (threat_rows, no
+  PK EST / no ASSIGNED labels — fog law); right rail = the REAL platform
+  plate (hud._block gained an origin param) with tube grid + EMCON + a
+  brass SPACE>LAUNCH key firing the SAME request_launch verb + the two
+  mode chips; DEBRIEF rail docks bottom-left in board mode; selected-round
+  flight block + contact card join the left column flow.  Legacy center
+  platform strip suppressed in board mode (the rail owns it).
+- NEW MAIN MENU (approved menu mock): dusk-sea backdrop from flat petrol
+  bands + brass low-sun line peeking BETWEEN the title and menu plates +
+  swell sheen lines + faint plot arcs + umber coast silhouette; title
+  plate (ONIKS / amber trade line / command line) and the menu plate at
+  the left third.  Engine-honest, no glow.  Iterated 3x against my own
+  renders.
+- PLATFORM-TYPE NCTR (sim, digest byte-identical): the classification
+  ladder gained a THIRD tier — enemy airframes carry platform_kind
+  (fighter/awacs/jammer) and the TYPE upgrades AIR -> FIGHTER/AWACS/JAMMER
+  only after PLATFORM_IDENT_DWELL (45 s, stealth 60 s; two-sided pinned:
+  slower than weapon ident, earnable before track drop).  The user's
+  radar-signature depth ask, through the existing honest dwell mechanism.
+- LAUNCH CINEMA PiP: while the map is open and a launch cinematic is live,
+  a scissored corner viewport renders the round leaving the rail (second
+  scene pass, small fill, only for the cinematic seconds); framed +
+  captioned; F5/chip toggles; ui-registry registered.
+
+**Oracle catch of the day:** probe_ui_overlaps (now auditing BOTH layouts)
+caught the flight block overlapping the board's left column — fixed by
+docking it into the column flow.  The layout oracle found a real defect
+within hours of existing.
+
+**Gates:** digest 7d5716..06add byte-identical (NCTR is player-picture
+only); smoke 84/84; probes ALL PASS (blackbox live + overlaps both
+layouts); 240 targeted green; full suite halves in the session report.
