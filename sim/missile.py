@@ -17,6 +17,8 @@ import math
 
 import numpy as np
 
+from sim.aero import (AP_TAU_CRUISE, CL_MAX_CRUISE, K_INDUCED, QS_FLOOR,
+                      lag_gain, q_scalar)
 from sim.guidance import (STEER_GAIN, STEER_MAX_A, altitude_hold_accel,
                           pn_accel, waypoint_reached)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
@@ -264,18 +266,21 @@ def _swept_surface_hit(world, x0, y0, z0, x1, y1, z1):
     return None
 
 
-def _steer_heading_scalar(vx: float, vz: float, desired_heading: float):
+def _steer_heading_scalar(vx: float, vz: float, desired_heading: float,
+                          max_a: float = STEER_MAX_A):
     """guidance.steer_heading_accel on plain floats: returns the (x, z)
     lateral-accel components (the y component is always 0). Identical
     float ops in identical order — no per-substep array temporaries
-    (Task GATE perf)."""
+    (Task GATE perf). ``max_a``: saturation clip — per-weapon max_g*g in
+    the energy-model machines (the q-limit downstream is what actually
+    bounds the achieved g)."""
     horiz_speed = math.hypot(vx, vz)
     if horiz_speed < 1e-9:
         return 0.0, 0.0
     heading = math.atan2(vx, vz)
     err = (desired_heading - heading + math.pi) % (2.0 * math.pi) - math.pi
     a_lat = STEER_GAIN * err * horiz_speed
-    a_lat = min(max(a_lat, -STEER_MAX_A), STEER_MAX_A)
+    a_lat = min(max(a_lat, -max_a), max_a)
     s = a_lat / horiz_speed
     return vz * s, -vx * s
 
@@ -397,6 +402,21 @@ class Missile:
         # fade arithmetic is byte-for-byte unchanged for them.
         self._stall_speed = min(
             STALL_SPEED, STALL_MACH_FRAC * weapon.cruise_mach_lo * STALL_REF_SOUND)
+        # Energy model (sim/aero.py, plan 2026-07-05): per-weapon overrides
+        # with class defaults. Turning COSTS speed: the applied guidance
+        # accel is q-limited, lagged (three-loop autopilot ~ first-order
+        # tau), and charged as induced drag in the guided phases.
+        self._k_ind = weapon.k_induced if weapon.k_induced > 0.0 else K_INDUCED
+        self._cl_max = weapon.cl_max if weapon.cl_max > 0.0 else CL_MAX_CRUISE
+        self._ap_tau = (weapon.autopilot_tau if weapon.autopilot_tau > 0.0
+                        else AP_TAU_CRUISE)
+        self._thrust_tau = weapon.thrust_tau
+        self._ap_x = self._ap_y = self._ap_z = 0.0  # achieved-accel lag state
+        self._thrust_act = 0.0                      # spooled sustainer thrust
+        # Gross heading errors bank at the airframe limit (a real autopilot
+        # commands hard-over on a 180), not at the old flat 6 g steer clip;
+        # the q-limit + induced drag are what make it expensive.
+        self._steer_max_a = weapon.max_g * GRAVITY
         self._plan_vertical_profile()
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
@@ -557,6 +577,13 @@ class Missile:
             target_mach = self._commanded_speed / speed_of_sound_scalar(alt)
         thrust = KP_THRUST * (target_mach - m_now) * THRUST_SCALE + drag_ff
         thrust = min(max(thrust, 0.0), w.max_thrust)
+        if self._thrust_tau > 0.0:
+            # Engine spool (energy model): a ramjet/turbofan cannot step to
+            # max in one tick — first-order lag, fuel burned on the ACTUAL
+            # (spooled) thrust. Post-turn speed recovery is visibly gradual.
+            self._thrust_act += ((thrust - self._thrust_act)
+                                 * lag_gain(dt, self._thrust_tau))
+            thrust = self._thrust_act
         self.fuel = max(0.0, self.fuel - thrust / (w.isp * GRAVITY) * dt)
         return thrust
 
@@ -610,12 +637,14 @@ class Missile:
         still call the shared ``pn_accel``."""
         w = self.weapon
         if self.phase == PH_CLIMB:
-            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
+                                           self._steer_max_a)
             gy = altitude_hold_accel(alt, vs, self.cruise_alt,
                                      ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_CRUISE:
             target_alt = self.cruise_alt if self.hi else w.lo_alt
-            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
+                                           self._steer_max_a)
             gy = altitude_hold_accel(alt, vs, target_alt,
                                      ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
         elif self.phase == PH_DESCENT:
@@ -623,7 +652,8 @@ class Missile:
             ramp = (self._descent_alt0
                     - self._descent_ramp_rate * self._descent_elapsed)
             target_alt = max(w.skim_alt, ramp)
-            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
+                                           self._steer_max_a)
             gy = altitude_hold_accel(alt, vs, target_alt,
                                      DESCENT_KP, DESCENT_KD,
                                      ALT_MAX_A * self._descent_scale) + GRAVITY
@@ -657,7 +687,8 @@ class Missile:
                                       np.zeros(3)).tolist()
                 gy += GRAVITY
             else:
-                gx, gz = _steer_heading_scalar(vx, vz, self._route_heading())
+                gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
+                                               self._steer_max_a)
                 ralt, rvs = self._skim_ref(alt, vs, world)
                 gy = altitude_hold_accel(ralt, rvs, w.skim_alt,
                                          ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
@@ -833,14 +864,37 @@ class Missile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase in (PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL):
-            # One atmosphere evaluation feeds both the Mach-hold thrust
-            # (drag feedforward) and the drag force (Task GATE perf: the
-            # old code computed the identical mach/cd/drag twice per step).
+            # One atmosphere evaluation feeds the q-limit, the induced drag,
+            # the Mach-hold feedforward and the drag force (Task GATE perf).
             m_now = mach_scalar(speed, alt)
-            drag = drag_force_scalar(speed, alt, cd_from_mach_scalar(m_now),
-                                     w.ref_area)
-            thrust = self._sustainer_thrust(m_now, drag, dt, alt)
+            q = q_scalar(speed, alt)
+            qs = q * w.ref_area
+            drag = qs * cd_from_mach_scalar(m_now)
             gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
+            # --- energy model (sim/aero.py; research doc §3-§5) ---
+            # 1. q-limit: the airframe can only lift q*S*CLmax — at low
+            #    speed or high altitude the rated max_g simply is not there.
+            a_avail = qs * self._cl_max / self.mass
+            n2 = gx * gx + gy * gy + gz * gz
+            if n2 > a_avail * a_avail:
+                s = a_avail / math.sqrt(n2)
+                gx *= s
+                gy *= s
+                gz *= s
+            # 2. autopilot lag: fins take ~tau to bite — commanded accel is
+            #    never achieved in the tick it is commanded.
+            k = lag_gain(dt, self._ap_tau)
+            self._ap_x += (gx - self._ap_x) * k
+            self._ap_y += (gy - self._ap_y) * k
+            self._ap_z += (gz - self._ap_z) * k
+            gx, gy, gz = self._ap_x, self._ap_y, self._ap_z
+            # 3. induced drag: the lift that bends the path is paid for in
+            #    drag ~ n^2/q — THE fix for "does a 180 without losing
+            #    speed" (user feel report 2026-07-05, confirmed in code:
+            #    turning was energetically free).
+            lift = self.mass * math.sqrt(gx * gx + gy * gy + gz * gz)
+            drag += self._k_ind * lift * lift / max(qs, QS_FLOOR)
+            thrust = self._sustainer_thrust(m_now, drag, dt, alt)
 
         # --- semi-implicit Euler + phase shaping clamps (scalar: Task 22) ---
         coef = (thrust - drag) / self.mass

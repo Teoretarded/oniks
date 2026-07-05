@@ -47,6 +47,12 @@ class WeaponDef:
     #                                 geometrically too late to duck onto the
     #                                 deck inside its g-limit; measured 151 m
     #                                 overfly)
+    # --- energy model (sim/aero.py; 0.0 = UNSET -> the class defaults;
+    # research: docs/research/missile_energy_autopilot_2026-07-05.md) ------
+    k_induced: float = 0.0    # induced-drag factor K (winged airframes ~0.035)
+    cl_max: float = 0.0       # max lift coeff on ref_area (q-limits available g)
+    autopilot_tau: float = 0.0  # s, achieved-accel first-order lag
+    thrust_tau: float = 0.0   # s, sustainer spool lag (0 = instant / solid)
 
 
 ONIKS = WeaponDef(
@@ -60,6 +66,10 @@ ONIKS = WeaponDef(
     seeker_range=50_000.0, seeker_half_angle_deg=32.0,
     max_g=11.0, warhead_mass=250.0,
     ref_area=0.3526,   # pi * (0.67/2)^2
+    # Energy model: CLmax anchors the rated 11 g at the design point
+    # (Mach 2 sea level: CL_need = 11*9.81*3000/(q*S) = 3.24 -> 4.0 with
+    # margin); ramjet spools over ~1 s.
+    cl_max=4.0, thrust_tau=1.0,
 )
 
 
@@ -100,6 +110,10 @@ ZIRCON = WeaponDef(
     seeker_range=60_000.0, seeker_half_angle_deg=30.0,
     max_g=14.0, warhead_mass=300.0,
     ref_area=0.3848,   # pi * (0.70/2)^2
+    # Energy model: hypersonic body — 14 g needs only CL 0.85 at its Mach
+    # 4.5 sea-level arrival; 2.5 keeps the rating available down to
+    # ~890 m/s and fades it honestly below (scramjet-body low-alpha class).
+    cl_max=2.5, thrust_tau=1.0,
 )
 
 
@@ -142,6 +156,11 @@ class SamDef:
     loft_gain: float = 0.55             # m of altitude bias per m of range-to-go
     loft_bias_max: float = 14_000.0     # m, peak loft above the aim point
     loft_fade_range: float = 25_000.0   # m, range-to-go below which loft -> 0
+    # --- energy model (sim/aero.py; 0.0 = UNSET -> the class defaults;
+    # research: docs/research/missile_energy_autopilot_2026-07-05.md) ------
+    k_induced: float = 0.0    # induced-drag factor K
+    cl_max: float = 0.0       # max lift coeff on ref_area (q-limits available g)
+    autopilot_tau: float = 0.0  # s, achieved-accel first-order lag
 
 
 S300 = SamDef(
@@ -157,6 +176,9 @@ S300 = SamDef(
     terminal_range=20_000.0, max_range=150_000.0,
     self_destruct_t=180.0, self_destruct_speed=250.0,
     min_intercept_alt=100.0, max_intercept_alt=25_000.0,
+    # Energy model: 25 g at the ~1200 m/s / 5 km design point needs CL 2.1
+    # on the burned-out 880 kg airframe -> 3.5 with margin.
+    cl_max=3.5,
 )
 
 # SM-2 Block IIIB / Mk 41 VLS — ship-launched interceptor
@@ -199,6 +221,9 @@ SM2 = SamDef(
     # floor-justification regression): tests/test_sm2_statistics.py —
     # hi batch kill >= 0.75, lo batch within [0.2, 0.65].
     min_intercept_alt=25.0, max_intercept_alt=24_000.0,
+    # Energy model: 25 g at ~1000 m/s / 3 km on the 510 kg dry airframe
+    # needs CL 3.15 -> 4.5 with margin.
+    cl_max=4.5,
 )
 
 
@@ -258,6 +283,12 @@ class StrikeDef:
     max_g: float                # max lateral acceleration in g
     warhead_mass: float         # kg
     fuse_radius: float          # m, proximity fuse kill radius (HARM / default)
+    # --- energy model (sim/aero.py; 0.0 = UNSET -> the class defaults;
+    # research: docs/research/missile_energy_autopilot_2026-07-05.md) ------
+    k_induced: float = 0.0    # induced-drag factor K (winged airframes ~0.035)
+    cl_max: float = 0.0       # max lift coeff on ref_area (q-limits available g)
+    autopilot_tau: float = 0.0  # s, achieved-accel first-order lag
+    thrust_tau: float = 0.0   # s, cruise-engine spool lag (0 = instant/solid)
 
 
 # --- Tomahawk BGM-109 (ship-launched VLS, land-attack) -----------------------
@@ -301,6 +332,10 @@ TOMAHAWK = StrikeDef(
     max_g=4.0,             # g, terrain-following cruise missile maneuvering cap
     warhead_mass=450.0,    # kg conventional unitary warhead (TLAM-C cited)
     fuse_radius=5.0,       # m (impact fuze — hits ground; not a proximity weapon)
+    # Energy model: WINGED airframe — lift is wing-borne (K 0.035, not the
+    # 0.2 body-lift default); 4 g at Mach 0.74 sea level needs CL ~ 5.4 on
+    # the body cross-section -> 7. Turbofan spools over ~3 s.
+    k_induced=0.035, cl_max=7.0, thrust_tau=3.0,
 )
 
 # --- 3M14 Kalibr-PL (sub-launched land-attack, M5) ---------------------------
@@ -344,6 +379,8 @@ KALIBR_PL = StrikeDef(
     max_g=4.0,             # g terrain-following cruise (= TLAM)
     warhead_mass=450.0,    # kg conventional warhead (real Kalibr land-attack)
     fuse_radius=5.0,       # m impact fuze (= TLAM; not a proximity weapon)
+    # Energy model: = TLAM (same winged turbofan class).
+    k_induced=0.035, cl_max=7.0, thrust_tau=3.0,
 )
 
 
@@ -379,6 +416,8 @@ JASSM = StrikeDef(
     max_g=4.0,             # g cruise maneuvering cap
     warhead_mass=109.0,    # kg WDU-42/B penetrating warhead (cited)
     fuse_radius=5.0,       # m (impact fuze)
+    # Energy model: winged turbojet cruiser (= TLAM class).
+    k_induced=0.035, cl_max=7.0, thrust_tau=3.0,
 )
 
 # --- AGM-88 HARM (air-launched anti-radiation) --------------------------------
@@ -417,6 +456,9 @@ HARM = StrikeDef(
     max_g=15.0,            # g, agile anti-radiation seeker head
     warhead_mass=66.0,     # kg WDU-21/B fragmentation warhead (cited)
     fuse_radius=15.0,      # m proximity fuse (game spec §8: "proximity 15 m")
+    # Energy model: 15 g at Mach 2 / 5 km on the ~250 kg mid-burn airframe
+    # needs CL 4.6 -> 6 (solid sustain: no thrust lag).
+    cl_max=6.0,
 )
 
 # --- Kh-31P (player anti-radiation, M2-T2) ------------------------------------
@@ -497,6 +539,9 @@ KH31P = StrikeDef(
     max_g=15.0,            # g, agile anti-radiation seeker head (= HARM)
     warhead_mass=87.0,     # kg (cited Kh-31P warhead)
     fuse_radius=12.0,      # m proximity fuse (slightly tighter than HARM's 15 m)
+    # Energy model: 15 g at ~1000 m/s / 3 km on the ~540 kg airframe needs
+    # CL 1.8 -> 3.0; the ramjet sustainer spools over ~1 s.
+    cl_max=3.0, thrust_tau=1.0,
 )
 
 # --- 40N6-class very-long-range SAM (player, Phase 5) -------------------------
@@ -581,6 +626,10 @@ N40N6 = SamDef(
     # handover ~15 km below apogee, kills close movers and reaches past the
     # 48N6's self-destruct range.  Locked by tests/test_s300_rounds_distinct.py.
     loft_gain=0.55, loft_bias_max=24_000.0, loft_fade_range=45_000.0,
+    # Energy model: a high-altitude interceptor needs big normal force in
+    # thin air — CL 8 keeps meaningful authority through the 20-30 km band
+    # (its 20 g rating is honestly q-limited up at the apogee, as in life).
+    cl_max=8.0,
 )
 
 # 40N6 TEL: same 5P85 body, 2 rounds (the heavier missile halves the load).
@@ -649,6 +698,10 @@ PANTSIR_57E6 = SamDef(
     self_destruct_speed=100.0,  # m/s post-burnout minimum (see above)
     min_intercept_alt=5.0,      # m — reaches sea-skimmers (spec §4.2)
     max_intercept_alt=15_000.0, # m — published engagement ceiling (spec §4.2)
+    # Energy model: the agile fin-steered dart — 40 g at ~900 m/s sea level
+    # on the tiny 0.0045 m^2 cross-section needs CL ~ 12 -> 15 (Sidewinder-
+    # class normal force on this reference); crisp 0.2 s autopilot.
+    cl_max=15.0, autopilot_tau=0.2,
 )
 
 # --- Buk mid-SAM rounds (player, M5) ------------------------------------------
@@ -714,6 +767,9 @@ BUK_LONG = SamDef(
     min_intercept_alt=15.0, max_intercept_alt=25_000.0,
     # Default medium loft (the 48N6/SM-2 baseline — a medium-range area round
     # does not need the 40N6 high arc).
+    # Energy model: 24 g at ~1000 m/s / 5 km on the 255 kg dry airframe
+    # needs CL 1.4 -> 2.5 with margin.
+    cl_max=2.5,
 )
 
 BUK_AGILE = SamDef(
@@ -741,6 +797,9 @@ BUK_AGILE = SamDef(
     # just OUTSIDE the 12 km terminal gate so the dive is established before PN
     # takes over (handing over at apogee wallows — the 40N6/ASBM lesson).
     loft_gain=0.45, loft_bias_max=7_000.0, loft_fade_range=12_500.0,
+    # Energy model: the 50 g sprint needs CL 1.8 at its 1100 m/s design
+    # point -> 3.0; agile 0.2 s autopilot is its discriminator.
+    cl_max=3.0, autopilot_tau=0.2,
 )
 
 # Buk TEL: the 9A317-class self-propelled launcher carries BOTH rounds.  The
@@ -765,6 +824,9 @@ SM6 = SamDef(
     terminal_range=30_000.0, max_range=240_000.0,
     self_destruct_t=300.0, self_destruct_speed=250.0,
     min_intercept_alt=15.0, max_intercept_alt=33_000.0,
+    # Energy model: 30 g at ~1200 m/s / 10 km on the 500 kg dry airframe
+    # needs CL ~ 6 -> 8 (it must also fight up in the Zircon's thin band).
+    cl_max=8.0,
 )
 
 
@@ -822,6 +884,9 @@ BASTION_K = SamDef(
     # until close to the target (short fade), so the reentry over the hull is
     # steep.  These three are the ASBM's discriminator vs every other SamDef.
     loft_gain=2.0, loft_bias_max=90_000.0, loft_fade_range=15_000.0,
+    # Energy model: the MaRV pulls 22 g on the Mach-4 reentry (CL_need 4.4
+    # at 1400 m/s / 10 km) -> 6.0 with margin.
+    cl_max=6.0,
 )
 
 # Bastion-K ASBM ammo pool default (scarce, like the Zircon).  The world reads
@@ -864,6 +929,10 @@ SWARM = WeaponDef(
     seeker_range=12_000.0, seeker_half_angle_deg=40.0,
     max_g=6.0, warhead_mass=8.0,
     ref_area=0.0314,   # pi * (0.20/2)^2
+    # Energy model: a WINGED loiterer — lift rides real wings (induced K
+    # 0.035, not the 0.2 body-lift default), and 6 g at its slow ~120 m/s
+    # design point needs CL ~ 11.7 on the tiny body cross-section -> 14.
+    k_induced=0.035, cl_max=14.0, thrust_tau=1.5,
 )
 
 

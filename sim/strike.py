@@ -53,6 +53,8 @@ import math
 
 import numpy as np
 
+from sim.aero import (AP_TAU_STRIKE, CL_MAX_STRIKE, K_INDUCED, QS_FLOOR,
+                      lag_gain, q_scalar)
 from sim.guidance import (STEER_GAIN, STEER_MAX_A,
                           altitude_hold_accel, pn_accel)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
@@ -255,6 +257,18 @@ class StrikeMissile:
         # so the CLIMB->CRUISE transition waits until we have descended.
         self._launched_above_cruise = (
             float(self.pos[1]) > weapon.cruise_alt * 2.0)
+        # Energy model (sim/aero.py, plan 2026-07-05): guided-phase accel is
+        # q-limited, autopilot-lagged, and charged as induced drag; the
+        # cruise engine spools on thrust_tau.
+        self._k_ind = (weapon.k_induced if weapon.k_induced > 0.0
+                       else K_INDUCED)
+        self._cl_max = (weapon.cl_max if weapon.cl_max > 0.0
+                        else CL_MAX_STRIKE)
+        self._ap_tau = (weapon.autopilot_tau if weapon.autopilot_tau > 0.0
+                        else AP_TAU_STRIKE)
+        self._thrust_tau = weapon.thrust_tau
+        self._ap_x = self._ap_y = self._ap_z = 0.0  # achieved-accel lag state
+        self._thrust_act = 0.0                      # spooled cruise thrust
 
     # --- duck-type properties ------------------------------------------------
 
@@ -306,6 +320,12 @@ class StrikeMissile:
         w = self.weapon
         thrust = KP_THRUST * (w.cruise_mach - m_now) * THRUST_SCALE + drag_ff
         thrust = min(max(thrust, 0.0), w.max_thrust)
+        if self._thrust_tau > 0.0:
+            # Engine spool (energy model): turbofan/turbojet thrust cannot
+            # step in one tick; fuel burns on the ACTUAL spooled thrust.
+            self._thrust_act += ((thrust - self._thrust_act)
+                                 * lag_gain(dt, self._thrust_tau))
+            thrust = self._thrust_act
         self.fuel = max(0.0, self.fuel - thrust / (w.isp * GRAVITY) * dt)
         return thrust
 
@@ -412,12 +432,30 @@ class StrikeMissile:
                             SPH_STRIKE_CRUISE,
                             SPH_STRIKE_TERMINAL):
             m_now = mach_scalar(speed, alt)
-            drag = drag_force_scalar(speed, alt, cd_from_mach_scalar(m_now),
-                                     self.weapon.ref_area)
+            q = q_scalar(speed, alt)
+            qs = q * self.weapon.ref_area
+            drag = qs * cd_from_mach_scalar(m_now)
+            gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
+            # --- energy model (sim/aero.py; plan 2026-07-05): q-limit the
+            # command, lag it through the autopilot, charge the achieved
+            # lift as induced drag — turning costs speed here too.
+            a_avail = qs * self._cl_max / max(self.mass, 1.0)
+            n2 = gx * gx + gy * gy + gz * gz
+            if n2 > a_avail * a_avail:
+                s = a_avail / math.sqrt(n2)
+                gx *= s
+                gy *= s
+                gz *= s
+            k = lag_gain(dt, self._ap_tau)
+            self._ap_x += (gx - self._ap_x) * k
+            self._ap_y += (gy - self._ap_y) * k
+            self._ap_z += (gz - self._ap_z) * k
+            gx, gy, gz = self._ap_x, self._ap_y, self._ap_z
+            lift = self.mass * math.sqrt(gx * gx + gy * gy + gz * gz)
+            drag += self._k_ind * lift * lift / max(qs, QS_FLOOR)
             # Booster still running during CLIMB (VLS after pitch-over).
             bt = self._boost_thrust(dt)
             thrust = bt if bt > 0.0 else self._cruise_thrust(m_now, drag, dt)
-            gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
 
         # --- semi-implicit Euler ---------------------------------------------
         coef = (thrust - drag) / max(self.mass, 1.0)

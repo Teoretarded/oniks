@@ -27,6 +27,8 @@ import math
 
 import numpy as np
 
+from sim.aero import (AP_TAU_SAM, CL_MAX_SAM, K_INDUCED, QS_FLOOR, lag_gain,
+                      q_scalar)
 from sim.guidance import pn_accel
 from sim.missile import _surface_at, _swept_surface_hit
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
@@ -251,6 +253,16 @@ class SamMissile:
         self.self_destructed = False
         self._mdot = sam_def.motor_thrust / (sam_def.isp * GRAVITY)
         self._fuse_r2 = sam_def.fuse_radius * sam_def.fuse_radius
+        # Energy model (sim/aero.py, plan 2026-07-05): the coast/terminal
+        # guidance accel is q-limited, autopilot-lagged, and charged as
+        # induced drag — a hard post-burnout turn SHEDS speed (research doc
+        # worked example B: a 20 g snap costs ~160 m/s per second).
+        self._k_ind = (sam_def.k_induced if sam_def.k_induced > 0.0
+                       else K_INDUCED)
+        self._cl_max = sam_def.cl_max if sam_def.cl_max > 0.0 else CL_MAX_SAM
+        self._ap_tau = (sam_def.autopilot_tau if sam_def.autopilot_tau > 0.0
+                        else AP_TAU_SAM)
+        self._ap_x = self._ap_y = self._ap_z = 0.0  # achieved-accel lag state
         self._turn_rate = 0.0    # rad/s live path rotation (tilt slew state)
         # Body attitude: dead vertical in the tube; the renderer orients the
         # airframe by this, NOT by the velocity vector.
@@ -413,6 +425,32 @@ class SamMissile:
             gz *= s
         return gx, gy, gz
 
+    def _apply_energy_model(self, gx, gy, gz, speed, alt, dt):
+        """Shared coast/terminal energy step (sim/aero.py, plan 2026-07-05):
+        q-limit the commanded accel, lag it through the autopilot, charge
+        the achieved lift as induced drag on top of the zero-lift drag.
+        Returns (gx, gy, gz, drag). BOOST is thrust-vectored and EJECT is
+        ballistic — neither comes through here (locked launch beats)."""
+        w = self.weapon
+        q = q_scalar(speed, alt)
+        qs = q * w.ref_area
+        a_avail = qs * self._cl_max / self.mass
+        n2 = gx * gx + gy * gy + gz * gz
+        if n2 > a_avail * a_avail:
+            s = a_avail / math.sqrt(n2)
+            gx *= s
+            gy *= s
+            gz *= s
+        k = lag_gain(dt, self._ap_tau)
+        self._ap_x += (gx - self._ap_x) * k
+        self._ap_y += (gy - self._ap_y) * k
+        self._ap_z += (gz - self._ap_z) * k
+        gx, gy, gz = self._ap_x, self._ap_y, self._ap_z
+        lift = self.mass * math.sqrt(gx * gx + gy * gy + gz * gz)
+        drag = (qs * cd_from_mach_scalar(mach_scalar(speed, alt))
+                + self._k_ind * lift * lift / max(qs, QS_FLOOR))
+        return gx, gy, gz, drag
+
     # --- death modes -------------------------------------------------------------
 
     def _die(self, impact):
@@ -558,9 +596,8 @@ class SamMissile:
         elif self.phase == SPH_MIDCOURSE:
             dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
             gx, gy, gz = self._steer_accel(hx, hy, hz, speed, dx, dy, dz)
-            drag = drag_force_scalar(
-                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
-                w.ref_area)
+            gx, gy, gz, drag = self._apply_energy_model(
+                gx, gy, gz, speed, alt, dt)
         elif self.phase == SPH_TERMINAL:
             # Terminal lock maintenance: LOS re-check on the cadence; a
             # blocked check freezes the last estimate (no reacquire until a
@@ -588,9 +625,8 @@ class SamMissile:
                 gx *= s
                 gy *= s
                 gz *= s
-            drag = drag_force_scalar(
-                speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
-                w.ref_area)
+            gx, gy, gz, drag = self._apply_energy_model(
+                gx, gy, gz, speed, alt, dt)
         # SPH_EJECT: gravity only — no thrust, no guidance, no drag (locked).
 
         # --- semi-implicit Euler (scalar, Task 22 style) ---

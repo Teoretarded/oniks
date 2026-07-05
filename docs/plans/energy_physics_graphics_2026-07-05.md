@@ -99,9 +99,13 @@ def test_180_retarget_bleeds_speed_and_recovers():
     Two-sided: it BLEEDS (>=12% of cruise speed lost) and RECOVERS
     (>=90% of cruise speed back within 90 s of the turn command)."""
 
-def test_turn_at_altitude_bleeds_more_than_sea_level():
-    """Same commanded turn at 14 km loses MORE speed than at 60 m
-    (induced drag scales 1/q — thin air is expensive to turn in)."""
+def test_turn_at_altitude_is_slower_and_wider():
+    """PLAN CORRECTION (orchestrator, argued): the original contract said
+    altitude turns bleed MORE — wrong once available g is q-limited: up
+    high the airframe cannot pull the g that would generate the drag, so
+    the honest signature is a SLOWER, WIDER turn, not a steeper bleed.
+    Contract: the same 180-degree retarget takes >=1.5x longer to complete
+    at 14 km than at 60 m."""
 
 def test_available_g_shrinks_with_dynamic_pressure():
     """accel_limit at 200 m/s sea level < accel_limit at 700 m/s sea
