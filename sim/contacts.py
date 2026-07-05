@@ -56,6 +56,16 @@ CLASS_LABELS = {"missile": "MSL", "fighter": "AIR", "stealth": "AIR",
 OWN_KINDS = frozenset({"oniks", "zircon", "asbm", "kh31p", "swarm",
                        "s300", "40n6", "9m317", "9m338", "57e6"})
 
+# Platform-type NCTR (2026-07-05, the ladder's THIRD tier): an enemy
+# AIRFRAME's platform type (FIGHTER / AWACS / JAMMER) is earned only after
+# a LONG signature dwell — the radar must collect enough returns to match
+# the airframe's signature, well after "it's an aircraft" (t_ident).
+# Two-sided pinned: slower than weapon ident, earnable before the
+# TRACK_DROP_S=90 drop.  Ships carry no platform_kind and keep SURF.
+PLATFORM_KINDS = frozenset({"fighter", "awacs", "jammer", "drone"})
+PLATFORM_IDENT_DWELL = {"fighter": 45.0, "stealth": 60.0}
+PLATFORM_IDENT_DEFAULT = 45.0
+
 # Track-quality ladder Q5..Q1 (position quality from staleness age; the
 # board drops a track at TRACK_DROP_S=90).  (max_age_exclusive, Q) bands.
 QUALITY_BANDS = ((2.0, 5), (10.0, 4), (30.0, 3), (60.0, 2))
@@ -74,10 +84,16 @@ def classify(track, sim_time):
     are IDENTIFIED immediately (cooperative ID / old-fixture back-compat)."""
     kind = track.get("kind")
     size = track.get("size")
-    type_label = (kind or CLASS_LABELS.get(size, "UNK")).upper()
     if kind in OWN_KINDS:
-        return ("IDENTIFIED", type_label)
+        return ("IDENTIFIED", kind.upper())
     first_seen = track.get("first_seen")
+    if kind in PLATFORM_KINDS and first_seen is not None:
+        # Third tier: the platform TYPE waits for the long NCTR dwell;
+        # until then the airframe reads as its class label ("AIR").
+        t_plat = PLATFORM_IDENT_DWELL.get(size, PLATFORM_IDENT_DEFAULT)
+        if float(sim_time) - float(first_seen) < t_plat:
+            kind = None
+    type_label = (kind or CLASS_LABELS.get(size, "UNK")).upper()
     if first_seen is None:
         return ("IDENTIFIED", type_label)
     t_class, t_ident = CLASSIFY_DWELL.get(size, CLASSIFY_DWELL_DEFAULT)
@@ -108,14 +124,18 @@ def _size_of(ent):
 
 
 def _kind_of(ent):
-    """Weapon classification for the track stamp: the weapon_id of a round
-    (Tomahawk/SM-2/HARM/AIM-9X/...), or None for a platform (ship/aircraft)
-    that carries no weapon. Reads the round's own def (``weapon.weapon_id``) or
-    a self-named ``weapon_id`` (IrMissile has no WeaponDef) — never truth pos."""
+    """Type classification for the track stamp: the weapon_id of a round
+    (Tomahawk/SM-2/HARM/AIM-9X/...), else the airframe's ``platform_kind``
+    (fighter/awacs/jammer — displayed only after the PLATFORM_IDENT_DWELL
+    tier), else None for a plain platform (ship). Reads the round's own def
+    (``weapon.weapon_id``) or self-named attrs — never truth pos."""
     w = getattr(ent, "weapon", None)
     if w is not None:
         return getattr(w, "weapon_id", None)
-    return getattr(ent, "weapon_id", None)
+    wid = getattr(ent, "weapon_id", None)
+    if wid is not None:
+        return wid
+    return getattr(ent, "platform_kind", None)
 
 
 class ContactBoard:

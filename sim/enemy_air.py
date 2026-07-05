@@ -600,6 +600,7 @@ class Fighter:
 
     is_air: bool = True
     radar_size: str = "fighter"   # ContactBoard size-class
+    platform_kind: str = "fighter"   # NCTR type, earned by the long dwell
 
     def __init__(
         self,
@@ -1441,6 +1442,7 @@ class Awacs:
 
     is_air: bool = True
     radar_size: str = "fighter"   # How it looks on the enemy radar picture
+    platform_kind: str = "awacs"  # NCTR type, earned by the long dwell
 
     def __init__(
         self,
@@ -1679,6 +1681,7 @@ class JammerAircraft(Awacs):
     """
 
     radar_size: str = "fighter"   # radar-trackable as a fighter-class air contact
+    platform_kind: str = "jammer"    # NCTR type, earned by the long dwell
 
     def __init__(
         self,

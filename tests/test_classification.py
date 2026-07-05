@@ -170,3 +170,42 @@ def test_interceptor_pairings_counts_own_air_shots_only():
     ])
     p = interceptor_pairings(w)
     assert p == {"hostile_7": 2, "hostile_9": 1}
+
+
+# --------------------------------------------- platform-type NCTR (2026-07-05)
+# The user's radar-signature depth ask: an enemy AIRFRAME earns its platform
+# TYPE (FIGHTER / AWACS / JAMMER) only after a LONG signature dwell — the
+# ladder's third tier.  Between weapon-ident dwell and platform dwell the
+# track reads IDENTIFIED 'AIR': class known, exact platform not yet.  Ships
+# (no platform_kind) keep the existing SURF behavior — pinned above.
+
+def test_aircraft_platform_type_needs_the_platform_dwell():
+    from sim.contacts import PLATFORM_IDENT_DWELL
+    t_ident = CLASSIFY_DWELL["fighter"][1]
+    t_plat = PLATFORM_IDENT_DWELL["fighter"]
+    trk = _track(kind="awacs", size="fighter", is_air=True, first_seen=0.0)
+    assert classify(trk, t_ident) == ("IDENTIFIED", "AIR")
+    assert classify(trk, t_plat - 0.1) == ("IDENTIFIED", "AIR")
+    assert classify(trk, t_plat) == ("IDENTIFIED", "AWACS")
+
+
+def test_platform_dwell_is_slower_than_weapon_ident_two_sided():
+    from sim.contacts import PLATFORM_IDENT_DWELL
+    for size, t_plat in PLATFORM_IDENT_DWELL.items():
+        assert t_plat > CLASSIFY_DWELL[size][1], (
+            "platform NCTR must be SLOWER than weapon-type ident")
+        assert t_plat <= 90.0, "and still earnable before the track drops"
+
+
+def test_enemy_airframes_carry_platform_kind_stamps():
+    from sim.contacts import PLATFORM_KINDS, _kind_of
+    from sim.enemy_air import Awacs, Fighter, JammerAircraft
+    assert Fighter.platform_kind == "fighter"
+    assert Awacs.platform_kind == "awacs"
+    assert JammerAircraft.platform_kind == "jammer"
+    assert {"fighter", "awacs", "jammer"} <= PLATFORM_KINDS
+
+    class _Bare:
+        platform_kind = "awacs"
+
+    assert _kind_of(_Bare()) == "awacs"
