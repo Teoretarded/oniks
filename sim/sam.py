@@ -107,11 +107,31 @@ TGO_MAX = 90.0                 # s
 # climb cap matters: leaving the dense air fast is what saves the energy).
 LOFT_CAPTURE_RUN = 15_000.0    # m
 CLIMB_MAX_TAN = math.tan(math.radians(55.0))
-DIVE_MAX_TAN = math.tan(math.radians(25.0))
+# Dive clamp 50 deg (energy re-pin 2026-07-06; was 25): a descent is
+# gravity-POWERED — cheap under the energy model — and the 25-degree glide
+# left a high-loft round physically unable to shed its apogee onto a
+# 20 km target (measured: the 40N6 arrived 13 km HIGH over its crosser
+# with the letdown clamped shallow, then died slow). Climbs stay capped
+# at 55 deg — climbing is what costs energy.
+DIVE_MAX_TAN = math.tan(math.radians(50.0))
 
 # Midcourse steering: lateral accel = MID_GAIN * angle_error * speed,
 # G-limited together with the gravity compensation.
 MID_GAIN = 2.2                 # 1/s of angle error
+
+# Midcourse correction budget (energy model 2026-07-05): the hot MID_GAIN
+# saturated every small correction at 10-20 g — free when lift cost
+# nothing, ruinous under induced drag (measured: the ASBM glide bled from
+# Mach 3 to Mach 0.6 paying saturated corrections). Real midcourse
+# autopilots hold a gentle 2-5 g and save the airframe limit for terminal
+# PN; the terminal phase is untouched by this cap.
+MID_MAX_A_G = 4.0              # g of midcourse lateral correction
+
+# Follow-the-fall margin: the plunge is followed only while the round is
+# still this far ABOVE its (biased) aim altitude — below it, the normal
+# clamped glide-slope steering resumes so an air target's altitude plane
+# is levelled onto, never plunged through.
+FALL_FOLLOW_MARGIN_M = 3_000.0
 
 # Terminal autopilot bandwidth (gain scheduling, mirrors sim/missile.py
 # TERMINAL_AP_TAU): the endgame runs the tightest loop the airframe allows
@@ -401,8 +421,35 @@ class SamMissile:
         w = self.weapon                # per-round loft (48N6 medium / 40N6 high)
         bias = min(w.loft_gain * max(rg - w.loft_fade_range, 0.0),
                    w.loft_bias_max)
+        # Reentry rule (energy model 2026-07-05): a DESCENDING round never
+        # chases the loft bias back UP — the bias shapes the ascent/coast;
+        # fighting gravity on the way down only bleeds the dive (measured:
+        # the ASBM reentry arrived Mach 1.05 instead of ~4 because it spent
+        # the whole fall pulling toward an aim point 90 km overhead). The
+        # cap only bites when the biased aim sits ABOVE a falling missile —
+        # a glide along the profile keeps its aim below and is untouched.
+        if vy < 0.0 and bias > 0.0:
+            bias = min(bias, max(0.0, py - ty))
         slope = (ay + bias - py) / LOFT_CAPTURE_RUN
         slope = min(max(slope, -DIVE_MAX_TAN), CLIMB_MAX_TAN)
+        # Follow-the-fall (energy model 2026-07-05): a round plunging
+        # STEEPER than the DIVE_MAX_TAN clamp is in a ballistic reentry the
+        # 25-degree glide command could never represent — arresting it
+        # midcourse is pure energy waste (measured: the ASBM leveled off at
+        # ~8-12 km fighting its own fall, crawled subsonic and
+        # self-destructed 39 km short; reentry Mach 1.05 instead of ~4).
+        # Follow the plunge instead; the terminal PN owns the endgame.
+        # ONLY while still well ABOVE the biased aim: an AIR target's aim
+        # plane must not be plunged through (measured 2026-07-06: the 40N6
+        # rode its fall 8 km below a 20 km crosser and died low) — inside
+        # the margin the normal clamped slope resumes and the round levels
+        # onto the aim. Glides shallower than the clamp steer as before.
+        if vy < 0.0 and py > ay + bias + FALL_FOLLOW_MARGIN_M:
+            hsp = math.hypot(vx, vz)
+            if hsp > 1e-9:
+                cur = vy / hsp
+                if cur < -DIVE_MAX_TAN and cur < slope:
+                    slope = cur
         if rg < 1e-6:
             return 0.0, (1.0 if slope >= 0.0 else -1.0), 0.0
         n = math.sqrt(1.0 + slope * slope) * rg
@@ -419,7 +466,7 @@ class SamMissile:
         gmax = self.weapon.max_g * GRAVITY
         if en > 1e-9:
             err = math.atan2(en, dot)
-            a = min(MID_GAIN * err * speed, gmax)
+            a = min(MID_GAIN * err * speed, MID_MAX_A_G * GRAVITY, gmax)
             s = a / en
             gx, gy, gz = ex * s, ey * s + GRAVITY, ez * s
         else:

@@ -66,9 +66,10 @@ def _flyoff(ground_range_m, max_t=300.0, silence_at_t=None):
     radar = _make_emitter(ground_range_m)
     # Launch from the player shelf, slight forward toss (air/rail release).
     launch_pos = np.array([0.0, LAUNCH_GROUND_H + 5.0, 0.0], dtype=np.float64)
-    # Initial velocity: small forward speed down-range so the air-launched
-    # CLIMB phase has a heading to steer (mirrors a TEL/rail kick).
-    vel0 = np.array([0.0, 0.0, 60.0], dtype=np.float64)
+    # 15-degree ELEVATED rail kick (mirrors world/combat.py launch_arm —
+    # energy-model re-pin 2026-07-05: a level toss below stall speed sinks).
+    vel0 = np.array([0.0, math.sin(math.radians(15.0)) * 60.0,
+                     math.cos(math.radians(15.0)) * 60.0], dtype=np.float64)
     rng = np.random.default_rng([1337, 8])
     m = PlayerArmMissile(KH31P, launch_pos, vel0, radar, rng)
 

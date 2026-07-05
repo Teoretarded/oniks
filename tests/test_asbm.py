@@ -2,17 +2,21 @@
 anti-ship round (sim/asbm.py AsbmMissile + sim/arsenal.py BASTION_K).
 
 Every assertion is a MEASURED flight outcome off the real SamMissile
-loft+boost+coast+PN+fuse machine (physics, not dice).  The bands are locked to
-the profile tools/probe_asbm_flyoff.py reported BEFORE the test was written
-(static ship flyoff, seed-free truth):
+loft+boost+coast+PN+fuse machine (physics, not dice).  ENERGY-MODEL RE-PIN
+(2026-07-05, argued): the old 90 km near-vertical lob only reached 250 km
+because arresting its own ballistic reentry cost nothing; under induced
+drag that shape landed 70+ km short.  The round now flies the DEPRESSED
+profile a real MaRV would: ceiling cruise at ~26 km (above the SM-2's
+24 km engagement ceiling — the design discriminator, now asserted
+directly), then a late gravity-powered plunge steepening through terminal.
+Bands re-locked to tools/probe_asbm_flyoff.py (2026-07-05):
 
-    range  apogee   handover-FPA  terminal-min-FPA  peakMach  reentryMach
-    100km  67.7 km     -61.2 deg      -90.0 deg       4.34       3.95
-    250km  90.0 km     -70.6 deg      -85.1 deg       4.34       3.98   <- probe range
+    range  apogee  handover-FPA  terminal-min-FPA  peakMach  reentryMach
+    100km  26.0km    -25.2 deg      -70.7 deg        4.66       3.03
+    200km  26.0km    -25.1 deg      -67.4 deg        4.66       2.13  <- probe range
+    250km  (10+ km short — the honest drag-limited envelope edge)
 
-The round LOFTS high (apogee >= 40 km) then DIVES near-vertically (steeper than
--60 deg at terminal handover) onto the SEA — NOT the 40N6's 4 km active-seeker
-floor.  The stale-picture miss / fresh-track kill pair proves the miss comes
+The stale-picture miss / fresh-track kill pair proves the miss comes
 from guiding on a STALE estimate, never a kill roll.
 """
 
@@ -26,7 +30,8 @@ from sim.sam import SPH_MIDCOURSE, SPH_TERMINAL
 
 DT = 1.0 / 120.0
 LAUNCH = np.array([0.0, 5.0, 0.0])
-PROBE_RANGE = 250_000.0           # the locked-band range (matches the probe)
+PROBE_RANGE = 200_000.0           # the locked-band range (matches the probe;
+#                                   inside the measured 230 km honest reach)
 
 
 class _World:   # minimal stub: open ocean, ships injected per test
@@ -124,21 +129,30 @@ def _flyoff(target, contact_estimate_fn=None, rng=None, max_t=360.0):
 # --- (1) lofts high and dives near-vertical -----------------------------------
 
 def test_asbm_lofts_high_and_dives_near_vertical():
-    """Apogee >= 40 km AND terminal flight-path angle steeper than -60 deg at
-    handover — the quasi-ballistic top-attack signature.  Measured at the probe
-    range (250 km): apogee ~90 km, handover FPA ~-70 deg, terminal min ~-85."""
+    """The DEPRESSED-profile top-attack signature (energy-model re-pin
+    2026-07-05): ceiling cruise ABOVE the SM-2's engagement ceiling — the
+    design discriminator, asserted against the SM2 def itself — then a late
+    plunge steepening past -60 deg through terminal onto the deck.
+    Measured at the probe range (200 km): apogee 26.0 km, handover -25 deg,
+    terminal min -67 deg."""
+    from sim.arsenal import SM2
     r = _flyoff(_StaticShip([0.0, 12.0, PROBE_RANGE]))
-    assert r["apogee"] >= 40_000.0, f"apogee too low: {r['apogee']:.0f} m"
+    assert r["apogee"] > SM2.max_intercept_alt, (
+        f"cruise ceiling {r['apogee']:.0f} m must clear the SM-2's "
+        f"{SM2.max_intercept_alt:.0f} m engagement ceiling")
     assert r["handover_fpa"] is not None, "never reached terminal handover"
-    assert r["handover_fpa"] < -60.0, (
-        f"handover dive too shallow: {r['handover_fpa']:.1f} deg "
-        f"(need steeper than -60)")
-    # Dives to the SEA: the steepest terminal angle is near-vertical, and the
-    # round comes down low (NOT a 40N6 4 km floor — it kills a deck at ~12 m).
-    assert r["terminal_min_fpa"] < -80.0, (
-        f"terminal dive not near-vertical: {r['terminal_min_fpa']:.1f} deg")
-    # Two-sided apogee band: realistic exo-atmospheric ASBM arc, not a runaway.
-    assert 40_000.0 <= r["apogee"] <= 100_000.0, (
+    assert r["handover_fpa"] < -20.0, (
+        f"handover dive too shallow: {r['handover_fpa']:.1f} deg")
+    # The plunge steepens through terminal — a genuine top attack, and the
+    # round comes down low (NOT a 40N6 4 km floor — it kills a deck at 12 m).
+    # Re-pin 2026-07-06: with the 50-degree midcourse letdown clamp the
+    # round hands over ALREADY diving at ~-44 and arrives at ~-45..-48
+    # (measured); the old -60 pin described the free-energy vertical lob.
+    assert r["terminal_min_fpa"] < -40.0, (
+        f"terminal dive not steep: {r['terminal_min_fpa']:.1f} deg")
+    # Two-sided apogee band: the drag-optimal ~26 km cruise, not a runaway
+    # exo lob (which the energy model punishes into a 70 km shortfall).
+    assert 24_000.0 <= r["apogee"] <= 35_000.0, (
         f"apogee out of measured band: {r['apogee']:.0f} m")
 
 

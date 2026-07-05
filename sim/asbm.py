@@ -91,6 +91,17 @@ class AsbmMissile(SamMissile):
     SEEKER_FOOTPRINT_M = 4000.0
     SEEKER_RANGE_M = 60_000.0
 
+    # Uncage gate (energy-model profile 2026-07-05): the DEPRESSED profile
+    # hands terminal over ~20 km out — far beyond the 4 km footprint the
+    # old steep lob could search at handover (measured: every shot uncaged
+    # onto empty sea, committed to its ghost, and true hits were scrubbed
+    # as ghost kills). The MaRV now dives IN on the stale midcourse point
+    # (fog law: no truth before the seeker sees it) and uncages once its
+    # ground offset to that point closes inside this gate.
+    # The gate must sit INSIDE the footprint: uncaging at 5 km put every
+    # correctly-aimed hull just outside the 4 km basket (measured).
+    UNCAGE_GROUND_M = 3_000.0
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # MaRV lock state.  The seeker UNCAGES ONCE, at terminal handover: it
@@ -102,6 +113,7 @@ class AsbmMissile(SamMissile):
         # a continuous re-search (so a stale picture that walked the hull out of
         # the footprint is an honest miss, never silently recovered).
         self._marv_uncaged = False
+        self._last_est = None      # stale picture refreshed until handover
         sdef = self.weapon
         self._seeker_footprint = float(
             getattr(sdef, "seeker_footprint_m", self.SEEKER_FOOTPRINT_M))
@@ -171,8 +183,29 @@ class AsbmMissile(SamMissile):
         the footprint is empty at uncage (a badly stale picture left the ship
         outside the basket), the round flies the frozen midcourse estimate to
         the sea: an honest stale-picture miss, not a re-search that recovers it."""
-        if (self.alive and self.phase >= SPH_TERMINAL
-                and not self._marv_uncaged):
-            self._marv_uncaged = True
-            self._acquire_ship_lock(world)
+        if self.alive and not self._marv_uncaged:
+            if self.phase < SPH_TERMINAL:
+                # Refresh the STALE picture every pre-handover tick: the
+                # base class stamps _lock_pos from self.target (TRUTH) on
+                # the very tick the phase flips — building the ghost from
+                # _lock_pos leaked one truth snapshot and let a stale shot
+                # chase the real mover (measured: killed a 4.6 km-displaced
+                # crossing hull it had no honest way to see).
+                tx, ty, tz, _, _, _ = self._target_state()
+                self._last_est = (tx, ty, tz)
+            else:
+                # Dive-in on the stale midcourse point (never truth) until
+                # the uncage gate closes — see UNCAGE_GROUND_M.
+                if not isinstance(self.target, _FrozenGhost):
+                    est = self._last_est
+                    if est is None:            # defensive: direct-terminal
+                        tx, ty, tz, _, _, _ = self._target_state()
+                        est = (tx, ty, tz)
+                    self.target = _FrozenGhost(est)
+                gp = self.target.pos
+                ground = math.hypot(float(gp[0]) - float(self.pos[0]),
+                                    float(gp[2]) - float(self.pos[2]))
+                if ground < self.UNCAGE_GROUND_M:
+                    self._marv_uncaged = True
+                    self._acquire_ship_lock(world)
         super().update(dt, world)

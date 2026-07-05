@@ -532,7 +532,13 @@ KH31P = StrikeDef(
     weapon_id="kh31p", display_name="Kh-31P",
     length=4.7, diameter=0.36,
     launch_mass=600.0,     # kg (cited launch mass ~600 kg)
-    fuel_mass=63.0,        # kg (booster grain + ramjet kerosene; probe-tuned)
+    # Energy-model re-base 2026-07-05: the old 63 kg / 9 kN budget only
+    # reached 130 km on the free-glide artifact (9 kN cannot even match
+    # Mach-3 parasite drag at the 4 km loft, ~12.7 kN). Re-based to the
+    # powered profile the real round flies: ~110 kg of kerosene behind a
+    # 14 kN ramjet sustain — measured to restore the ~110 km book reach.
+    fuel_mass=95.0,        # kg (booster grain + ramjet kerosene; gates the
+    #                        reach near the ~130 km book figure — measured)
     # Solid booster cartridge: high thrust off the rail to ramjet take-over
     # speed in ~3 s, then the ramjet duct sustains.
     booster_thrust=63_000.0,   # N (probe-tuned boost spike)
@@ -542,14 +548,15 @@ KH31P = StrikeDef(
     # RAMJET sustain: air-breathing, so isp is high (cf. Oniks ramjet 1100 s).
     # Sustain thrust holds the Mach-3 cruise against drag; the fuel budget is
     # the range gate (kills to 130 km, falls short at 140 km — see table above).
-    max_thrust=9_000.0,    # N ramjet sustain thrust (probe-tuned)
+    max_thrust=14_000.0,   # N ramjet sustain (energy-model re-base — see
+    #                        fuel_mass note; holds the Mach ~2.8 cruise)
     isp=950.0,             # s ramjet-dominated specific impulse (air-breathing)
     cruise_mach=3.0,       # Mach ~3 ramjet cruise (real Kh-31P figure)
     # Loft profile: a low loft (3.5 km commanded) keeps the zoom-climb from
     # overshooting as far; the reused HarmMissile loft+PN geometry still works.
     cruise_alt=3_500.0,    # m commanded loft altitude (round zooms to ~15 km)
-    max_range=130_000.0,   # m (MEASURED kill reach on this airframe; the
-    #                        classic 110 km spec is exceeded — see table above)
+    max_range=140_000.0,   # m (MEASURED kill reach, energy-model re-base
+    #                        2026-07-06: kills 60-140 km, short at 160)
     ref_area=0.1018,       # m^2 = pi * (0.36/2)^2
     max_g=15.0,            # g, agile anti-radiation seeker head (= HARM)
     warhead_mass=87.0,     # kg (cited Kh-31P warhead)
@@ -615,9 +622,14 @@ N40N6 = SamDef(
     ref_area=0.208,    # same diameter as 48N6: pi * (0.515/2)^2
     max_g=20.0,        # slightly lower agility than 48N6 (heavier airframe)
     fuse_radius=25.0,
-    # Active seeker: 40 km terminal gate (ARH self-guides from further out
-    # in the thin upper atmosphere where SARH illumination would fade).
-    terminal_range=40_000.0,
+    # Active seeker gate 25 km (energy re-pin 2026-07-06; was 40 km): a
+    # 40 km handover put PN in charge while still ~45 km HIGH, where the
+    # airframe has half a g of aero authority — gravity sag steepened the
+    # dive straight through a 20 km crosser's plane (measured, 14 km miss).
+    # At 25 km the loft has faded, the letdown is established, and the ARH
+    # takes over in air it can actually steer in (still beyond the 48N6's
+    # 20 km SARH gate).
+    terminal_range=25_000.0,
     max_range=380_000.0,
     self_destruct_t=380.0, self_destruct_speed=250.0,
     # Engagement floor 4,000 m: active seeker + high-loft geometry is
@@ -640,11 +652,20 @@ N40N6 = SamDef(
     # reality.  Measured (tools/compare_s300_rounds.py): 37 km apogee, dive
     # handover ~15 km below apogee, kills close movers and reaches past the
     # 48N6's self-destruct range.  Locked by tests/test_s300_rounds_distinct.py.
-    loft_gain=0.55, loft_bias_max=24_000.0, loft_fade_range=45_000.0,
+    # fade 70 km (energy re-pin 2026-07-06; was 45): a 4 g pushover at
+    # 1100 m/s bends the path at only ~2 deg/s — honest physics — so the
+    # letdown from the high loft must START ~70 km out or the round is
+    # still 25 km high over a 20 km crosser (measured 14 km miss). The
+    # long-shot apogee (the player-visible discriminator vs the 48N6) is
+    # unchanged: bias still caps at 24 km beyond ~114 km range-to-go.
+    loft_gain=0.55, loft_bias_max=24_000.0, loft_fade_range=70_000.0,
     # Energy model: a high-altitude interceptor needs big normal force in
-    # thin air — CL 8 keeps meaningful authority through the 20-30 km band
-    # (its 20 g rating is honestly q-limited up at the apogee, as in life).
-    cl_max=8.0,
+    # thin air — CL 14 (energy re-pin 2026-07-06; 8 left the terminal dive
+    # from the high loft with ~1.4 g against a crosser and it wallowed
+    # 5 km off): the 40N6 class flies oversized strakes + gas-dynamic
+    # steering precisely to keep authority through the 25-40 km band; the
+    # 20 g rating is still honestly q-limited at the very apogee.
+    cl_max=14.0, autopilot_tau=0.2,
 )
 
 # 40N6 TEL: same 5P85 body, 2 rounds (the heavier missile halves the load).
@@ -887,18 +908,46 @@ BASTION_K = SamDef(
     length=8.0, diameter=0.62, launch_mass=4_200.0, propellant_mass=2_000.0,
     # Cold catapult eject + short hang, then a long high-thrust solid boost.
     eject_speed=18.0, eject_time=1.0,
-    motor_thrust=300_000.0, motor_time=16.0, isp=245.0,   # = propellant/mdot
+    # isp 262 s: modern large-solid band (energy-model re-base 2026-07-05);
+    # motor_time = propellant / mdot = 2000/116.7 = 17.1 s. A +10%
+    # propellant experiment bought nothing (the extra speed fed quadratic
+    # low-altitude drag) — this airframe's drag-limited reach is ~230 km.
+    motor_thrust=300_000.0, motor_time=17.0, isp=262.0,
     ref_area=0.302,    # pi * (0.62/2)^2
-    max_g=22.0, fuse_radius=20.0,
+    # fuse_radius 30 m: the MaRV's target is a HULL, not a point — a
+    # near-vertical arrival 20-30 m off the ship's center point is a deck
+    # hit on any destroyer/carrier-sized target (energy-model re-pin
+    # 2026-07-05: measured terminal accuracy ~20 m was splashing alongside
+    # under the old 20 m point fuse).
+    max_g=22.0, fuse_radius=30.0,
     # Terminal handover partway down the reentry (see note above).
-    terminal_range=20_000.0, max_range=300_000.0,
+    # max_range 230 km = the MEASURED honest kill envelope under the energy
+    # model (probe_asbm_flyoff 2026-07-05: kills 100-200 km with 16-20 m
+    # closest, 10+ km short at 250) — the old 300 km label was a
+    # free-energy artifact. Still the longest player anti-ship reach.
+    terminal_range=20_000.0, max_range=230_000.0,
     self_destruct_t=400.0, self_destruct_speed=200.0,
     # Dives to the SEA: floor 0 (a ship deck), ceiling well above the apogee.
     min_intercept_alt=0.0, max_intercept_alt=95_000.0,
-    # The quasi-ballistic loft: near-vertical climb to a ~90 km exo apogee held
-    # until close to the target (short fade), so the reentry over the hull is
-    # steep.  These three are the ASBM's discriminator vs every other SamDef.
-    loft_gain=2.0, loft_bias_max=90_000.0, loft_fade_range=15_000.0,
+    # The quasi-ballistic loft, DEPRESSED (energy-model re-shape 2026-07-05):
+    # the old near-vertical 90 km loft left no horizontal carry — its 250 km
+    # reach was a free-energy artifact (the round fought its own ballistic
+    # plunge flat, which cost nothing). A real MaRV flies a depressed arc:
+    # ~50 km apogee with horizontal speed kept, an affordable high glide,
+    # then the steep terminal dive from the 20 km handover.
+    # Energy-model re-shape (2026-07-05, probe_asbm_flyoff): pulling DOWN
+    # is gravity-powered and free; pulling UP or arresting a plunge is what
+    # bleeds. So the honest profile is: climb to a ~30 km CEILING
+    # (bias_max) — above the SM-2's 24 km ceiling, inside the SM-6's 33 km,
+    # preserving both design counters — cruise level on cheap 1-g trim,
+    # then a LATE steep cone (gain 1.2 ~ -50 deg, follow-the-fall lets it
+    # plunge) onto the 20 km terminal handover. The old 90 km near-vertical
+    # lob only ever reached 250+ km because fighting its own reentry flat
+    # cost nothing (measured: honest lob lands 70-120 km short).
+    # Ceiling 26 km = the drag-OPTIMAL cruise (parasite == induced at
+    # Mach ~4 for this airframe: qS ~ 12.8 kN -> h ~ 25.6 km), still above
+    # the SM-2's 24 km ceiling.
+    loft_gain=1.2, loft_bias_max=26_000.0, loft_fade_range=15_000.0,
     # Energy model: the MaRV pulls 22 g on the Mach-4 reentry (CL_need 4.4
     # at 1400 m/s / 10 km) -> 6.0 with margin.
     cl_max=6.0,

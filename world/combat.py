@@ -3744,15 +3744,20 @@ class CombatWorld(WorldState):
                                     dtype=np.float64).copy()
         else:
             launch_pos = np.asarray(BASE_POS, dtype=np.float64).copy()
-        # Brief forward toss toward the emitter so the air-launched CLIMB phase
-        # has a heading to steer (mirrors a rail kick; magnitude is the same
-        # eject beat the HARM uses — small vs the boost that follows).
+        # Rail kick toward the emitter, ELEVATED 15 degrees (energy model
+        # 2026-07-05): a 600 kg round at 60 m/s is far below its stall
+        # speed — with honest lift physics a LEVEL toss 5 m over the sea
+        # sank before the booster could catch it (measured: splashed at
+        # ~0.9 s). A real ground-launched ARM leaves an inclined rail; the
+        # 15-degree climb buys the booster its run to flying speed.
         import math as _math
         ex = float(target_radar.pos[0]) - float(launch_pos[0])
         ez = float(target_radar.pos[2]) - float(launch_pos[2])
         hdg = _math.atan2(ex, ez)
-        vel0 = np.array([_math.sin(hdg) * 60.0, 0.0, _math.cos(hdg) * 60.0],
-                        dtype=np.float64)
+        ce = _math.cos(_math.radians(15.0)) * 60.0
+        vel0 = np.array([_math.sin(hdg) * ce,
+                         _math.sin(_math.radians(15.0)) * 60.0,
+                         _math.cos(hdg) * ce], dtype=np.float64)
 
         m = PlayerArmMissile(KH31P, launch_pos, vel0, target_radar,
                              self._arm_rng)

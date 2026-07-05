@@ -57,9 +57,13 @@ from world.generation import terrain_height_scalar
 
 DT = 1.0 / 120.0   # 120 Hz fixed physics step
 
-# MEASURED envelope ranges (see module docstring / probe output).
+# MEASURED envelope ranges (energy-model re-pin 2026-07-06): the re-based
+# 95 kg / 14 kN powered profile kills 60-140 km off the probe's 105 m
+# shelf and to 160 km in THIS harness's sea-level flat world (the lower
+# launch buys a longer glide); it falls short at 180 km here (measured:
+# closest 709 m). The old 63 kg / 9 kN figures were free-glide artifacts.
 KILL_RANGE_M = 90_000.0     # K — kills an emitting radar
-SHORT_RANGE_M = 140_000.0   # S — falls short (fuel/range-limited)
+SHORT_RANGE_M = 180_000.0   # S — falls short (fuel/range-limited)
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +99,12 @@ def _launch_toward(radar, seed=1337, child_tag=8, start_pos=None):
     ex = float(radar.pos[0]) - float(start_pos[0])
     ez = float(radar.pos[2]) - float(start_pos[2])
     hdg = math.atan2(ex, ez)
-    vel = np.array([math.sin(hdg) * 60.0, 0.0, math.cos(hdg) * 60.0],
-                   dtype=np.float64)
+    # 15-degree ELEVATED rail kick (mirrors world/combat.py launch_arm,
+    # energy-model re-pin 2026-07-05: a level 60 m/s toss is below stall
+    # speed and honestly sinks before the booster catches it).
+    ce = math.cos(math.radians(15.0)) * 60.0
+    vel = np.array([math.sin(hdg) * ce, math.sin(math.radians(15.0)) * 60.0,
+                    math.cos(hdg) * ce], dtype=np.float64)
     rng = np.random.default_rng([seed, child_tag])
     return _arm(start_pos, vel, radar, rng)
 
@@ -122,10 +130,10 @@ def _fly(m, world, max_t=300.0, on_step=None):
 
 def test_kh31p_def_envelope():
     """KH31P.max_range matches the measured kill reach, and a flown shot KILLS
-    an emitting radar at K=90 km but FALLS SHORT at S=140 km. Two-sided,
+    an emitting radar at K=90 km but FALLS SHORT at S=180 km. Two-sided,
     locked to the probe numbers (see module docstring)."""
-    # max_range reflects the MEASURED kill reach on this airframe (130 km).
-    assert KH31P.max_range == 130_000.0
+    # max_range reflects the MEASURED kill reach on this airframe (140 km).
+    assert KH31P.max_range == 140_000.0
 
     # KILL at K=90 km.
     radar_k = _radar_at(0.0, KILL_RANGE_M)
