@@ -3374,8 +3374,13 @@ class CombatWorld(WorldState):
         if track is None or not track.get("is_air"):
             return None
         if round_id == "40n6" and \
-                float(track["pos"][1]) < weapon_def.min_intercept_alt:
-            return None                       # 40N6 refuses sub-4 km targets
+                float(self.contacts.estimated_pos(aircraft_id, self.sim_time)
+                      [1]) < weapon_def.min_intercept_alt:
+            # 40N6 refuses sub-4 km targets — judged on the DEAD-RECKONED
+            # estimate the contact card displays, never the stale raw fix
+            # (a climbing target read 3.6 km on the fix while the card
+            # showed 4.8 km — playtest false-denial, 2026-07-05).
+            return None
         target = self._find_air_entity(aircraft_id)
         if target is None:
             return None

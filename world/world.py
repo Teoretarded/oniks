@@ -401,10 +401,14 @@ class WorldState:
             if self.sam_ammo_40n6 <= 0:
                 return None
             weapon_def = N40N6
-            # 40N6 envelope check: min altitude 4,000 m.  Use the track
-            # position (contact picture) for the altitude gate — the player
-            # acts on what they know, not ground truth.
-            target_alt = float(track["pos"][1])
+            # 40N6 envelope check: min altitude 4,000 m.  Judge the DEAD-
+            # RECKONED estimate — the exact altitude the contact card
+            # displays (hud.intel_snapshot alt = estimated_pos()[1]).  The
+            # raw fix lags a climbing target: a stale sub-4 km fix denied
+            # shots the card showed at 4.7+ km (playtest 2026-07-05).  The
+            # player acts on what they SEE, not on the stale fix.
+            target_alt = float(
+                self.contacts.estimated_pos(aircraft_id, self.sim_time)[1])
             if target_alt < weapon_def.min_intercept_alt:
                 return None  # out of envelope: refuses sub-4 km targets
             # Tube index: 40N6 occupies the last 2 canister positions (index

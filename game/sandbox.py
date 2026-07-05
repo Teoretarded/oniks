@@ -410,6 +410,11 @@ class SandboxState(GameState):
         self.oniks_weapon = "oniks"     # B toggles Oniks <-> Zircon (Phase 8)
         self.hint_text = ""             # transient HUD hint line
         self.hint_left = 0.0            # real seconds the hint stays up
+        # Per-frame UI hit/tag registry (AI-testability build 2026-07-05):
+        # draw sites register their rects each render; clicks route through
+        # it, the F3 bug reporter tags from it, tools audit overlaps on it.
+        from game.ui_registry import UiRegistry
+        self.ui = UiRegistry()
 
         # Effects bookkeeping
         self._trails: dict[int, object] = {}      # id(missile) -> TrailRibbon
@@ -509,12 +514,18 @@ class SandboxState(GameState):
 
     def cycle_platform(self) -> str:
         """TAB: the next platform in the class's cycle; the launcher cam
-        re-anchors (the drone platform anchors at the Bastion base — its
-        ground control station; the airframe itself is a camera SUBJECT
-        via [ / ], not a launcher anchor)."""
+        re-anchors AND the camera subject follows the platform you just
+        selected (playtest 2026-07-05: TAB onto the drone left the camera
+        parked on the Bastion TEL — you never SAW what you selected).
+        _platform_subject returns the flying drone for the drone platform,
+        else the platform's TEL StaticSubject."""
         self.active_platform = next_platform(self.active_platform,
                                              self.PLATFORMS)
         self.rig.set_launcher_pos(self._platform_anchor())
+        subj = self._platform_subject()
+        if subj is not None and subj is not self.followed:
+            self.followed = subj
+            self.rig.retarget()
         self.app.audio.ui_click()
         return self.active_platform
 
@@ -933,7 +944,13 @@ class SandboxState(GameState):
             if self.world.sam_ammo_40n6 <= 0:
                 self.show_hint(HINT_40N6_EMPTY)
                 return None
-            if float(track["pos"][1]) < N40N6.min_intercept_alt:
+            # Judge the DISPLAYED altitude (dead-reckoned estimate), the
+            # same number the contact card shows — the stale raw fix
+            # false-denied climbing targets (playtest 2026-07-05).
+            est_alt = float(self.world.contacts.estimated_pos(
+                self.tactical_map.selected_contact,
+                self.world.sim_time)[1])
+            if est_alt < N40N6.min_intercept_alt:
                 self.show_hint(HINT_40N6_LOW)
                 return None
         elif self.world.sam_ammo <= 0:
@@ -1497,6 +1514,9 @@ class SandboxState(GameState):
     # --------------------------------------------------------------- render
 
     def render(self, dt_real: float) -> None:
+        # Fresh UI hit/tag registry every frame: draw sites re-register
+        # their rects below (mouse parity + F3 tagging + overlap oracle).
+        self.ui.begin_frame()
         self.controls.update(dt_real)            # free-cam flies in real time
         self.rig.update(dt_real, self.followed)
         if self.hint_left > 0.0:

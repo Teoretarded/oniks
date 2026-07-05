@@ -594,3 +594,63 @@ def test_winchester_triggers_rtb():
     # The fighter called execute_order({"type": "rtb"}) internally.
     # No bases arg -> _rtb may not flip to FS_RTB, but radar must be off.
     assert not f.radar.emitting, "winchester -> RTB order -> radar OFF"
+
+
+# ---------------------------------------------------------------------------
+# 8. 40N6 floor judges the DISPLAYED estimate, not the stale fix
+#    Regression (live playtest 2026-07-05): a climbing target whose stale
+#    radar fix sat below 4 km was denied with 'BELOW 4KM ENGAGEMENT FLOOR'
+#    while the contact card showed 4.7-5.0 km.  The card displays the
+#    dead-reckoned estimate (hud.intel_snapshot alt = estimated_pos()[1]);
+#    the envelope gate must judge the SAME number — the player acts on
+#    what they SEE.  Two-sided: the zero-rate low test above still refuses.
+# ---------------------------------------------------------------------------
+
+
+def _climbing_track():
+    fix = np.array([0.0, 3_600.0, 10_000.0])     # stale fix below the floor
+    vel = np.array([0.0, 80.0, 200.0])           # climbing +80 m/s
+    # displayed estimate: 3,600 + 80*15 = 4,800 m — ABOVE the 4,000 m floor
+    return {"pos": fix, "vel": vel, "age": 15.0, "is_air": True}
+
+
+def test_40n6_floor_judges_displayed_estimate_sandbox_world():
+    ws = WorldState()
+    ws.contacts.tracks["climber"] = _climbing_track()
+
+    class _FakeTarget:
+        aircraft_id = "climber"
+        pos = np.array([0.0, 4_800.0, 13_000.0])
+        alive = True
+
+        def velocity(self):
+            return np.array([0.0, 80.0, 200.0])
+
+    ws.aircraft.append(_FakeTarget())
+    m = ws.launch_sam("climber", round_id="40n6")
+    assert m is not None, (
+        "40N6 must fire at a target DISPLAYED above the floor (est 4,800 m) "
+        "even when the stale fix reads 3,600 m — gate on what the card shows"
+    )
+
+
+def test_40n6_floor_judges_displayed_estimate_combat_world():
+    from world.combat import CombatWorld
+    from world.combat_config import CombatConfig
+    w = CombatWorld(CombatConfig(seed=1337))
+    w.contacts.tracks["climber"] = _climbing_track()
+
+    class _FakeTarget:
+        aircraft_id = "climber"
+        pos = np.array([0.0, 4_800.0, 13_000.0])
+        alive = True
+
+        def velocity(self):
+            return np.array([0.0, 80.0, 200.0])
+
+    w.aircraft.append(_FakeTarget())
+    m = w.launch_sam("climber", round_id="40n6")
+    assert m is not None, (
+        "combat launch_sam must gate the 40N6 floor on the dead-reckoned "
+        "estimate the card displays, not the stale fix"
+    )
