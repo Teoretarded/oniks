@@ -121,6 +121,18 @@ FOOTER_LEFT = f"ONIKS PROTO {GAME_VERSION} - {BUILD_DATE}"
 FOOTER_HINTS = "UP/DN SELECT  ENTER OK"
 
 MAIN_ITEMS = ("SANDBOX", "COMBAT", "CAMPAIGN", "SETTINGS", "QUIT")
+
+# Main-menu dusk-sea backdrop (approved menu mock, 2026-07-05): the petrol
+# family darkened for a low-sun evening — flat bands, engine-honest, no glow.
+MENU_SKY_HI = (0.043, 0.067, 0.078)   # zenith
+MENU_SKY_LO = (0.145, 0.165, 0.145)   # warm haze over the water
+MENU_SUN_LINE = (0.722, 0.573, 0.267) # brass low-sun band on the horizon
+MENU_SEA_HI = (0.133, 0.204, 0.212)   # sea at the horizon (petrol)
+MENU_SEA_LO = (0.047, 0.086, 0.098)   # sea at the foot
+MENU_SEA_SHEEN = (0.216, 0.285, 0.285)  # 1px swell lines on the water
+MENU_COAST = (0.153, 0.122, 0.071)    # coast silhouette (umber)
+MENU_COAST_DK = (0.090, 0.071, 0.043) # foreshore dark strip
+MENU_COMMAND_TEXT = "KRASNAYA KOSA - COASTAL DEFENSE COMMAND"
 PAUSE_ITEMS = ("RESUME", "SETTINGS", "MAIN MENU")
 CONFIRM_MAIN_MENU = "MAIN MENU - ENTER AGAIN TO CONFIRM"
 CONFIRM_RESET = "ENTER AGAIN TO CONFIRM"
@@ -692,25 +704,35 @@ class MenuState(_ListScreen):
     def render(self, dt_real: float) -> None:
         self._tick_pending(dt_real)
         gl = self._gl
-        gl.glClearColor(BG0[0], BG0[1], BG0[2], 1.0)
+        gl.glClearColor(MENU_SKY_HI[0], MENU_SKY_HI[1], MENU_SKY_HI[2], 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         w, h = self.app.window.size()
         text = self.text
-        x = (w - COL_W) // 2
-
-        # Title panel: corner ticks + powered-on strip, space-tracked title.
+        # Signal-desk placement (approved menu mock, 2026-07-05): title and
+        # menu sit on plates at the LEFT THIRD, the dusk sea is the world
+        # behind them.  The horizon line peeks BETWEEN the two plates — a
+        # deliberate composition, never through a row of text.
+        x = max(48, int(w * 0.30) - COL_W // 2)
         title_lh = text.line_height(TITLE_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
-        panel_h = PAD + title_lh + 4 + small_lh + PAD
+        panel_h = PAD + title_lh + 4 + small_lh * 2 + 8 + PAD
+        self._draw_dusk_sea(w, h, horizon=96 + panel_h + 12)
         draw_panel(text, x, 96, COL_W, panel_h, strip=True)
         text.draw_text(x + PAD, 96 + PAD, TITLE_TEXT, TEXT_COL, TITLE_SIZE)
         text.draw_text(x + PAD, 96 + PAD + title_lh + 4, SUBTITLE_TEXT,
-                       MUTED, SMALL_SIZE)
+                       ACCENT, SMALL_SIZE)
+        text.draw_text(x + PAD, 96 + PAD + title_lh + 4 + small_lh + 4,
+                       MENU_COMMAND_TEXT, MUTED, SMALL_SIZE)
 
-        # Divider with the amber cap, then the item rows.
-        rule_y = 96 + panel_h + 32
-        draw_header_rule(text, x, rule_y, COL_W)
-        self._draw_rows(x, rule_y + 24, COL_W, danger_items=("QUIT",))
+        # The menu plate: one dark desk plate behind the item rows.
+        rule_y = 96 + panel_h + 24
+        rows_h = len(self.items) * ROW_H
+        text.draw_rect(x, rule_y, COL_W, rows_h + 16, (*BG1, 0.92))
+        text.draw_lines([(x, rule_y), (x + COL_W, rule_y),
+                         (x + COL_W, rule_y + rows_h + 16),
+                         (x, rule_y + rows_h + 16), (x, rule_y)],
+                        (*LINE_COL, 1.0), 1.0)
+        self._draw_rows(x, rule_y + 8, COL_W, danger_items=("QUIT",))
 
         # Footer: version left, key hints right (both 14pt).
         fy = h - FOOTER_MARGIN - small_lh
@@ -719,6 +741,42 @@ class MenuState(_ListScreen):
         text.draw_text(w - FOOTER_MARGIN - hint_w, fy, FOOTER_HINTS,
                        ACCENT_DIM, SMALL_SIZE)
         text.flush(w, h)
+
+    def _draw_dusk_sea(self, w: int, h: int, horizon: int) -> None:
+        """The dusk-sea backdrop (approved menu mock): flat petrol bands —
+        sky fading to a dim low-sun line, the sea below it, a dark coast
+        silhouette at the foot.  Faint range arcs sweep from below like a
+        plot table.  Engine-honest: stacked rects + 1px lines, no glow."""
+        text = self.text
+        bands = 6
+        band = max(1, horizon // bands)
+        for i in range(bands):                 # sky: darkest at the top
+            f = i / (bands - 1.0)
+            col = tuple(a + (b - a) * f for a, b in zip(MENU_SKY_HI,
+                                                        MENU_SKY_LO))
+            text.draw_rect(0, i * band, w, band + 1, (*col, 1.0))
+        text.draw_rect(0, horizon - 3, w, 3, (*MENU_SUN_LINE, 0.7))
+        sea_h = h - horizon
+        for i in range(bands):                 # sea: darkest at the foot
+            f = i / (bands - 1.0)
+            col = tuple(a + (b - a) * f for a, b in zip(MENU_SEA_HI,
+                                                        MENU_SEA_LO))
+            text.draw_rect(0, horizon + i * sea_h // bands, w,
+                           sea_h // bands + 1, (*col, 1.0))
+        # Swell sheen: sparse 1px lines, denser near the horizon.
+        for k, fy in enumerate((0.06, 0.14, 0.26, 0.42, 0.62, 0.84)):
+            y = horizon + int(sea_h * fy)
+            text.draw_rect(0, y, w, 1, (*MENU_SEA_SHEEN, 0.30 - 0.03 * k))
+        # Faint plot arcs rising from a station below the frame.
+        import math as _m
+        cx, cy = w * 0.66, float(h + 40)
+        for r in (h * 0.45, h * 0.7, h * 0.95):
+            pts = [(cx + r * _m.sin(a), cy - r * _m.cos(a))
+                   for a in [(-1.1 + 2.2 * k / 40.0) for k in range(41)]]
+            text.draw_lines(pts, (*MENU_SEA_SHEEN, 0.4), 1.0)
+        # Coast silhouette: two offset dark strips along the foot.
+        text.draw_rect(0, h - 72, w, 72, (*MENU_COAST, 0.9))
+        text.draw_rect(0, h - 38, w, 38, (*MENU_COAST_DK, 1.0))
 
 
 class PauseState(_ListScreen):
