@@ -243,9 +243,17 @@ def test_lock_reacquires_when_los_clears():
     """Target crossing OUT from behind the island toward the ship: terminal
     handover happens masked (coast), the LOS check clears once the target
     crosses the ridge line — the seeker reacquires and the kill lands."""
-    target = _Skimmer([0.0, 60.0, 14_000.0], [0.0, 0.0, -680.0])
+    # Energy-model re-pin (2026-07-05, argued): the old script started the
+    # interceptor at 707 m/s — late-coast anemia that only ever killed
+    # because corrections used to be energetically FREE. With induced drag
+    # a decelerating round chasing a 6-s-stale frozen estimate falls into
+    # the classic PN energy death-spiral (measured: bled to 336 m/s,
+    # crossed 857 m high). Re-scripted at an honest mid-coast 1110 m/s
+    # with a 3 s masked window: handover is still masked, the LOS still
+    # clears mid-fly, and the reacquired kill lands at 13.5 m (measured).
+    target = _Skimmer([0.0, 60.0, 12_000.0], [0.0, 0.0, -680.0])
     illum = lambda: (0.0, 20.0, 0.0)
-    sam = _midcourse_sam([0.0, 3_500.0, 1_000.0], [0.0, -100.0, 700.0],
+    sam = _midcourse_sam([0.0, 3_500.0, 1_000.0], [0.0, -150.0, 1_100.0],
                          target, illuminator_pos_fn=illum)
     w = _WallSea()
     sam.update(DT, w)

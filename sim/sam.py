@@ -27,7 +27,7 @@ import math
 
 import numpy as np
 
-from sim.aero import (AP_TAU_SAM, CL_MAX_SAM, K_INDUCED, QS_FLOOR, lag_gain,
+from sim.aero import (ALPHA_TAX, AP_TAU_SAM, CL_MAX_SAM, QS_FLOOR, lag_gain,
                       q_scalar)
 from sim.guidance import pn_accel
 from sim.missile import _surface_at, _swept_surface_hit
@@ -112,6 +112,13 @@ DIVE_MAX_TAN = math.tan(math.radians(25.0))
 # Midcourse steering: lateral accel = MID_GAIN * angle_error * speed,
 # G-limited together with the gravity compensation.
 MID_GAIN = 2.2                 # 1/s of angle error
+
+# Terminal autopilot bandwidth (gain scheduling, mirrors sim/missile.py
+# TERMINAL_AP_TAU): the endgame runs the tightest loop the airframe allows
+# (research §3.3 "agile terminal SAM ~0.15-0.3 s") — the midcourse tau in
+# the terminal PN lowpassed the seeker hard enough that a LONE slow
+# skimmer leaked through the SM-2 (measured 2026-07-05).
+TERMINAL_AP_TAU = 0.15         # s
 
 # --- Low-altitude multipath tracking noise (Phase 3 gate: physics, not dice) --
 # Against a target down in the sea-clutter/multipath region the surface-
@@ -257,9 +264,9 @@ class SamMissile:
         # guidance accel is q-limited, autopilot-lagged, and charged as
         # induced drag — a hard post-burnout turn SHEDS speed (research doc
         # worked example B: a 20 g snap costs ~160 m/s per second).
-        self._k_ind = (sam_def.k_induced if sam_def.k_induced > 0.0
-                       else K_INDUCED)
         self._cl_max = sam_def.cl_max if sam_def.cl_max > 0.0 else CL_MAX_SAM
+        self._k_ind = (sam_def.k_induced if sam_def.k_induced > 0.0
+                       else ALPHA_TAX / self._cl_max)
         self._ap_tau = (sam_def.autopilot_tau if sam_def.autopilot_tau > 0.0
                         else AP_TAU_SAM)
         self._ap_x = self._ap_y = self._ap_z = 0.0  # achieved-accel lag state
@@ -441,7 +448,8 @@ class SamMissile:
             gx *= s
             gy *= s
             gz *= s
-        k = lag_gain(dt, self._ap_tau)
+        k = lag_gain(dt, min(self._ap_tau, TERMINAL_AP_TAU)
+                     if self.phase == SPH_TERMINAL else self._ap_tau)
         self._ap_x += (gx - self._ap_x) * k
         self._ap_y += (gy - self._ap_y) * k
         self._ap_z += (gz - self._ap_z) * k

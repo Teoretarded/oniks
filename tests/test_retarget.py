@@ -94,6 +94,11 @@ def test_retarget_in_descent_reclimbs_on_long_new_leg():
     m = _launch(target=(0.0, 0.0, 250_000.0))
     w = _World()
     assert _fly_until(m, w, lambda m: m.phase == PH_DESCENT, 400.0)
+    # Fly a real chunk of the letdown first (2026-07-05 energy re-pin):
+    # retargeting at the exact TOP of the descent left alt0 == cruise_alt,
+    # so "climbs above alt0" hinged on float noise around 14000.0 — from
+    # 12 km the re-climb is a real, measurable contract.
+    assert _fly_until(m, w, lambda m: float(m.pos[1]) < 12_000.0, 400.0)
     alt0 = float(m.pos[1])
     assert m.retarget(np.array([0.0, 0.0, 480_000.0])) is True
     assert m.phase == PH_CLIMB                          # re-climb, not dive

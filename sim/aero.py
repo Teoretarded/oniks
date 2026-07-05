@@ -27,11 +27,17 @@ from sim.physics import DENSITY_SCALE_HEIGHT, RHO0
 
 # --- class defaults (research doc §5.2; per-weapon fields override) ----------
 
-# Induced-drag factor K in CD = CD0 + K*CL^2. Cruciform body-lift missiles
-# ~0.2 (research: "deliberately on the punishing side so hard turns hurt");
-# genuinely WINGED airframes (Tomahawk/Kalibr/JASSM/SWARM) carry their lift
-# far cheaper — set per-weapon (~0.035) on their defs.
-K_INDUCED = 0.2
+# Drag-due-to-lift for a BODY-LIFT airframe is bounded by the lift-vector
+# tilt: D_i ~ L*tan(alpha), quadratic in CL below alpha_max. In K*CL^2
+# terms that means K = ALPHA_TAX / CLmax — NOT a flat K: a flat 0.2 at the
+# Pantsir dart's CL~15 gave CDi ~ 45 (measured: an 85 kN drag spike on a
+# 63 kg dart, -1000 m/s^2, instant self-destruct). With ALPHA_TAX 0.45
+# (alpha_max ~ 24 deg) the research's K~0.2 falls out naturally for a
+# CLmax ~ 2.3 cruciform, and every airframe pays at most L*0.45 at its
+# lift ceiling. Genuinely WINGED airframes (Tomahawk/Kalibr/JASSM/SWARM)
+# carry lift on real wings far cheaper — they override k_induced (~0.012,
+# derived from wing area + span efficiency in the arsenal comments).
+ALPHA_TAX = 0.45
 
 # CLmax on the body cross-section reference area. The research doc's 1.2 is
 # a conservative slender-body value; agile fin-steered SAMs demonstrably

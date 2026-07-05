@@ -53,7 +53,7 @@ import math
 
 import numpy as np
 
-from sim.aero import (AP_TAU_STRIKE, CL_MAX_STRIKE, K_INDUCED, QS_FLOOR,
+from sim.aero import (ALPHA_TAX, AP_TAU_STRIKE, CL_MAX_STRIKE, QS_FLOOR,
                       lag_gain, q_scalar)
 from sim.guidance import (STEER_GAIN, STEER_MAX_A,
                           altitude_hold_accel, pn_accel)
@@ -260,10 +260,10 @@ class StrikeMissile:
         # Energy model (sim/aero.py, plan 2026-07-05): guided-phase accel is
         # q-limited, autopilot-lagged, and charged as induced drag; the
         # cruise engine spools on thrust_tau.
-        self._k_ind = (weapon.k_induced if weapon.k_induced > 0.0
-                       else K_INDUCED)
         self._cl_max = (weapon.cl_max if weapon.cl_max > 0.0
                         else CL_MAX_STRIKE)
+        self._k_ind = (weapon.k_induced if weapon.k_induced > 0.0
+                       else ALPHA_TAX / self._cl_max)
         self._ap_tau = (weapon.autopilot_tau if weapon.autopilot_tau > 0.0
                         else AP_TAU_STRIKE)
         self._thrust_tau = weapon.thrust_tau

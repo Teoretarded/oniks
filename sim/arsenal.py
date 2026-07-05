@@ -60,7 +60,11 @@ ONIKS = WeaponDef(
     length=8.9, diameter=0.67, launch_mass=3000.0, fuel_mass=780.0,
     eject_speed=30.0, eject_time=0.35,
     booster_thrust=300_000.0, booster_time=9.5,
-    max_thrust=110_000.0, isp=1100.0,
+    # isp 1250 s: kerosene-ramjet band (~1000-1500 s). Re-based 2026-07-05
+    # with the energy model: honest trim/turn drag raised the mission burn,
+    # and 1100 s left the design 340 km hi-lo shot arriving DRY (measured:
+    # fuel 0.0 at impact); 1250 s meets the 340-km-with-reserve contract.
+    max_thrust=110_000.0, isp=1250.0,
     cruise_mach_hi=2.55, cruise_alt_hi=14_000.0, cruise_mach_lo=2.0, lo_alt=60.0,
     skim_alt=12.0, terminal_range=42_000.0,
     seeker_range=50_000.0, seeker_half_angle_deg=32.0,
@@ -91,7 +95,11 @@ ZIRCON = WeaponDef(
     length=9.0, diameter=0.70, launch_mass=3400.0, fuel_mass=900.0,
     eject_speed=30.0, eject_time=0.35,
     booster_thrust=360_000.0, booster_time=11.0,
-    max_thrust=200_000.0, isp=1300.0,
+    # isp 1450 s: hydrocarbon-scramjet band. Re-based 2026-07-05 with the
+    # energy model (see ONIKS note): 1300 s starved the 250 km shot mid-dive
+    # (measured arrival 961 m/s, below the combat-validated Mach 3.5-5.2
+    # band); 1450 s keeps the terminal dive powered.
+    max_thrust=200_000.0, isp=1450.0,
     # M5.5 @ 20 km cruise (combat-validated band), M4.5 low band.
     cruise_mach_hi=5.5, cruise_alt_hi=20_000.0, cruise_mach_lo=4.5, lo_alt=80.0,
     # LATE steep letdown: nose over ~70 km out, ~700 m/s commanded sink
@@ -332,10 +340,12 @@ TOMAHAWK = StrikeDef(
     max_g=4.0,             # g, terrain-following cruise missile maneuvering cap
     warhead_mass=450.0,    # kg conventional unitary warhead (TLAM-C cited)
     fuse_radius=5.0,       # m (impact fuze — hits ground; not a proximity weapon)
-    # Energy model: WINGED airframe — lift is wing-borne (K 0.035, not the
-    # 0.2 body-lift default); 4 g at Mach 0.74 sea level needs CL ~ 5.4 on
-    # the body cross-section -> 7. Turbofan spools over ~3 s.
-    k_induced=0.035, cl_max=7.0, thrust_tau=3.0,
+    # Energy model: WINGED airframe — lift rides real wings, so the induced
+    # factor on the body cross-section reference is tiny: measured from the
+    # real geometry (K_wing ~ 0.05 on ~1 m^2 of wing; D_i at 1 g cruise
+    # ~ 170 N) -> k_body = D_i*q*S_body/L^2 ~ 0.012. 4 g at Mach 0.74 sea
+    # level needs CL ~ 5.4 on the cross-section -> 7. Turbofan spools ~3 s.
+    k_induced=0.012, cl_max=7.0, thrust_tau=3.0,
 )
 
 # --- 3M14 Kalibr-PL (sub-launched land-attack, M5) ---------------------------
@@ -369,9 +379,14 @@ KALIBR_PL = StrikeDef(
     booster_time=12.0,         # s booster burn (= TLAM)
     eject_speed=10.0,          # m/s gas-generator breach speed (= TLAM cold-gas)
     eject_time=0.5,            # s from breach until booster ignition
-    # Williams-class turbofan in cruise (= TLAM thermodynamics).
-    max_thrust=3_100.0,    # N turbofan cruise thrust (= TLAM)
-    isp=3_600.0,           # s specific impulse (= TLAM turbofan)
+    # Sustainer: the real 3M14 turbojet is the 37-01E/TRDD-50 class at
+    # 450 kgf = 4.4 kN (en.missilery.info/missile/3m14e, launch-sequences
+    # research 2026-07-05) — NOT the TLAM's 2.7-3.1 kN F107. The old cloned
+    # 3.1 kN left the round at 98% throttle in level flight; the energy
+    # model's honest 1-g trim drag tipped it past max thrust and it sagged
+    # below cruise Mach (measured: 143 m/s at 20 m, mushing on stall fade).
+    max_thrust=4_400.0,    # N turbojet cruise thrust (cited 450 kgf)
+    isp=3_600.0,           # s specific impulse (= TLAM-class fuel economy)
     cruise_mach=0.80,      # Mach subsonic cruise (real Kalibr 0.8-0.9)
     cruise_alt=20.0,       # m above local surface (real Kalibr ~20 m sea-skim)
     max_range=500_000.0,   # m — SCALED DOWN (real 1500+ km) to force the boat close
@@ -379,8 +394,8 @@ KALIBR_PL = StrikeDef(
     max_g=4.0,             # g terrain-following cruise (= TLAM)
     warhead_mass=450.0,    # kg conventional warhead (real Kalibr land-attack)
     fuse_radius=5.0,       # m impact fuze (= TLAM; not a proximity weapon)
-    # Energy model: = TLAM (same winged turbofan class).
-    k_induced=0.035, cl_max=7.0, thrust_tau=3.0,
+    # Energy model: = TLAM (same winged class; k_body from real wings).
+    k_induced=0.012, cl_max=7.0, thrust_tau=3.0,
 )
 
 
@@ -416,8 +431,8 @@ JASSM = StrikeDef(
     max_g=4.0,             # g cruise maneuvering cap
     warhead_mass=109.0,    # kg WDU-42/B penetrating warhead (cited)
     fuse_radius=5.0,       # m (impact fuze)
-    # Energy model: winged turbojet cruiser (= TLAM class).
-    k_induced=0.035, cl_max=7.0, thrust_tau=3.0,
+    # Energy model: winged turbojet cruiser (= TLAM class, wing-borne lift).
+    k_induced=0.012, cl_max=7.0, thrust_tau=3.0,
 )
 
 # --- AGM-88 HARM (air-launched anti-radiation) --------------------------------
@@ -929,10 +944,10 @@ SWARM = WeaponDef(
     seeker_range=12_000.0, seeker_half_angle_deg=40.0,
     max_g=6.0, warhead_mass=8.0,
     ref_area=0.0314,   # pi * (0.20/2)^2
-    # Energy model: a WINGED loiterer — lift rides real wings (induced K
-    # 0.035, not the 0.2 body-lift default), and 6 g at its slow ~120 m/s
-    # design point needs CL ~ 11.7 on the tiny body cross-section -> 14.
-    k_induced=0.035, cl_max=14.0, thrust_tau=1.5,
+    # Energy model: a WINGED loiterer — lift rides real wings (k_body
+    # ~0.012, the TLAM-class wing derivation), and 6 g at its slow
+    # ~120 m/s design point needs CL ~ 11.7 on the tiny cross-section -> 14.
+    k_induced=0.012, cl_max=14.0, thrust_tau=1.5,
 )
 
 

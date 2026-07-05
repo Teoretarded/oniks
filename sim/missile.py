@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 
-from sim.aero import (AP_TAU_CRUISE, CL_MAX_CRUISE, K_INDUCED, QS_FLOOR,
+from sim.aero import (ALPHA_TAX, AP_TAU_CRUISE, CL_MAX_CRUISE, QS_FLOOR,
                       lag_gain, q_scalar)
 from sim.guidance import (STEER_GAIN, STEER_MAX_A, altitude_hold_accel,
                           pn_accel, waypoint_reached)
@@ -103,17 +103,38 @@ BOOST_ELEV_REF_ALT = 8_000.0         # m of commanded cruise alt for full HI
 CLIMB_TO_CRUISE_FRAC = 0.92
 CLIMB_MAX_TAN = np.tan(np.radians(40.0))   # max climb slope (vy / horiz speed)
 
-# Altitude-hold PD used in climb/cruise/terminal. kd ~ 2*sqrt(kp) is near
-# critical damping; max accel 60 m/s^2 (~6 g) is needed so the lo-lo profile
-# captures 60 m without ballooning past 900 m after the 25-degree boost.
+# Command honesty (energy model, 2026-07-05): the climb/descent vertical
+# COMMAND is capped at what the post-integration vy clamps will allow
+# anyway (CLIMB_MAX_TAN slope / _descent_max_sink), captured with this
+# first-order gain. Before the energy model a saturated 6 g alt-hold pull
+# was free — the vy clamp silently discarded it; with induced drag the
+# discarded lift was still being PAID for (measured: the hi-lo climb
+# starved at ~84 kN of phantom induced drag and never reached cruise).
+VY_CAPTURE_GAIN = 1.0      # 1/s onto the slope/sink-limited vertical rate
+
+# Altitude-hold PD used in climb/cruise/terminal. kd ~ 2*sqrt(kp) was near
+# critical damping for a LAG-FREE loop; with the energy model's 0.4 s
+# autopilot lag inside the loop that tuning went underdamped (measured
+# 2026-07-05: cruise capture swung 12.7-16.2 km for ~55 s with thrust
+# slamming 30-90 kN — the oscillation, now that lift costs induced drag,
+# burned ~2/3 of the tank). kd is re-tuned FOR the lag; max accel
+# 60 m/s^2 (~6 g) is needed so the lo-lo profile captures 60 m without
+# ballooning past 900 m after the 25-degree boost.
 ALT_KP = 0.35        # 1/s^2
-ALT_KD = 1.1         # 1/s
+ALT_KD = 2.2         # 1/s (damped WITH the 0.4 s achieved-accel lag)
 ALT_MAX_A = 60.0     # m/s^2
 
 # Post-burnout guidance authority ease-in: the fins bite over this window
 # instead of stepping to the full saturated command in the single tick the
 # booster dies (a 6 g lateral step is an instant path kink on the trail).
 GUID_RAMP_T = 0.6    # s
+
+# Terminal autopilot bandwidth: real autopilots gain-schedule — the
+# terminal stage runs the tightest loop the airframe allows (research doc
+# §3.3: "agile terminal ~0.15-0.3 s"). The cruise tau (0.4 s) in the final
+# 800 m PN dive left only ~3 lag constants to correct onto the hull
+# (measured 2026-07-05: a locked shot splashed 29 m off the beam).
+TERMINAL_AP_TAU = 0.15   # s
 
 # Descent: track a target altitude ramped down at DESCENT_RAMP_RATE toward
 # skim_alt, with stiffer kp so the dive actually follows the ramp (a plain
@@ -406,8 +427,9 @@ class Missile:
         # with class defaults. Turning COSTS speed: the applied guidance
         # accel is q-limited, lagged (three-loop autopilot ~ first-order
         # tau), and charged as induced drag in the guided phases.
-        self._k_ind = weapon.k_induced if weapon.k_induced > 0.0 else K_INDUCED
         self._cl_max = weapon.cl_max if weapon.cl_max > 0.0 else CL_MAX_CRUISE
+        self._k_ind = (weapon.k_induced if weapon.k_induced > 0.0
+                       else ALPHA_TAX / self._cl_max)
         self._ap_tau = (weapon.autopilot_tau if weapon.autopilot_tau > 0.0
                         else AP_TAU_CRUISE)
         self._thrust_tau = weapon.thrust_tau
@@ -417,6 +439,18 @@ class Missile:
         # commands hard-over on a 180), not at the old flat 6 g steer clip;
         # the q-limit + induced drag are what make it expensive.
         self._steer_max_a = weapon.max_g * GRAVITY
+        # Per-weapon launch scaling (2026-07-05, probe_launch_kinematics):
+        # the Oniks-sized launch beats zoomed a 55 kg SWARM to ~Mach 6 /
+        # 3.7 km off the 46 kN ride-out (the documented open boost-overshoot
+        # issue). The low-thrust mode can never out-thrust the weapon's OWN
+        # booster, pitch-over must start inside the little booster's burn,
+        # and boost hands over at the weapon's own speed band. Every min()
+        # returns the LOCKED module constant exactly for the Oniks/Zircon
+        # (bit-identical launch arithmetic for them).
+        self._rideout_thrust = min(RIDEOUT_THRUST, weapon.booster_thrust)
+        self._pitch_start_t = min(PITCH_START_T,
+                                  weapon.eject_time + 0.5 * weapon.booster_time)
+        self._boost_end_mach = min(BOOST_END_MACH, weapon.cruise_mach_hi)
         self._plan_vertical_profile()
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
@@ -641,6 +675,10 @@ class Missile:
                                            self._steer_max_a)
             gy = altitude_hold_accel(alt, vs, self.cruise_alt,
                                      ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
+            # Command honesty: never command lift past the climb-slope cap
+            # (see VY_CAPTURE_GAIN) — riding the slope costs ~1 g, not 6.
+            vy_room = math.hypot(vx, vz) * CLIMB_MAX_TAN - vs
+            gy = min(gy, vy_room * VY_CAPTURE_GAIN + GRAVITY)
         elif self.phase == PH_CRUISE:
             target_alt = self.cruise_alt if self.hi else w.lo_alt
             gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
@@ -657,6 +695,10 @@ class Missile:
             gy = altitude_hold_accel(alt, vs, target_alt,
                                      DESCENT_KP, DESCENT_KD,
                                      ALT_MAX_A * self._descent_scale) + GRAVITY
+            # Command honesty: never command push-over past the sink clamp
+            # (the mirror of the CLIMB slope cap — see VY_CAPTURE_GAIN).
+            sink_room = -self._descent_max_sink - vs
+            gy = max(gy, sink_room * VY_CAPTURE_GAIN + GRAVITY)
         else:   # PH_TERMINAL
             # Re-lock on a dead target: a lead round of the salvo can sink the
             # locked hull mid-flight (ALIVE/BURNING -> SINKING/GONE); the lock
@@ -764,12 +806,17 @@ class Missile:
         # --- phase transitions ---
         if self.phase == PH_EJECT and self.t >= w.eject_time:
             self.phase = PH_RIDEOUT
-        if self.phase == PH_RIDEOUT and self.t >= PITCH_START_T:
+        if self.phase == PH_RIDEOUT and (
+                self.t >= self._pitch_start_t
+                or mach_scalar(speed, alt) >= self._boost_end_mach):
+            # Small rounds that reach their whole speed band during ride-out
+            # (booster cut) start the turn IMMEDIATELY — hanging vertical on
+            # a dead booster is how the swarm wasted its launch (measured).
             self.phase = PH_PITCHOVER
         # PITCHOVER -> BOOST happens in the forces section below (the cap-off
         # trigger needs the freshly rotated velocity direction).
         if self.phase == PH_BOOST and (
-                mach_scalar(speed, alt) >= BOOST_END_MACH
+                mach_scalar(speed, alt) >= self._boost_end_mach
                 or self.t - self._boost_t0 >= w.booster_time):
             self.phase = PH_CLIMB if self.hi else PH_CRUISE
             self._guid_t0 = self.t      # fins ease in over GUID_RAMP_T
@@ -799,8 +846,14 @@ class Missile:
         drag = 0.0
         if self.phase in (PH_EJECT, PH_RIDEOUT):
             # Low-thrust ride-out: thrust along the (vertical) velocity, net
-            # accel small but positive — the heavy, columnar climb.
-            thrust = RIDEOUT_THRUST
+            # accel small but positive — the heavy, columnar climb. A small
+            # round that reaches its own boost-end band mid-launch has burned
+            # its cell-clear booster: thrust cuts, it coasts the rest of the
+            # program (the Oniks never trips this — Mach 2 is far above any
+            # launch-phase speed; bit-identical for it).
+            thrust = (self._rideout_thrust
+                      if mach_scalar(speed, alt) < self._boost_end_mach
+                      else 0.0)
             drag = drag_force_scalar(
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
@@ -829,7 +882,9 @@ class Missile:
             gx = -GRAVITY * hy * hx
             gy = GRAVITY * (1.0 - hy * hy)
             gz = -GRAVITY * hy * hz
-            thrust = RIDEOUT_THRUST
+            thrust = (self._rideout_thrust
+                      if mach_scalar(speed, alt) < self._boost_end_mach
+                      else 0.0)
             drag = drag_force_scalar(
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
@@ -882,8 +937,10 @@ class Missile:
                 gy *= s
                 gz *= s
             # 2. autopilot lag: fins take ~tau to bite — commanded accel is
-            #    never achieved in the tick it is commanded.
-            k = lag_gain(dt, self._ap_tau)
+            #    never achieved in the tick it is commanded. The terminal
+            #    stage gain-schedules to its tightest loop (TERMINAL_AP_TAU).
+            k = lag_gain(dt, min(self._ap_tau, TERMINAL_AP_TAU)
+                         if self.phase == PH_TERMINAL else self._ap_tau)
             self._ap_x += (gx - self._ap_x) * k
             self._ap_y += (gy - self._ap_y) * k
             self._ap_z += (gz - self._ap_z) * k

@@ -478,16 +478,23 @@ def test_launch_swarm_round_survives_real_world_step():
         assert float(r.pos[1]) >= ground - 1e-6, (
             f"round spawned below terrain ({r.pos[1]:.3f} < {ground:.3f})")
     start_dr = [abs(float(r.pos[2]) - base[2]) for r in rounds]
-    for _ in range(int(5.0 / DT)):                  # 5 s of real physics
+    # 10 s of real physics: the honest cell-toss launch (2026-07-05 energy
+    # build — pop, turn by ~2.5 s, cruise ~100-150 m/s) needs the longer
+    # window; the old "1 km in 5 s" bar was only reachable by the boost
+    # OVERSHOOT bug this same build fixed (46 kN ride-out zooming the 55 kg
+    # round to Mach ~6 — it made the bar, then crashed 25 km out).
+    for _ in range(int(10.0 / DT)):
         w.step(DT)
     alive = [r for r in rounds if r.alive]
     assert len(alive) == len(rounds), (
         f"every launch_swarm round must survive real world.step physics on the "
         f"default preset; {len(rounds) - len(alive)} died "
         f"(phases {[int(r.phase) for r in rounds]})")
-    # The bundle gained real downrange distance (it did not die in place).
+    # The bundle gained real downrange distance (it did not die in place):
+    # >= 600 m in 10 s means a genuine post-launch cruise, with the launch
+    # transient (~2.5 s) forgiven.
     end_dr = [abs(float(r.pos[2]) - base[2]) for r in rounds]
-    assert max(end_dr) - max(start_dr) > 1_000.0, (
+    assert max(end_dr) - max(start_dr) > 600.0, (
         f"the bundle must fly downrange (gained "
         f"{max(end_dr) - max(start_dr):.1f} m, start {max(start_dr):.1f}, "
         f"now {max(end_dr):.1f})")
