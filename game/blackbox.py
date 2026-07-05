@@ -397,6 +397,16 @@ def write_bug_report(base_dir: str, ledger: BattleLedger,
         str(context.get("note", "") or "(none given - see the mark)"),
         "",
     ]
+    if context.get("tags"):
+        # v2 (2026-07-05): the UI elements the player click-tagged during
+        # annotate mode — name + pixel rect + code site, straight from the
+        # on-screen registry, so the reader lands in the right file.
+        lines += ["TAGGED UI ELEMENTS (from the on-screen registry)",
+                  "-" * 60]
+        for tg in context["tags"]:
+            lines.append(f"  {tg.get('name')}  rect={tg.get('rect')}  "
+                         f"code={tg.get('code')}")
+        lines.append("")
     if context.get("platform"):
         lines += [f"ACTIVE PLATFORM: {context['platform']}", ""]
     if context.get("selection"):

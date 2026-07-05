@@ -70,13 +70,23 @@ def main() -> int:
     # EMCON flip (a replayable toggle).
     key(pygame.K_r)
     frame(30)
-    # F3: file the bug report mid-battle.
+    # F3 (v2): open ANNOTATE mode — the clean screenshot saves on the open
+    # frame (App-loop mimic), the sim pauses, then we TYPE the note and
+    # ENTER files the bundle.
     key(pygame.K_F3)
-    # The App loop saves the bug shot after render — mimic one frame of it.
-    state.render(1.0 / 60.0)
+    check("annotate mode pauses the sim", app.paused is True)
+    state.render(1.0 / 60.0)            # clean-shot frame; the arm clears
     if app.bug_shot_path:
         path, app.bug_shot_path = app.bug_shot_path, None
         pygame.image.save(app.window.read_pixels_to_surface(), path)
+    for ch in "fire refused on a solid track":
+        state.handle_event(pygame.event.Event(
+            pygame.KEYDOWN, key=pygame.K_SPACE if ch == " " else ord(ch),
+            unicode=ch))
+    state.render(1.0 / 60.0)            # overlay draws (note visible)
+    state.handle_event(pygame.event.Event(
+        pygame.KEYDOWN, key=pygame.K_RETURN, unicode="\r"))
+    check("filing restores the pause state", app.paused is False)
     frame(1200)                         # ~10 s: hash records land (600 cadence)
 
     led = state.ledger
@@ -109,6 +119,8 @@ def main() -> int:
         check("report states seed + platform + repro command",
               "SEED" in report and "ACTIVE PLATFORM" in report
               and "replay_battle.py" in report)
+        check("report carries the TYPED operator note",
+              "fire refused on a solid track" in report)
 
     # --- close + replay-verify the ledger ----------------------------------
     ledger_path = led.path

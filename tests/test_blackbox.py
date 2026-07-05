@@ -252,3 +252,22 @@ def test_write_bug_report_numbers_folders(tmp_path):
     r1 = write_bug_report(str(tmp_path), led, {"t": 1.0, "tick": 120})
     r2 = write_bug_report(str(tmp_path), led, {"t": 2.0, "tick": 240})
     assert os.path.dirname(r1) != os.path.dirname(r2)
+
+
+def test_write_bug_report_includes_note_and_tagged_ui(tmp_path):
+    """v2 (2026-07-05): the report carries the player's TYPED note and the
+    UI elements they click-tagged — each tag names the element, its pixel
+    rect and its code site, so the reader lands in the right file."""
+    led = BattleLedger(path=None)
+    led.header(CombatConfig(seed=2), created="x", commit="y")
+    ctx = {"t": 30.0, "tick": 3600,
+           "note": "the weapon row shows ZIRCON but SPACE fired an ONIKS",
+           "tags": [{"name": "hud.plate.bastion.body",
+                     "rect": [16, 46, 316, 210],
+                     "code": "game/hud.py:_block"}]}
+    report = write_bug_report(str(tmp_path), led, ctx)
+    text = open(report, encoding="utf-8").read()
+    assert "the weapon row shows ZIRCON" in text
+    assert "TAGGED UI" in text
+    assert "hud.plate.bastion.body" in text
+    assert "game/hud.py:_block" in text
