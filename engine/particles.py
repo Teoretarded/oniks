@@ -439,6 +439,19 @@ class Effects:
         self.fire = ParticlePool(FIRE_CAP)
         self.spray = ParticlePool(SPRAY_CAP)
         self.trails: list[TrailRibbon] = []
+        # GRAPHICS settings (game/ui_prefs.py, 2026-07-05): a global
+        # emission multiplier (LOW 0.5 .. ULTRA 2.0) applied to every
+        # multi-particle spawn via _n(); per-substep single-particle feeds
+        # keep their floor of 1. The owner (game/sandbox.py) refreshes it
+        # from the prefs each frame, so the settings tab acts live.
+        self.density = 1.0
+        # LAUNCH SMOKE pref: 1.0 = FULL, <1 = MINIMAL — scales only the big
+        # launch one-shots (muzzle blast / ignition fireball).
+        self.launch_fx = 1.0
+
+    def _n(self, n: float) -> int:
+        """Density-scaled emission count (floor 1 — never silently zero)."""
+        return max(1, int(round(n * self.density)))
 
     def add_trail(self) -> TrailRibbon:
         """Create and register a ribbon; the caller feeds it points."""
@@ -469,10 +482,10 @@ class Effects:
         d = np.asarray(direction, dtype=np.float64)
         d = d / max(np.linalg.norm(d), 1e-9)
         back = -d * (PLUME_EXHAUST_SPEED * float(throttle))
-        n_fire = max(1, int(round(PLUME_FIRE_COUNT * throttle)))
+        n_fire = self._n(PLUME_FIRE_COUNT * throttle)
         self.fire.emit(n_fire, pos, 0.7, back, 6.0, (0.12, 0.3),
                        (1.3, 3.6), ((1.0, 0.86, 0.45), (1.0, 0.35, 0.08)), r)
-        n_smoke = max(1, int(round(PLUME_SMOKE_COUNT * throttle)))
+        n_smoke = self._n(PLUME_SMOKE_COUNT * throttle)
         self.smoke.emit(n_smoke, pos, 1.0, back * 0.45, 4.0, (2.5, 4.5),
                         (2.0, 9.0),
                         ((0.86, 0.85, 0.83), (0.58, 0.58, 0.61)), r)
@@ -485,16 +498,19 @@ class Effects:
         radial ground wash burying the TEL (brahmos_block3_parade frame).
         ``ground_y``: world height the wash hugs (default: the mouth)."""
         r = self.rng if rng is None else rng
-        self.fire.emit(MUZZLE_FIRE_COUNT, pos, 1.4, (0.0, 7.0, 0.0), 5.5,
+        self.fire.emit(self._n(MUZZLE_FIRE_COUNT * self.launch_fx), pos, 1.4,
+                       (0.0, 7.0, 0.0), 5.5,
                        (0.3, 0.7), (3.0, 9.0),
                        ((1.0, 0.80, 0.38), (0.92, 0.32, 0.06)), r)
-        self.smoke.emit(MUZZLE_SMOKE_COUNT, pos, 2.5,
+        self.smoke.emit(self._n(MUZZLE_SMOKE_COUNT * self.launch_fx), pos,
+                        2.5,
                         (0.0, MUZZLE_SMOKE_RISE, 0.0), 5.5, (2.5, 5.0),
                         (3.5, 16.0), MUZZLE_SMOKE_COL, r)
         wash_pos = np.asarray(pos, dtype=np.float64).copy()
         if ground_y is not None:
             wash_pos[1] = float(ground_y)
-        idx = self.smoke.emit(MUZZLE_WASH_COUNT, wash_pos, 1.5,
+        idx = self.smoke.emit(self._n(MUZZLE_WASH_COUNT * self.launch_fx),
+                              wash_pos, 1.5,
                               (0.0, 1.5, 0.0), 1.0, (3.0, 6.0), (4.0, 18.0),
                               MUZZLE_SMOKE_COL, r)
         if len(idx):
@@ -548,10 +564,13 @@ class Effects:
         r = self.rng if rng is None else rng
         self.fire.emit(2, pos, 0.4, (0.0, 0.0, 0.0), 0.0, 0.12,
                        (7.0, 13.0), ((1.0, 0.97, 0.85), (1.0, 0.62, 0.2)), r)
-        self.fire.emit(IGNITION_FIRE_COUNT, pos, 1.4, (0.0, 4.0, 0.0), 9.0,
+        self.fire.emit(self._n(IGNITION_FIRE_COUNT * self.launch_fx), pos,
+                       1.4,
+                       (0.0, 4.0, 0.0), 9.0,
                        (0.30, 0.70), (1.8, 5.5),
                        ((1.0, 0.82, 0.35), (0.85, 0.25, 0.04)), r)
-        idx = self.smoke.emit(IGNITION_DONUT_COUNT, pos, 0.8,
+        idx = self.smoke.emit(self._n(IGNITION_DONUT_COUNT * self.launch_fx),
+                              pos, 0.8,
                               (0.0, 2.5, 0.0), 1.0, (2.2, 4.0), (1.5, 7.5),
                               ((0.80, 0.78, 0.75), (0.60, 0.60, 0.62)), r)
         if len(idx):
@@ -570,12 +589,14 @@ class Effects:
                        (16.0 * s, 30.0 * s),
                        ((1.0, 0.97, 0.85), (1.0, 0.6, 0.2)), r)
         # Fireball: radial additive scatter.
-        self.fire.emit(max(12, int(EXPL_FIREBALL_COUNT * s)), pos, 2.5 * s,
+        self.fire.emit(self._n(max(12, int(EXPL_FIREBALL_COUNT * s))),
+                       pos, 2.5 * s,
                        (0.0, 9.0 * s, 0.0), EXPL_FIREBALL_SPEED * s,
                        (0.4, 1.0), (5.0 * s, 16.0 * s),
                        ((1.0, 0.78, 0.32), (0.75, 0.18, 0.03)), r)
         # Smoke column: dark, slow, rises on pool buoyancy.
-        self.smoke.emit(max(16, int(EXPL_SMOKE_COUNT * s)), pos, 4.0 * s,
+        self.smoke.emit(self._n(max(16, int(EXPL_SMOKE_COUNT * s))),
+                        pos, 4.0 * s,
                         (0.0, EXPL_SMOKE_RISE * s, 0.0), 6.0 * s,
                         (3.5, 8.0), (8.0 * s, 34.0 * s),
                         ((0.16, 0.15, 0.14), (0.42, 0.42, 0.44)), r)
@@ -587,7 +608,7 @@ class Effects:
         r = self.rng if rng is None else rng
         s = float(scale)
         spray_col = ((0.93, 0.96, 1.0), (0.72, 0.78, 0.85))
-        idx = self.spray.emit(int(SPLASH_COUNT * s), pos, 1.5,
+        idx = self.spray.emit(self._n(int(SPLASH_COUNT * s)), pos, 1.5,
                               (0.0, SPLASH_RISE, 0.0), 4.0, (1.2, 2.2),
                               (2.2 * s, 7.5 * s), spray_col, r)
         if len(idx):
@@ -597,7 +618,7 @@ class Effects:
                               len(idx)) * s
             self.spray.vel[idx, 0] = (np.sin(ang) * speed).astype(np.float32)
             self.spray.vel[idx, 2] = (np.cos(ang) * speed).astype(np.float32)
-        self.spray.emit(int(SPLASH_COLUMN_COUNT * s), pos, 1.0,
+        self.spray.emit(self._n(int(SPLASH_COLUMN_COUNT * s)), pos, 1.0,
                         (0.0, SPLASH_COLUMN_RISE * s, 0.0), 3.5, (1.4, 2.4),
                         (3.0 * s, 9.0 * s), spray_col, r)
 

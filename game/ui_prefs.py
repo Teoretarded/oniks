@@ -21,8 +21,18 @@ PREFS_FILE = "ui_prefs.json"
 _SCHEMA = {
     "map_layout": ("board", lambda v: v in ("board", "classic")),
     "launch_cinema": (True, lambda v: isinstance(v, bool)),
+    # --- GRAPHICS tab (settings screen, 2026-07-05) -----------------------
+    "particle_density": ("med",
+                         lambda v: v in ("low", "med", "high", "ultra")),
+    "exhaust_trails": (True, lambda v: isinstance(v, bool)),
+    "launch_smoke": ("full", lambda v: v in ("minimal", "full")),
 }
 DEFAULTS = {k: d for k, (d, _) in _SCHEMA.items()}
+
+# Particle-emission multiplier per density step (the RTX-3050 budget knob:
+# LOW halves every emit count, ULTRA doubles them; pool caps still bound
+# the worst case).
+DENSITY_SCALE = {"low": 0.5, "med": 1.0, "high": 1.5, "ultra": 2.0}
 
 
 def prefs_path() -> str:
@@ -57,6 +67,10 @@ class UiPrefs:
         new = not self.get("launch_cinema")
         self.set("launch_cinema", new)
         return new
+
+    def particle_density_scale(self) -> float:
+        """Emission multiplier for the current particle_density pref."""
+        return DENSITY_SCALE[self.get("particle_density")]
 
     # ---------------------------------------------------------- persistence
 

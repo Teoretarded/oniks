@@ -191,6 +191,17 @@ SPLASH_SCALE = 1.4             # clean water impact
 
 SHIP_HIT_SPLASH_MAX_Y = 8.0    # hull hits below this height also splash
 
+
+class _NullTrail:
+    """add_point sink for the EXHAUST TRAILS=OFF graphics pref — callers
+    keep their one-line feed; nothing is stored or drawn."""
+
+    def add_point(self, pos, col=None) -> bool:
+        return False
+
+
+_NULL_TRAIL = _NullTrail()
+
 LAUNCH_PUFF_COUNT = 22         # cold-launch gas puff at the canister mouth
 
 CRUISE_LOOP_GAIN = 1.0         # ramjet loop gain (low level baked in the wav)
@@ -1280,6 +1291,14 @@ class SandboxState(GameState):
         self._aircraft_smoke(dt)
         self._update_parts(dt)
         self._update_tel(dt)
+        # GRAPHICS settings act LIVE: refresh the emission knobs from the
+        # persisted prefs each frame (a cheap dict read — the settings tab
+        # needs no plumbing back into the sandbox).
+        prefs = getattr(self.app, "ui_prefs", None)
+        if prefs is not None:
+            self.effects.density = prefs.particle_density_scale()
+            self.effects.launch_fx = (1.0 if prefs.get("launch_smoke")
+                                      == "full" else 0.4)
         self.effects.update(dt)
 
     def _on_world_events(self, events) -> None:
@@ -1353,6 +1372,9 @@ class SandboxState(GameState):
                     RAMJET_HAZE_COLORS, fx.rng)
 
     def _trail_for(self, key):
+        prefs = getattr(self.app, "ui_prefs", None)
+        if prefs is not None and not prefs.get("exhaust_trails"):
+            return _NULL_TRAIL      # EXHAUST TRAILS pref OFF: feed a sink
         trail = self._trails.get(key)
         if trail is None:
             trail = self._trails[key] = self.effects.add_trail()

@@ -141,6 +141,40 @@ PAUSE_FOOTER = "ESC RESUME"
 
 SETTINGS_HEADER = "SETTINGS / KEYBINDS"
 SETTINGS_FOOTER = "ENTER REBIND   ESC BACK   R RESET ROW"
+
+# --- GRAPHICS tab (2026-07-05): the second settings tab ------------------------
+from game.ui_prefs import DEFAULTS as PREF_DEFAULTS
+
+SETTINGS_TABS = ("KEYBINDS", "GRAPHICS")
+SETTINGS_HEADER_GFX = "SETTINGS / GRAPHICS"
+SETTINGS_FOOTER_GFX = "LEFT/RIGHT CHANGE   TAB SWITCH TAB   ESC BACK   R RESET ROW"
+# (label, ui_prefs key, ordered values). Values cycle LEFT/RIGHT and wrap;
+# every one is validated by the ui_prefs schema, so a stale file can never
+# render an impossible state.
+GRAPHICS_ROWS = (
+    ("PARTICLE DENSITY", "particle_density", ("low", "med", "high", "ultra")),
+    ("EXHAUST TRAILS", "exhaust_trails", (False, True)),
+    ("LAUNCH SMOKE", "launch_smoke", ("minimal", "full")),
+    ("LAUNCH CINEMA (MAP)", "launch_cinema", (False, True)),
+    ("MAP LAYOUT", "map_layout", ("board", "classic")),
+)
+
+
+def graphics_value_label(v) -> str:
+    """Display text for a graphics pref value (bools read ON/OFF)."""
+    if isinstance(v, bool):
+        return "ON" if v else "OFF"
+    return str(v).upper()
+
+
+def cycle_value(values, current, delta: int):
+    """Next value in ``values`` from ``current`` stepping ``delta`` with
+    wrap-around; an unknown current snaps to the first value (pure)."""
+    try:
+        i = values.index(current)
+    except ValueError:
+        return values[0]
+    return values[(i + delta) % len(values)]
 PRESS_KEY_TEXT = "[ PRESS KEY ]"
 RESET_LABEL = "RESET DEFAULTS"
 BACK_LABEL = "BACK"
@@ -888,6 +922,11 @@ class SettingsState(GameState):
         self._flash: list | None = None         # [focusable, time_left]
         self._view_h = 480.0            # updated every render; test default
         self._hit_rects: list = []      # (focusable_index, rect) from render
+        # GRAPHICS tab state (2026-07-05): tab 0 = KEYBINDS (the historical
+        # screen, byte-identical behavior), 1 = GRAPHICS (ui_prefs rows).
+        self.tab = 0
+        self._gfx_focus = 0
+        self._gfx_rects: list = []      # (gfx_focus_index, rect) from render
 
     def enter(self) -> None:
         pygame.event.set_grab(False)
@@ -902,6 +941,9 @@ class SettingsState(GameState):
         self.conflict = None
         self.reset_armed = False
         self._hit_rects = []
+        self.tab = 0
+        self._gfx_focus = 0
+        self._gfx_rects = []
 
     def effective_time_scale(self) -> float:
         return 0.0
@@ -914,10 +956,19 @@ class SettingsState(GameState):
                 self._capture(ev.key)
             elif self.conflict is not None:
                 self._resolve_conflict(ev.key)
+            elif ev.key == pygame.K_TAB:
+                self.tab = (self.tab + 1) % len(SETTINGS_TABS)
+                self.reset_armed = False
+                self.app.audio.ui_click()
+            elif self.tab == 1:
+                self._gfx_nav_key(ev.key)
             else:
                 self._nav_key(ev.key)
         elif self.listening is None and self.conflict is None:
-            self._mouse(ev)
+            if self.tab == 1:
+                self._gfx_mouse(ev)
+            else:
+                self._mouse(ev)
 
     def _capture(self, key: int) -> None:
         """Next KEYDOWN while listening: bind it, or open the swap offer.
@@ -1019,6 +1070,75 @@ class SettingsState(GameState):
     def _back(self) -> None:
         self.app.states.switch(self.back_to or self.app.menu)
 
+    # ------------------------------------------------- GRAPHICS tab input
+
+    def _prefs(self):
+        return getattr(self.app, "ui_prefs", None)
+
+    def _gfx_focusables(self) -> list:
+        return [key for _, key, _ in GRAPHICS_ROWS] + ["BACK"]
+
+    def _gfx_nav_key(self, key: int) -> None:
+        items = self._gfx_focusables()
+        if key == pygame.K_UP:
+            self._gfx_focus = move_selection(self._gfx_focus, -1, len(items))
+            self.app.audio.ui_click()
+        elif key == pygame.K_DOWN:
+            self._gfx_focus = move_selection(self._gfx_focus, 1, len(items))
+            self.app.audio.ui_click()
+        elif key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_RETURN,
+                     pygame.K_KP_ENTER):
+            target = items[self._gfx_focus]
+            if target == "BACK":
+                if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    self.app.audio.ui_click()
+                    self._back()
+            else:
+                self._gfx_cycle(target, -1 if key == pygame.K_LEFT else 1)
+        elif key == pygame.K_r:
+            target = items[self._gfx_focus]
+            prefs = self._prefs()
+            if target != "BACK" and prefs is not None:
+                prefs.set(target, PREF_DEFAULTS[target])
+                self._flash = [target, PRESS_FLASH_S]
+                self.app.audio.ui_click()
+        elif key == pygame.K_ESCAPE:
+            self._back()
+
+    def _gfx_cycle(self, key: str, delta: int) -> None:
+        prefs = self._prefs()
+        if prefs is None:
+            return
+        for _label, k, values in GRAPHICS_ROWS:
+            if k == key:
+                prefs.set(k, cycle_value(values, prefs.get(k), delta))
+                self._flash = [k, PRESS_FLASH_S]
+                self.app.audio.ui_click()
+                return
+
+    def _gfx_mouse(self, ev) -> None:
+        if ev.type == pygame.MOUSEMOTION:
+            hit = self._gfx_hit(ev.pos)
+            if hit is not None and hit != self._gfx_focus:
+                self._gfx_focus = hit
+        elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            hit = self._gfx_hit(ev.pos)
+            if hit is None:
+                return
+            self._gfx_focus = hit
+            target = self._gfx_focusables()[hit]
+            if target == "BACK":
+                self.app.audio.ui_click()
+                self._back()
+            else:
+                self._gfx_cycle(target, 1)
+
+    def _gfx_hit(self, pos):
+        for idx, (x0, y0, x1, y1) in self._gfx_rects:
+            if x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1:
+                return idx
+        return None
+
     # -------------------------------------------------------------- render
 
     def render(self, dt_real: float) -> None:
@@ -1038,13 +1158,20 @@ class SettingsState(GameState):
         head_lh = text.line_height(HEADER_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
         body_lh = text.line_height(BODY_SIZE)
-        text.draw_text(x, 48, SETTINGS_HEADER, ACCENT, HEADER_SIZE)
+        header = SETTINGS_HEADER if self.tab == 0 else SETTINGS_HEADER_GFX
+        text.draw_text(x, 48, header, ACCENT, HEADER_SIZE)
         rule_y = 48 + head_lh + 8
         draw_header_rule(text, x, rule_y, COL_W)
+        tab_y = rule_y + 8
+        tab_strip(text, x, tab_y, SETTINGS_TABS, self.tab)
 
-        panel_y = rule_y + PAD
+        panel_y = tab_y + small_lh + TAB_UNDERLINE_DY + PAD
         panel_h = h - panel_y - 120     # buttons + footer live below
         draw_panel(text, x, panel_y, COL_W, panel_h, strip=True)
+        if self.tab == 1:
+            self._render_graphics(x, panel_y, panel_h, small_lh, body_lh,
+                                  w, h)
+            return
 
         # Column headers + divider.
         ch_y = panel_y + 8
@@ -1097,6 +1224,64 @@ class SettingsState(GameState):
         text.draw_text(x, fy, SETTINGS_FOOTER, ACCENT_DIM, SMALL_SIZE)
         vw = text.text_width(GAME_VERSION, SMALL_SIZE)
         text.draw_text(x + COL_W - vw, fy, GAME_VERSION, DISABLED, SMALL_SIZE)
+        text.flush(w, h)
+
+    def _render_graphics(self, x, panel_y, panel_h, small_lh, body_lh,
+                         w, h) -> None:
+        """GRAPHICS tab body: ui_prefs rows (label left, value right with
+        chevrons on focus) + BACK + footer. Same plate/row grammar as the
+        keybinds tab — Wardroom Dusk, flat plates, no glow."""
+        text = self.text
+        prefs = self._prefs()
+        self._gfx_rects = []
+        ch_y = panel_y + 8
+        text.draw_text(x + PAD, ch_y, "OPTION", MUTED, SMALL_SIZE)
+        vw = text.text_width("VALUE", SMALL_SIZE)
+        text.draw_text(x + COL_W - PAD - 8 - vw, ch_y, "VALUE", MUTED,
+                       SMALL_SIZE)
+        div_y = ch_y + small_lh + 6
+        text.draw_lines([(x + PAD, div_y), (x + COL_W - PAD, div_y)],
+                        (*LINE_COL, 1.0), 1.0)
+        y = div_y + 6
+        for i, (label, key, _values) in enumerate(GRAPHICS_ROWS):
+            focused = self._gfx_focus == i
+            if focused:
+                text.draw_rect(x, y, COL_W, ROW_H, (*BG2, 1.0))
+                text.draw_rect(x, y, FOCUS_BAR_W, ROW_H, (*ACCENT, 1.0))
+            if self._flash is not None and self._flash[0] == key:
+                text.draw_rect(x, y, COL_W, ROW_H, (*PRESS_FILL, 1.0))
+            ty = y + (ROW_H - body_lh) // 2
+            text.draw_text(x + PAD, ty, label,
+                           ACCENT if focused else MUTED)
+            value = graphics_value_label(prefs.get(key)) if prefs is not None \
+                else "--"
+            if focused:
+                value = f"< {value} >"
+            vw2 = text.text_width(value)
+            text.draw_text(x + COL_W - PAD - 8 - vw2, ty, value,
+                           ACCENT if focused else TEXT_COL)
+            self._gfx_rects.append((i, (x, y, x + COL_W, y + ROW_H)))
+            y += ROW_H
+
+        # BACK button + footer (the graphics tab has no global reset).
+        by = panel_y + panel_h + PAD
+        bw_px = text.text_width(BACK_LABEL) + 2 * PAD
+        bx = x + COL_W - bw_px
+        back_focused = self._gfx_focus == len(GRAPHICS_ROWS)
+        col = ACCENT if back_focused else MUTED
+        if back_focused:
+            text.draw_rect(bx, by, bw_px, BTN_H, (*BG2, 1.0))
+        text.draw_lines([(bx, by), (bx + bw_px, by), (bx + bw_px, by + BTN_H),
+                         (bx, by + BTN_H), (bx, by)], (*col, 1.0), 1.0)
+        blh = text.line_height(BODY_SIZE)
+        text.draw_text(bx + PAD, by + (BTN_H - blh) // 2, BACK_LABEL, col)
+        self._gfx_rects.append((len(GRAPHICS_ROWS),
+                                (bx, by, bx + bw_px, by + BTN_H)))
+        fy = h - FOOTER_MARGIN - small_lh
+        text.draw_text(x, fy, SETTINGS_FOOTER_GFX, ACCENT_DIM, SMALL_SIZE)
+        gvw = text.text_width(GAME_VERSION, SMALL_SIZE)
+        text.draw_text(x + COL_W - gvw, fy, GAME_VERSION, DISABLED,
+                       SMALL_SIZE)
         text.flush(w, h)
 
     def _draw_entry(self, entry, x, y, focused, small_lh, body_lh) -> None:
