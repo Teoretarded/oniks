@@ -36,25 +36,38 @@ launch_sequences_2026-07-05.md, launch_visuals_particles_2026-07-05.md.
    built from a truth-stamped _lock_pos; now from the last pre-handover
    estimate).
 
-## Remaining (as of this log)
-- RED: tests/test_phase5b_e2e.py::test_40n6_kills_awacs_beyond_200km_on_forced_track
-  (long-reach coast under energy model — trace the flight, likely needs
-  more coast energy or less coast drag; do NOT touch the shared gains).
-- RED: tests/test_phase4_e2e.py::test_stealth_kill_statistics_two_sided
-  (close-in 10 km S-300 vs noisy stealth drone: kill fraction 0.47 vs
-  ≥0.75 — terminal PN + lag vs OU noise; probe _drone_shot, consider
-  whether the close-in geometry needs the boost-phase tilt to lead better
-  or the band re-measured IF the physics is defensible).
-- Full suite -n auto not yet re-run end-to-end after wave 2; then perf
-  harness (tools/perf_harness.py), new default-battle digest measurement
-  (old 7d5716…06add deliberately superseded), smoke run.
-- tools/render_launch_sequences.py (GL frame strips per weapon,
-  screenshot_harness pattern — _aim/_render_frame/read_pixels; oniks via
-  s.request_launch, s300 via world.launch_sam vs an air track).
-- Per-weapon launch VFX polish (research Part A): S-300 cold mortar puff,
-  VLS flame+uptake jet, Buk/Pantsir needle trails, turbofan smokeless
-  cruise (docs/research/launch_visuals_particles_2026-07-05.md recipe).
-- Kalibr pre-existing note: fuel 80 kg honestly covers ~250 km at the
-  4.4 kN sustainer (label says 500 km) — flag for a later balance pass.
-- Pantsir real boost is 55 kN/1.5 s vs game 18 kN/3.5 s (flagged in
-  research doc, not changed).
+## Wave 3 (2026-07-06) — both reds closed
+- SAM ENERGY CRUISE: loft bias capped at the drag-optimal altitude for the
+  CURRENT speed (qS* = sqrt(k/CD0)·L; the optimum descends as the round
+  slows — a fixed 33 km coast melted itself at a clean 1-g trim). 40N6
+  rides +allowance above optimum (its identity), motor isp 258/19.4 s,
+  timer 460 s. TGO_MAX 90→40 s (orbiting-target ghost leads).
+  TERMINAL_PN_GAIN 5 (decel bias miss, Zarchan). AWACS test re-anchored
+  205-245 km (argued: a fleeing AWACS honestly outruns a 360 m/s arrival
+  at 240+ km; contract "kill beyond 200 km + flee" holds at measured
+  233 km launch, 25.7 m closest).
+- STEALTH_SNR_SIGMA_MAX_M 60→40 (the 0.15 s lag ~doubled felt miss per
+  sigma; design shape restored: near-certain close, ~1/3 at edge).
+
+## Verification (2026-07-06)
+- Perf harness on the real RTX 3050 Laptop GPU: avg 12.58 ms vs 16 ms
+  budget (worst-case scene, 8x warp) → PASS, energy model included.
+- NEW default-battle digest:
+  df9dbde3402c309f71ccd4b55136821fdddd8d19a78f6b35a733f4a1bf7b2321
+  (old 7d5716…06add superseded by the deliberate physics change).
+- Launch strips rendered + own-eyes reviewed: renders/launch/
+  oniks_strip.png (ignition cloud → cream column → pitch kink → boost
+  bloom → grey streak → climb) and s300_strip.png (catapult pop →
+  flameless HANG → ignition fireball → tip-over streak).
+- Full suite -n auto: run in progress at log time; see final report.
+
+## Backlog for later passes
+- Per-weapon launch VFX polish (research Part A): VLS flame+uptake jet,
+  Buk/Pantsir needle trails, turbofan smokeless cruise (recipe in
+  docs/research/launch_visuals_particles_2026-07-05.md). Density prefs
+  and launch_fx scaling shipped this build.
+- Kalibr pre-existing: fuel 80 kg honestly covers ~250 km at the 4.4 kN
+  sustainer (label says 500 km) — later balance pass.
+- Pantsir real boost 55 kN/1.5 s vs game 18 kN/3.5 s (flagged, unchanged).
+- Launch strips for more weapons (tomahawk/buk/pantsir need combat-world
+  spawn recipes in the render tool).
