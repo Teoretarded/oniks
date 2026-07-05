@@ -209,6 +209,13 @@ def test_sam_coast_turn_bleeds_speed():
 
     straight_loss = coast(aligned=True)
     turning_loss = coast(aligned=False)
-    assert turning_loss >= 2.0 * straight_loss, (
+    # Re-pin 2026-07-06: the 4 g midcourse correction budget (MID_MAX_A_G)
+    # deliberately softened midcourse turns — the old 2x ratio described
+    # the unbudgeted 20 g yank. The surviving contract: a coasting turn
+    # still costs measurably more than straight flight (measured delta
+    # ~9 m/s over 3 s at the 10 km q-limited authority), and the
+    # UNBUDGETED hard-turn tax is locked by the Missile-machine 180-degree
+    # test above.
+    assert turning_loss > straight_loss + 4.0, (
         f"hard coast turn lost {turning_loss:.0f} m/s vs straight "
-        f"{straight_loss:.0f} m/s: turning must be expensive")
+        f"{straight_loss:.0f} m/s: turning must cost more than cruising")

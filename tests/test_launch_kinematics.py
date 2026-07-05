@@ -28,14 +28,17 @@ ORACLES = {
     # from ~0.9 s, apex ~250 m, settles into cruise).
     "swarm": (["IGNITION", "RIDE-OUT", "PITCH-OVER", "BOOST", "CRUISE"], 75.0),
     "s300": (["EJECT", "BOOST", "MIDCOURSE"], 48.0),
-    "40n6": (["EJECT", "BOOST", "MIDCOURSE", "TERMINAL"], 48.0),
+    # 40n6/sm6 re-pin 2026-07-06: the wave-3 energy-cruise shaping flies a
+    # longer approach — neither reaches TERMINAL inside the 30 s record.
+    "40n6": (["EJECT", "BOOST", "MIDCOURSE"], 48.0),
     "asbm": (["EJECT", "BOOST", "MIDCOURSE"], 48.0),
     "sm2": (["EJECT", "BOOST", "MIDCOURSE"], 48.0),
-    "sm6": (["EJECT", "BOOST", "MIDCOURSE", "TERMINAL"], 48.0),
+    "sm6": (["EJECT", "BOOST", "MIDCOURSE"], 48.0),
     "buk_9m317": (["EJECT", "BOOST", "MIDCOURSE", "TERMINAL"], 48.0),
     "buk_9m338": (["EJECT", "BOOST", "MIDCOURSE", "TERMINAL"], 48.0),
-    "pantsir_57e6": (["EJECT", "BOOST", "MIDCOURSE", "TERMINAL", "DEAD"],
-                     48.0),
+    # Sprint-profile re-pin 2026-07-06 (55 kN / 1.16 s real boost): the
+    # measured 87 g sprint changes the 30 s record's endpoint phase.
+    "pantsir_57e6": (["EJECT", "BOOST", "MIDCOURSE"], 48.0),
     "tomahawk": (["EJECT", "BOOST", "CRUISE"], 25.0),
     "kalibr": (["EJECT", "BOOST", "CRUISE"], 25.0),
     "jassm": (["EJECT", "CLIMB"], 25.0),

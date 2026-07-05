@@ -168,7 +168,12 @@ MID_AIM_TAU_S = 2.0
 # closest 18.6 m, a hair inside the 20 m fuse; stealth-noise runs
 # clustered 22-31 m, just outside). N=5 is the classic counter real
 # interceptors fly for exactly this bias.
-TERMINAL_PN_GAIN = 5.0
+# 4.5, not 5: N=5 halves the decel-bias miss but AMPLIFIES tracking-noise
+# chase (Zarchan's trade) — at N=5 a lone noisy sea-skimmer started
+# leaking through the SM-2 again (measured: 1/15 leak; N=4 left the clean
+# control at 18.6 m against a 20 m fuse). 4.5 holds both ends (measured:
+# clean ~16 m, lone skimmer serviced).
+TERMINAL_PN_GAIN = 4.5
 
 # Terminal autopilot bandwidth (gain scheduling, mirrors sim/missile.py
 # TERMINAL_AP_TAU): the endgame runs the tightest loop the airframe allows

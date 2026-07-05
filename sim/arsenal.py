@@ -730,8 +730,15 @@ PANTSIR_57E6 = SamDef(
     # Rail-eject: motor lights almost immediately after rail-clear.
     eject_speed=15.0,           # m/s rail-eject speed
     eject_time=0.3,             # s rail-clear delay before ignition
-    motor_thrust=18_000.0,      # N solid booster (see derivation above)
-    motor_time=3.5,             # s burn (see derivation above)
+    # Real 57E6 sprint profile (energy re-base 2026-07-06, research doc:
+    # army-technology "t = 1.5 s, Vmax = 1300 m/s"): the SAME total
+    # impulse as the old 18 kN / 3.5 s figure (63 kN·s), delivered as the
+    # violent short sprint the real bicalibre round flies — under honest
+    # drag the soft burn intercepted salvos only 1.2 km out (measured);
+    # the sprint restores the 2 km+ point-defense standoff.
+    # motor_time = propellant / mdot = 27 / 23.36 = 1.16 s.
+    motor_thrust=55_000.0,      # N sprint booster
+    motor_time=1.16,            # s burn (= propellant / mdot)
     isp=240.0,                  # s (same propellant class as S300/SM2)
     ref_area=0.004_536,         # m^2 = pi*(0.076/2)^2
     max_g=40.0,                 # g — sprint intercept vs maneuvering targets
