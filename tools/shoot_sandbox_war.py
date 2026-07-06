@@ -89,12 +89,49 @@ def _scene_map(s) -> None:
     _set_cam(s, (BASE_POS[0], BASE_POS[1] + 3000.0, -2_000.0), 0.0, -0.42)
 
 
+def _scene_director(s) -> None:
+    """The director panel open over the map, a ready destroyer ARMED —
+    the Phase C layout gate (panel vs the BOARD columns + rail)."""
+    _fly(s, 3.0)
+    s.map_open = True
+    s.director.toggle()
+    uid = next(u["uid"] for u in s.world.director_units()
+               if u["kind"] == "destroyer" and u["ready"])
+    rows = s.director.rows()
+    s.director.sel = next(i for i, r in enumerate(rows)
+                          if r["kind"] == "unit"
+                          and r["unit"]["uid"] == uid)
+    s.director.activate()               # armed: CLICK MAP TO LAUNCH banner
+    _set_cam(s, (BASE_POS[0], BASE_POS[1] + 3000.0, -2_000.0), 0.0, -0.42)
+
+
+def _scene_director_strike(s) -> None:
+    """A director-ordered Tomahawk salvo 20 s into its flight, panel open:
+    the hostile breadcrumbs on the all-seeing map + the spent VLS row."""
+    _fly(s, 2.0)
+    dd = _closest_destroyer(s.world)
+    ok, msg = s.world.director_order(
+        dd.ship_id, (float(BASE_POS[0]), float(BASE_POS[2])))
+    if not ok:   # closest hull may be the TLAM-less AAW escort: pick armed
+        uid = next(u["uid"] for u in s.world.director_units()
+                   if u["kind"] == "destroyer" and u["ready"])
+        ok, msg = s.world.director_order(
+            uid, (float(BASE_POS[0]), float(BASE_POS[2])))
+    assert ok, msg
+    _fly(s, 20.0)
+    s.map_open = True
+    s.director.toggle()
+    _set_cam(s, (BASE_POS[0], BASE_POS[1] + 3000.0, -2_000.0), 0.0, -0.42)
+
+
 SCENES = {
     "overview": _scene_overview,
     "destroyer": _scene_destroyer,
     "carrier": _scene_carrier,
     "airfield": _scene_airfield,
     "map": _scene_map,
+    "director": _scene_director,
+    "director_strike": _scene_director_strike,
 }
 
 
@@ -102,7 +139,7 @@ def shoot(app: App, name: str) -> str:
     from game.sandbox_war import SandboxWarState
     app.states.switch(SandboxWarState(app))
     app.sandbox = app.state
-    app.state.hud_visible = name == "map"
+    app.state.hud_visible = name in ("map", "director", "director_strike")
     SCENES[name](app.state)
     terrain = getattr(app.state, "terrain", None)
     for _ in range(MAX_WARMUP_FRAMES):
