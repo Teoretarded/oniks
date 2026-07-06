@@ -49,6 +49,30 @@ no agents).  Branch feat/combat-expansion.
 - The nearest destroyer can be the TLAM-less AAW escort — tests and the
   strike scene pick an ARMED hull; the panel shows 0/"-" honestly.
 
+## SPECTATE wave (same day, user request)
+
+- **New rig mode `spectate`** OUTSIDE the locked C cycle
+  (game/cameras.py VALID_MODES; MODES pin untouched; C from spectate
+  re-enters at chase).  Reuses the player-orbit controller — drag
+  orbits, wheel zooms (8-600 m).  `SpectateSubject` live-proxies any
+  entity onto the rig's pos/vel/alive contract (ships expose
+  velocity(); parked fighters flag `_alive`; positions track, never
+  copy).
+- **Roster + resolution** (world/sandbox_world.py, GL-free): hostile
+  rounds first (newest), enemy hulls, subs, AIRBORNE enemy air,
+  civilians, patrols; `resolve_contact_entity` maps a tactical-map
+  contact id to the live entity (ship ids, strike-board round ids,
+  air ids, sub-datum ids).
+- **UX** (game/sandbox_war.py): LEFT/RIGHT arrow keys OR the clickable
+  `<` `>` boxes on the new bottom-middle plate cycle the roster;
+  clicking a contact on the map and closing it (M) spectates that
+  thing (fresh clicks only — a stale selection never re-triggers);
+  dead subjects auto-advance; HUD CAM chip reads SPECTATE.
+- Tests: tests/test_spectate.py (7) — mode contract, adapter proxying,
+  orbit framing, roster filters/order, id resolution.  Visual gate:
+  renders/sandbox_war_spectate.png (the first render caught the hint
+  line ghosting under the plate — hint dropped, plate is the feedback).
+
 ## Phase D findings
 
 - **Full suite red #1**: the director ActionDef was appended after the
