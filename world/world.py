@@ -85,6 +85,12 @@ def launch_realtime_lock(missiles) -> bool:
 class WorldState:
     """Owns every simulated entity and steps them at the fixed physics rate."""
 
+    # Damage-model flag (2026-07-06 subsystem revamp).  Class attribute so
+    # every existing construction path stays byte-identical: "legacy" is the
+    # flat hp-=1 ladder; CombatWorld overwrites it from CombatConfig, and
+    # the game layer always plays "subsystem" (world/combat_config.py).
+    damage_model = "legacy"
+
     def __init__(self, rng_seed: int = SEED):
         self.rng = np.random.default_rng(rng_seed)
         self.ships = self._spawn_ships()
@@ -292,7 +298,15 @@ class WorldState:
         # Missiles that died inside update() hit the surface; ship hits are
         # applied next (disjoint sets — apply_missile_hits skips dead ones).
         surface_dead = [m for m in flying if not m.alive]
-        apply_missile_hits(self.missiles, self.ships, self.events)
+        apply_missile_hits(self.missiles, self.ships, self.events,
+                           damage_model=self.damage_model)
+        if self.damage_model == "subsystem":
+            # 2026-07-06 subsystem model: integrate flooding-vs-pumps /
+            # fire-vs-crew / cook-off dwell for every managed hull.  Pure
+            # no-op in legacy mode (this branch is never taken), and a
+            # near-no-op with no hits yet (no ship carries a _dmg state).
+            from sim import damage_model as _dm
+            _dm.step_ships(self.ships, dt, self.events)
         for m in surface_dead:
             # SAM death causes first (a fuse kill / self-destruct happens at
             # altitude and must not classify as a terrain strike).

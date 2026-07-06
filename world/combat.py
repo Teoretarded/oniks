@@ -576,6 +576,12 @@ class CombatWorld(WorldState):
         # _config must be set BEFORE super().__init__ because _spawn_ships
         # is called from there and reads it.
         self._config = config
+        # 2026-07-06 subsystem damage revamp: the per-battle damage-model
+        # flag (see world/combat_config.py).  Instance attr shadows the
+        # WorldState class default; set before super().__init__ so the very
+        # first step already routes hits correctly.  getattr keeps old
+        # config dicts/replay headers without the field on the legacy path.
+        self.damage_model = getattr(config, "damage_model", "legacy")
         # M3-terrain F3/F4: the ONE active terrain field for this map, built
         # once here and threaded to every sensor (player AND enemy) so they
         # read a single terrain truth — no fog asymmetry, no truth leak.

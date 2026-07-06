@@ -42,7 +42,7 @@ def segment_hits_obb(p0, p1, center, half, rot3x3):
     return True
 
 
-def apply_missile_hits(missiles, ships, effects_out):
+def apply_missile_hits(missiles, ships, effects_out, damage_model="legacy"):
     """Swept hit test of every live missile against every hittable ship.
 
     On a hit: ship loses 1 hp and starts BURNING (or SINKING at 0 hp), the
@@ -99,11 +99,20 @@ def apply_missile_hits(missiles, ships, effects_out):
             # digest contract is untouched.
             m.death_cause = ("hit", str(getattr(ship, "ship_type", "ship")))
             m.killed_by = ship
-            ship.hp -= 1
-            if ship.hp > 0:
-                ship.state = ST_BURNING
-                ship.burn_timer = BURN_TIME       # a fresh hit restarts the fire
+            if damage_model == "subsystem":
+                # 2026-07-06 subsystem model (sim/damage_model.py): hit
+                # location + KE + warhead resolve module knockouts, breaches
+                # and fires; flooding/cook-off decide the sinking, not hp.
+                # Deferred import keeps the legacy path's import graph (and
+                # module-load order) byte-identical when the flag is off.
+                from sim import damage_model as _dm
+                _dm.resolve_hit(ship, m, impact, effects_out)
             else:
-                ship.state = ST_SINKING
+                ship.hp -= 1
+                if ship.hp > 0:
+                    ship.state = ST_BURNING
+                    ship.burn_timer = BURN_TIME   # a fresh hit restarts the fire
+                else:
+                    ship.state = ST_SINKING
             effects_out.append(("ship_hit", impact.copy()))
             break                                 # this missile is spent

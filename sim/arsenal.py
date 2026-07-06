@@ -53,6 +53,11 @@ class WeaponDef:
     cl_max: float = 0.0       # max lift coeff on ref_area (q-limits available g)
     autopilot_tau: float = 0.0  # s, achieved-accel first-order lag
     thrust_tau: float = 0.0   # s, sustainer spool lag (0 = instant / solid)
+    # --- subsystem damage model (sim/damage_model.py, 2026-07-06) ----------
+    # Nose construction: 1.0 = semi-armor-piercing (holes the hull, detonates
+    # inside); < SAP_HARDNESS_MIN (0.5) = frag/blast head (shreds topside
+    # fittings, never breaches).  Default 1.0 — anti-ship rounds are SAP.
+    nose_hardness: float = 1.0
 
 
 ONIKS = WeaponDef(

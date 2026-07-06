@@ -165,6 +165,18 @@ class CombatConfig:
     #                       which cannot happen with no transports built)
     n_transports: int = 0
     beachhead_grace_s: float = 180.0
+    # Subsystem damage model (2026-07-06 spec: docs/superpowers/specs/
+    # 2026-07-06-subsystem-damage-design.md).  DEFAULT "legacy" so every
+    # existing CombatConfig() construction (the whole test suite, the digest
+    # gates, old ledgers) replays the flat hp-=1 ladder BYTE-IDENTICALLY.
+    # "subsystem" arms the module-grid model (sim/damage_model.py): hit
+    # location from real OBB-entry geometry, structural KE from the round's
+    # live mass, module knockouts (propulsion/sensors/vls/c2), flooding vs
+    # pumps, fire vs suppression, ammo-scaled magazine cook-off.  The GAME
+    # layer (setup screen / sandbox war / campaign) always passes
+    # "subsystem" — the new model is the way the game plays; "legacy" is a
+    # compatibility flag, not a mode the UI offers.
+    damage_model: str = "legacy"
 
 
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
@@ -335,6 +347,7 @@ def clamp_config(
     asw_ammo: int = CombatConfig.asw_ammo,
     n_transports: int = CombatConfig.n_transports,
     beachhead_grace_s: float = CombatConfig.beachhead_grace_s,
+    damage_model: str = CombatConfig.damage_model,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
     legal UI ranges.  Intended for the setup screen: pass raw slider values,
@@ -416,6 +429,9 @@ def clamp_config(
         asw_ammo=clamp_field(int(asw_ammo), lo_asw, hi_asw_ammo),
         n_transports=clamp_field(int(n_transports), lo_tr, hi_tr),
         beachhead_grace_s=clamp_field(float(beachhead_grace_s), lo_bg, hi_bg),
+        # Not a spinner value: any string other than the exact opt-out flag
+        # normalizes to the full model (typo-safe for config dicts).
+        damage_model=("legacy" if damage_model == "legacy" else "subsystem"),
     )
 
 

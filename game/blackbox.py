@@ -288,6 +288,11 @@ def state_digest(world) -> str:
         h.update(struct.pack("<d", float(x)))
 
     f(getattr(world, "sim_time", 0.0))
+    # 2026-07-06 subsystem damage: the per-hull DamageState (flood levels,
+    # breaches, fire, module doses) is REPLAY-CRITICAL sim state, so it is
+    # hashed — but ONLY in subsystem mode, keeping every legacy digest
+    # byte-identical (the flag defaults "legacy" on worlds without it).
+    subsystem = getattr(world, "damage_model", "legacy") == "subsystem"
     for s in getattr(world, "ships", ()):
         for c in s.pos:
             f(c)
@@ -295,6 +300,15 @@ def state_digest(world) -> str:
         h.update(struct.pack("<i", int(getattr(s, "sm2_ammo", 0))))
         h.update(struct.pack("<i", int(getattr(s, "sm6_ammo", 0))))
         h.update(struct.pack("<i", int(getattr(s, "tomahawk_ammo", 0))))
+        if subsystem:
+            f(getattr(s, "speed", 0.0))          # propulsion kills bite here
+            dmg = getattr(s, "_dmg", None)
+            if dmg is None:
+                h.update(b"\x00")
+            else:
+                h.update(b"\x01")
+                for v in dmg.digest_floats():
+                    f(v)
     for m in getattr(world, "missiles", ()):
         for c in m.pos:
             f(c)
