@@ -631,6 +631,8 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
         "ship_type": getattr(ship, "ship_type", "ship"),
         "grid": grid,
         "kinds": {row[0]: row[6] for row in grid},
+        "dose": dict(st.module_dose),
+        "toughness": {row[0]: TOUGHNESS.get(row[6], 1.0e9) for row in grid},
         "new_dead": sorted(st.dead_modules - dead_before),
         "all_dead": sorted(st.dead_modules),
         "flood": list(st.flood),

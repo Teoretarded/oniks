@@ -214,14 +214,18 @@ class SandboxWarState(CombatState):
                 and self._end_overlay is None and self._bug_ui is None
                 and self._spectate_event(ev)):
             return
-        # SPECTATE map seam: a FRESH click on a contact this map session
-        # arms it; the map closing (M key, M-close chip, any path) resolves
-        # the id to the live entity and swings the camera.  A stale
-        # selection from an earlier session never re-triggers.
+        # SPECTATE map seam (playtest 2026-07-06: OPT-IN ONLY — closing the
+        # map must never hijack the camera unless the player is ALREADY in
+        # spectate mode; otherwise the view stays on the launcher / own
+        # missile).  While spectating: a FRESH click on a contact this map
+        # session arms it; the map closing (M key, M-close chip, any path)
+        # resolves the id to the live entity and swings the camera.  A
+        # stale selection from an earlier session never re-triggers.
         was_open = self.map_open
         sel_before = self.tactical_map.selected_contact
         super().handle_event(ev)
-        if self.map_open and not self._director_up:
+        if (self.map_open and not self._director_up
+                and self._spectate_active):
             sel_now = self.tactical_map.selected_contact
             if sel_now is not None and sel_now != sel_before:
                 self._spectate_pending = sel_now
