@@ -32,7 +32,7 @@ import numpy as np
 from sim.amphibious import Transport
 from sim.arsenal import TOMAHAWK
 from sim.contacts import ContactBoard
-from sim.enemy_air import Carrier, FS_PARKED
+from sim.enemy_air import Carrier, FS_GONE, FS_PARKED, FS_REARMING, Fighter
 from sim.enemy_defense import VLS_DECK_M
 from sim.enemy_ships import Destroyer
 from sim.enemy_strikes import SALVO_SIZE
@@ -313,6 +313,88 @@ class SandboxWorld(CombatWorld):
         weapon = "HARM" if sead else "JASSM"
         return True, (f"{weapon} PACKAGE ROLLING - {len(jets)} "
                       f"JET{'S' if len(jets) != 1 else ''}")
+
+    # ----------------------------------------------------------- spectating
+    #
+    # SPECTATE (2026-07-06): the war sandbox lets the player watch anything
+    # that moves.  GL-free truth reads — the sandbox is all-seeing by
+    # design, so a truth roster here leaks nothing the map does not show.
+
+    def _spectate_label(self, entity) -> str:
+        """Human label for a spectate subject (uid-derived, missiles get
+        their weapon name + a short round tag)."""
+        for attr in ("ship_id", "sub_id"):
+            uid = getattr(entity, attr, None)
+            if uid:
+                return self._director_label(uid)
+        wid = getattr(getattr(entity, "weapon", None), "weapon_id", None)
+        aid = getattr(entity, "aircraft_id", None)
+        if wid and aid:
+            return f"{wid.upper()} {aid[-4:].upper()}"
+        if aid:
+            return self._director_label(aid)
+        return type(entity).__name__.upper()
+
+    def spectate_roster(self) -> list[dict]:
+        """Everything watchable, in cycle order: hostile rounds in flight
+        (newest first — the interesting ones), enemy hulls, subs, airborne
+        enemy air, then the civilian traffic + patrol racetracks.  Each
+        entry: {"entity", "label", "kind"}."""
+        out = []
+        for m in reversed(self.missiles):
+            if m.alive and getattr(m, "is_hostile", False):
+                out.append(dict(entity=m, label=self._spectate_label(m),
+                                kind="missile"))
+        for s in self.ships:
+            if s.alive and isinstance(s, Destroyer):
+                out.append(dict(entity=s, label=self._spectate_label(s),
+                                kind="ship"))
+        for sub in self.subs:
+            if sub.alive:
+                out.append(dict(entity=sub, label=self._spectate_label(sub),
+                                kind="sub"))
+        for e in self.enemy_air:
+            if not getattr(e, "_alive", True):
+                continue
+            if isinstance(e, Fighter) and e.state in (FS_PARKED, FS_REARMING,
+                                                      FS_GONE):
+                continue                    # in the hangar / gone: nothing to see
+            out.append(dict(entity=e, label=self._spectate_label(e),
+                            kind="air"))
+        for s in self.ships:
+            if s.alive and not isinstance(s, Destroyer):
+                out.append(dict(entity=s, label=self._spectate_label(s),
+                                kind="civilian"))
+        for a in self.aircraft:
+            if getattr(a, "alive", True):
+                out.append(dict(entity=a, label=self._spectate_label(a),
+                                kind="patrol"))
+        return out
+
+    def resolve_contact_entity(self, cid: str):
+        """A tactical-map contact id -> (live entity, label) or None: the
+        map-click -> spectate seam.  Covers ships (track id == ship_id),
+        hostile rounds (the strike board keys them by aircraft_id), air +
+        missiles via _find_air_entity, and subsurface fixes (the contact
+        dict carries the boat's sub_id)."""
+        m = self._strike_board.get(cid)
+        if m is not None and m.alive:
+            return m, self._spectate_label(m)
+        ship = next((s for s in self.ships
+                     if s.ship_id == cid and s.alive), None)
+        if ship is not None:
+            return ship, self._spectate_label(ship)
+        ent = self._find_air_entity(cid)
+        if ent is not None and (getattr(ent, "_alive", None)
+                                or getattr(ent, "alive", False)):
+            return ent, self._spectate_label(ent)
+        rec = self.sub_contacts.get(cid)
+        if rec is not None:
+            sub = next((b for b in self.subs
+                        if b.sub_id == rec.get("sub_id") and b.alive), None)
+            if sub is not None:
+                return sub, self._spectate_label(sub)
+        return None
 
     # ------------------------------------------------------------ no ending
 

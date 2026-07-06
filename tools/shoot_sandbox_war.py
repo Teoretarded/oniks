@@ -124,6 +124,16 @@ def _scene_director_strike(s) -> None:
     _set_cam(s, (BASE_POS[0], BASE_POS[1] + 3000.0, -2_000.0), 0.0, -0.42)
 
 
+def _scene_spectate(s) -> None:
+    """SPECTATE mode on the nearest enemy hull: orbit framing + the
+    bottom-middle plate with the arrows (the user's asked-for chrome)."""
+    from game.cameras import TRANSITION_TIME
+    _fly(s, 2.0)
+    entry = next(r for r in s.world.spectate_roster() if r["kind"] == "ship")
+    s.spectate_entity(entry["entity"], entry["label"])
+    s.rig.update(TRANSITION_TIME + 0.1, s.followed)   # finish the blend
+
+
 SCENES = {
     "overview": _scene_overview,
     "destroyer": _scene_destroyer,
@@ -132,6 +142,7 @@ SCENES = {
     "map": _scene_map,
     "director": _scene_director,
     "director_strike": _scene_director_strike,
+    "spectate": _scene_spectate,
 }
 
 
@@ -139,7 +150,8 @@ def shoot(app: App, name: str) -> str:
     from game.sandbox_war import SandboxWarState
     app.states.switch(SandboxWarState(app))
     app.sandbox = app.state
-    app.state.hud_visible = name in ("map", "director", "director_strike")
+    app.state.hud_visible = name in ("map", "director", "director_strike",
+                                     "spectate")
     SCENES[name](app.state)
     terrain = getattr(app.state, "terrain", None)
     for _ in range(MAX_WARMUP_FRAMES):

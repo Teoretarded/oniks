@@ -30,6 +30,15 @@ _UP = np.array([0.0, 1.0, 0.0])
 
 MODES = ["chase", "orbit", "target", "launcher", "free"]
 
+# SPECTATE (sandbox war 2026-07-06): a NAMED mode OUTSIDE the C cycle —
+# entered only through the war sandbox's spectate flow (map click / the
+# bottom plate arrows), it reuses the player-orbit controller verbatim on
+# whatever entity is being watched.  Pressing C from spectate re-enters
+# the classic cycle at its head; MODES itself is LOCKED (test-pinned) so
+# combat's C rotation is untouched.
+SPECTATE_MODE = "spectate"
+VALID_MODES = MODES + [SPECTATE_MODE]
+
 TRANSITION_TIME = 0.6      # s — slerp-ish blend duration when switching modes
 CHASE_BACK = 38.0          # m behind the missile along -vhat
 CHASE_UP = 10.0            # m above the missile
@@ -198,7 +207,7 @@ class CameraRig:
     # ------------------------------------------------------------- mode API
 
     def set_mode(self, mode: str) -> None:
-        if mode not in MODES:
+        if mode not in VALID_MODES:
             raise ValueError(f"unknown camera mode {mode!r}")
         if mode == self.mode:
             return
@@ -218,7 +227,11 @@ class CameraRig:
         self.mode = mode
 
     def cycle_mode(self) -> str:
-        """Advance to the next mode in MODES (the C key)."""
+        """Advance to the next mode in MODES (the C key).  From SPECTATE
+        (outside the cycle) C re-enters the classic rotation at its head."""
+        if self.mode not in MODES:
+            self.set_mode(MODES[0])
+            return self.mode
         self.set_mode(MODES[(MODES.index(self.mode) + 1) % len(MODES)])
         return self.mode
 
@@ -277,7 +290,7 @@ class CameraRig:
         zooms the orbit distance (8-600 m), chase mode the follow distance
         (25-120 m); other modes ignore the wheel."""
         f = ZOOM_STEP ** (-float(steps))
-        if self.mode == "orbit":
+        if self.mode in ("orbit", SPECTATE_MODE):
             self._orbit_dist_target = float(np.clip(
                 self._orbit_dist_target * f, ORBIT_DIST_MIN, ORBIT_DIST_MAX))
             self._orbit_idle = 0.0
@@ -368,7 +381,7 @@ class CameraRig:
             return self.freecam.pos.copy(), self.freecam.forward
         if mode == "chase" and m is not None:
             return self._chase_view(dt, m)
-        if mode == "orbit" and m is not None:
+        if mode in ("orbit", SPECTATE_MODE) and m is not None:
             return self._orbit_view(dt, m)
         if mode == "target" and m is not None:
             tp = target_pos if target_pos is not None else self._missile_target(m)
@@ -482,6 +495,44 @@ class StaticSubject:
         self.pos = np.asarray(pos, dtype=np.float64).copy()
         self.vel = np.zeros(3)
         self.label = label
+
+
+class SpectateSubject:
+    """Live proxy camera subject over ANY entity (sandbox-war spectate):
+    ships expose velocity() not .vel, parked fighters report alive False,
+    subs sit at depth — this adapter normalizes all of them to the rig's
+    pos/vel/alive contract while TRACKING the entity (properties, not
+    copies).  Carries no ``phase_label`` (HUD keeps the launcher block)."""
+
+    __slots__ = ("entity", "label")
+
+    def __init__(self, entity, label: str = ""):
+        self.entity = entity
+        self.label = label
+
+    @property
+    def pos(self):
+        return np.asarray(self.entity.pos, dtype=np.float64)
+
+    @property
+    def vel(self):
+        e = self.entity
+        v = getattr(e, "vel", None)
+        if v is not None:
+            return np.asarray(v, dtype=np.float64)
+        velocity = getattr(e, "velocity", None)
+        if callable(velocity):
+            return np.asarray(velocity(), dtype=np.float64)
+        return np.zeros(3)
+
+    @property
+    def alive(self) -> bool:
+        # Raw life flag first (a parked fighter's .alive is False by
+        # design — hangar semantics); fall back to the alive property.
+        flag = getattr(self.entity, "_alive", None)
+        if flag is not None:
+            return bool(flag)
+        return bool(getattr(self.entity, "alive", True))
 
 
 def subject_cycle_order(missiles, tel_subject=None, contact_entity=None):

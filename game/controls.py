@@ -213,10 +213,10 @@ class SandboxControls:
         if ev.type == pygame.MOUSEWHEEL:
             rig.zoom(ev.y)
         elif (ev.type == pygame.MOUSEBUTTONDOWN and ev.button in (1, 3)
-                and rig.mode == "orbit"):
+                and rig.mode in ("orbit", "spectate")):
             self._orbit_drag = True
         elif (ev.type == pygame.MOUSEMOTION and self._orbit_drag
-                and rig.mode == "orbit"):
+                and rig.mode in ("orbit", "spectate")):
             rig.orbit_drag(ev.rel[0], ev.rel[1])
 
     def release_mouse(self) -> None:
