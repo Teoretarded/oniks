@@ -711,6 +711,16 @@ class CombatWorld(WorldState):
         destroyers = [s for s in self.ships
                       if isinstance(s, Destroyer)
                       and not isinstance(s, Transport)]
+        # SANDBOX WAR gate: enemy WEAPONS EMPLOYMENT master switch.  True =
+        # the combat default (every existing battle byte-identical); the war
+        # sandbox (world/sandbox_world.py) sets False so the red force flies
+        # its patterns but never shoots until the director flips it or issues
+        # a direct order.  Gates EXACTLY: defense.step, strikes.step, the
+        # commander BRAIN (orders — the picture feed / weapon-release pump /
+        # mission bookkeeping keep running so director-ordered packages still
+        # release), and the sub fire-intent in _step_subs.  Sensors, CAP
+        # rotation, RWR evasion and the player-side Pantsir are NEVER gated.
+        self.enemy_weapons_free = True
         # The enemy side's fire control: CIWS randomness derives from the
         # world seed so a battle replays exactly (determinism contract).
         # The carrier (a Destroyer subclass) is covered too — zero SM-2/
@@ -1571,7 +1581,9 @@ class CombatWorld(WorldState):
                 continue
             threat = self._sub_threat.get(tid, 0.0)
             aim = sub.step(dt, threat_level=threat)
-            if aim is not None:
+            # SANDBOX WAR gate: a passive boat still runs its state machine
+            # (it moves, it can be hunted) but its fire-intent is dropped.
+            if aim is not None and self.enemy_weapons_free:
                 self._fire_kalibr_salvo(sub, aim)
 
     # ---------------------------------------------------- M5 #1 amphibious
@@ -2277,8 +2289,12 @@ class CombatWorld(WorldState):
         if now >= self._cmd_feed_next_t:
             self._cmd_feed_next_t = now + CMD_FEED_PERIOD_S
             self._feed_enemy_picture(CMD_FEED_PERIOD_S, now)
-        for order in self.commander.step(now, dt):
-            self._execute_commander_order(order)
+        # SANDBOX WAR gate: only the BRAIN is gated — the feed above and the
+        # release pump / mission bookkeeping below keep running so a
+        # director-ordered strike package still flies and releases.
+        if self.enemy_weapons_free:
+            for order in self.commander.step(now, dt):
+                self._execute_commander_order(order)
         if now >= self._cmd_weapon_next_t:
             self._cmd_weapon_next_t = now + CMD_WEAPON_PERIOD_S
             self._release_fighter_weapons()
@@ -3925,11 +3941,15 @@ class CombatWorld(WorldState):
         # LCACs) -> byte-identical default battle.
         self._step_amphibious(dt)
         self._step_enemy_air(dt)
-        self.defense.step(self, dt)
+        # SANDBOX WAR gate: the two reactive employment layers only fire
+        # weapons-free (True = the combat default, byte-identical).
+        if self.enemy_weapons_free:
+            self.defense.step(self, dt)
         # M5: detect the flagship CEC-hub alive->dead edge AFTER defense.step
         # (which clears a sunk ship's radar.alive); bump escort cohesion once.
         self._check_flagship_cec()
-        self.strikes.step(self, dt)
+        if self.enemy_weapons_free:
+            self.strikes.step(self, dt)
         # Phase 5b: the commander — fed and ticked after the reactive
         # layers so rounds its orders spawn join self.missiles this step
         # and fly on the NEXT base step (the same convention as defense/
