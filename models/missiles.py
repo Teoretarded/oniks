@@ -261,31 +261,46 @@ def build_48n6() -> MeshData:
 
 
 def build_40n6() -> MeshData:
-    """40N6 long-range SAM: longer 48N6-family body, clean midsection,
-    active-seeker nose band and slightly larger tail controls."""
+    """40N6 very-long-range SAM — a TWO-STAGE round, visibly distinct from
+    the 48N6 (2026-07-06 reference pack: documentation and research/
+    01_missile_physics_and_models/missile_reference.md — the real 40N6 is
+    longer and ~90 kg heavier than the 48N6, TWO-stage with a fatter
+    booster, a bigger blunter dual-mode-seeker nose, and its control band
+    pushed aft; a TEL carries only 2 of them vs 4x 48N6).  Silhouette law:
+    dark fat booster + interstage ring + slimmer sustainer + blunt radome."""
     b = MeshBuilder()
     body = PALETTE["missile_body"]
     fin_c = PALETTE["fin"]
-    tail, nose = -4.00, 4.00
-    r = 0.2575
+    booster_c = (0.62, 0.63, 0.61)          # darker first stage
+    tail, nose = -3.90, 3.90                # 7.8 m (reference pack figure)
+    r_boost = 0.325                          # fat first stage
+    r = 0.2575                               # 48N6-family sustainer
 
-    profile = [(tail, 0.19), (tail + 0.28, r), (1.90, r)]
-    profile += _ogive(1.90, r, 3.55, 0.078, n=8, power=1.75)
+    # First stage: boat-tail into a fat barrel up to the interstage.
+    b.add_mesh(make_lathe([(tail, 0.22), (tail + 0.30, r_boost),
+                           (-1.40, r_boost)], SEG, booster_c))
+    # Interstage taper + dark joint ring onto the slimmer sustainer.
+    b.add_mesh(make_lathe([(-1.40, r_boost), (-1.12, r)], SEG, body))
+    _band(b, r_boost + 0.004, -1.55, 0.08, (0.42, 0.44, 0.45))
+    # Sustainer barrel + a BLUNTER, larger seeker ogive than the 48N6
+    # needle (dual-mode active seeker volume).
+    profile = [(-1.12, r), (1.85, r)]
+    profile += _ogive(1.85, r, 3.40, 0.115, n=8, power=1.45)
     b.add_mesh(make_lathe(profile, SEG, body))
-    b.add_mesh(make_lathe([(3.55, 0.078), (nose, 0.0)], SEG,
+    b.add_mesh(make_lathe([(3.40, 0.115), (nose, 0.0)], SEG,
                           PALETTE["radome"]))
-    _band(b, r + 0.004, 2.40, 0.07, (0.55, 0.60, 0.63))
-    _band(b, r + 0.004, -0.35, 0.05, (0.76, 0.78, 0.78))
+    _band(b, r + 0.004, 2.30, 0.07, (0.55, 0.60, 0.63))
 
-    tail_fin = make_fin(1.14, 0.48, 0.54, 0.58, 0.035, fin_c,
-                        offset=(0.235, 0.0, -2.86))
+    # Booster tail controls: larger than the 48N6's, on the fat stage.
+    tail_fin = make_fin(1.30, 0.55, 0.60, 0.62, 0.038, fin_c,
+                        offset=(r_boost - 0.02, 0.0, -2.60))
     _add_cruciform(b, tail_fin, 45.0)
-    # Tiny aft conduit fairings only; keep the mid-body much cleaner than 48N6.
-    conduit = make_fin(0.55, 0.28, 0.10, 0.15, 0.020, fin_c,
-                       offset=(0.248, 0.0, -0.35))
-    _add_cruciform(b, conduit, 45.0)
-    b.add_mesh(make_cylinder(0.15, 0.10, SEG_LOW, PALETTE["exhaust_ring"],
-                             axis="z", offset=(0.0, 0.0, tail + 0.05)))
+    # Sustainer control band pushed AFT (just ahead of the interstage).
+    sus_fin = make_fin(0.72, 0.34, 0.26, 0.30, 0.024, fin_c,
+                       offset=(r - 0.01, 0.0, -0.50))
+    _add_cruciform(b, sus_fin, 45.0)
+    b.add_mesh(make_cylinder(0.19, 0.12, SEG_LOW, PALETTE["exhaust_ring"],
+                             axis="z", offset=(0.0, 0.0, tail + 0.06)))
     return b.build()
 
 

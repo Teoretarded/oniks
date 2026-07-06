@@ -232,7 +232,7 @@ def test_dedicated_missile_lengths():
         (build_kh31p, 4.70),
         (build_aim9x, 3.00),
         (build_48n6, 7.50),
-        (build_40n6, 8.00),
+        (build_40n6, 7.80),   # reference pack 2026-07-06: real 40N6 ~7.8 m two-stage
         (build_sm2, 6.55),
         (build_57e6, 3.17),
         (build_zircon, 9.00),
@@ -291,7 +291,17 @@ def test_sam_missile_silhouettes_are_distinct():
     sm2 = build_sm2()
     e57 = build_57e6()
 
-    assert _span(n40, 2) > _span(n48, 2) + 0.45
+    # Reference pack 2026-07-06 (documentation and research/01_.../
+    # missile_reference.md): the REAL 40N6 is ~0.3 m longer than the 48N6;
+    # its visual distinctness is the TWO-STAGE fat booster, not raw length.
+    assert _span(n40, 2) > _span(n48, 2) + 0.25
+    import numpy as _np
+    r40 = _np.linalg.norm(n40.vertices[:, 0:2], axis=1)
+    r48 = _np.linalg.norm(n48.vertices[:, 0:2], axis=1)
+    booster40 = r40[(n40.vertices[:, 2] < -1.6)
+                    & (_np.abs(n40.vertices[:, 1]) < 0.05)]
+    assert booster40.max() >= 0.31          # the fat first stage exists
+    assert booster40.max() > 0.28           # ... and beats any 48N6 body
     assert 0.50 <= _radius(n48).max() <= 0.85
     assert 0.45 <= _radius(sm2).max() <= 0.75
     assert _span(sm2, 0) < _span(n48, 0) * 1.05
