@@ -1450,13 +1450,17 @@ class HUD:
         around the Buk site, and the per-tube battery row."""
         world = sandbox.world
         from world.combat import BUK_SITE_XZ
-        origin = (BUK_SITE_XZ[0], 0.0, BUK_SITE_XZ[1])
+        # The Buk SITE (world meters) for the bearing summary.  It must NOT
+        # shadow the ``origin`` screen-dock parameter — doing so crashed
+        # _block's ``ox, oy`` unpack the first time the buk plate drew on
+        # the command board (TAB-to-buk in map view, 2026-07-06).
+        site = (BUK_SITE_XZ[0], 0.0, BUK_SITE_XZ[1])
         buk_round = getattr(sandbox, "buk_round", "9m317")
         status, col, name, ammo_text = buk_round_panel(world, buk_round)
         rows = [
             ("WEAPON", f"> {name}", ACCENT, True),   # the B-cycled round
             ("AMMO", ammo_text, VALUE_COL),
-            ("TARGET", self._target_summary(sandbox, origin), VALUE_COL),
+            ("TARGET", self._target_summary(sandbox, site), VALUE_COL),
         ]
         radar = radar_status_row(world)
         if radar is not None:

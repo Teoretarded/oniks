@@ -291,40 +291,93 @@ def _box_contains(row, z, y, x, margin=0.0) -> bool:
 
 
 PATH_STEP_M = 2.0          # interior damage-path sample spacing (meters)
+BLAST_RADIUS_K = 1.8       # m per kg^(1/3) of warhead: lethal module-damage
+                           # reach around the detonation path (cube-root
+                           # blast scaling — Oniks 250 kg -> ~11 m, Zircon
+                           # 300 kg -> ~12 m, HARM 87 kg -> ~8 m).  Tuning
+                           # latitude lives HERE, never in the tests.
+FRAG_CONTACT_M = 4.0       # m: a frag head detonates on the first structure
+                           # within this reach of its chord
 
 
-def _path_modules(ship, grid, q_entry, v_local, run_m, first_only,
-                  margin) -> list:
-    """Module boxes met along the interior damage path.
+def _grid_y_to_m(ship, y_grid: float) -> float:
+    """Grid vertical (research convention) -> waterline-relative meters."""
+    if y_grid < 0.0:
+        return y_grid * HULL_DRAFT
+    return y_grid * ship.height / Y_TOP_FRAC
 
-    Walk the LOCAL-frame straight line from the OBB entry point along the
-    round's local velocity direction, ``run_m`` meters, sampling every
-    PATH_STEP_M; each sample converts to grid coords (z-frac, y-grid,
-    x-frac) and tests point-in-box.  ``first_only`` models a frag head that
-    detonates on the FIRST structure met (it crosses open deck air until
-    then); a SAP head keeps punching and doses EVERY box on the run.
-    Deterministic, direction-agnostic (beam-on, bow-on and diving hits all
-    walk their true path)."""
+
+def _box_local_m(ship, row):
+    """A grid row's box as (center, half) in OBB-LOCAL meters."""
+    _n, z0, z1, y0, y1, xh, _k = row
+    half_len = ship.length * 0.5
+    za = z0 * ship.length - half_len
+    zb = z1 * ship.length - half_len
+    ya = _grid_y_to_m(ship, y0)
+    yb = _grid_y_to_m(ship, min(y1, Y_TOP_FRAC))
+    off = (ship.height - HULL_DRAFT) * 0.5      # waterline in local y
+    xa = xh * ship.beam * 0.5
+    center = np.array([0.0, (ya + yb) * 0.5 - off, (za + zb) * 0.5])
+    half = np.array([xa, (yb - ya) * 0.5, (zb - za) * 0.5])
+    return center, half
+
+
+def _clearance_m(p, center, half) -> float:
+    """Euclidean distance from point ``p`` to the box surface (0 inside)."""
+    d = np.abs(p - center) - half
+    d = np.maximum(d, 0.0)
+    return float(np.sqrt(d @ d))
+
+
+def _walk_path(ship, grid, q_entry, v_local, run_m, blast_r_m, first_only):
+    """The interior damage path, in LOCAL METERS with a real blast reach.
+
+    Walk the straight line from the OBB entry point along the round's local
+    velocity, sampling every PATH_STEP_M.  A module is damaged when the
+    path passes within ``blast_r_m`` of its box (cube-root blast scaling —
+    a warhead does not need to thread the box exactly).  ``first_only``
+    models a frag head: it detonates at the first structure met and reaches
+    nothing beyond it.  Returns (hit_rows, q_detonation, min_y_wl_m):
+    the modules damaged, the LOCAL detonation point (end of the SAP run /
+    the frag contact), and the lowest waterline-relative height the path
+    reached (a diving round that crosses below the waterline floods as a
+    BELOW-waterline breach no matter where it entered).  Deterministic and
+    direction-agnostic."""
     n = np.linalg.norm(v_local)
     if n < _EPS:
-        return []
+        return [], q_entry, float(q_entry[1] + (ship.height - HULL_DRAFT)
+                                  * 0.5)
     d = v_local / n
-    hit, seen = [], set()
+    boxes = [(row, *_box_local_m(ship, row)) for row in grid]
+    off = (ship.height - HULL_DRAFT) * 0.5
+    half_len = ship.length * 0.5
+    hit, seen = [], {}
+    q_det = q_entry.copy()
+    min_y_wl = float(q_entry[1] + off)
     steps = max(1, int(run_m / PATH_STEP_M))
     for i in range(steps + 1):
         q = q_entry + d * (i * PATH_STEP_M)
-        z, y, x = local_to_grid(ship, q)
-        if not (-0.02 <= z <= 1.02):
-            break                        # left the hull lengthwise
-        for row in grid:
-            if row[0] in seen:
-                continue
-            if _box_contains(row, z, y, x, margin=margin):
-                seen.add(row[0])
-                hit.append(row)
-                if first_only:
-                    return hit
-    return hit
+        if abs(q[2]) > half_len + 2.0 or q[1] + off < -HULL_DRAFT - 2.0:
+            break                        # left the hull (length or keel)
+        q_det = q
+        min_y_wl = min(min_y_wl, float(q[1] + off))
+        for row, center, half in boxes:
+            clear = _clearance_m(q, center, half)
+            if clear <= blast_r_m:
+                # inside=True only when the round's PATH pierces the box
+                # itself (clearance 0) — the sympathetic-detonation worst
+                # case; a blast-radius graze doses the module but cannot
+                # set the whole magazine off at once.
+                inside = clear <= 1e-9
+                idx = seen.get(row[0])
+                if idx is None:
+                    seen[row[0]] = len(hit)
+                    hit.append((row, inside))
+                    if first_only:
+                        return hit, q, min_y_wl
+                elif inside and not hit[idx][1]:
+                    hit[idx] = (row, True)
+    return hit, q_det, min_y_wl
 
 
 # --- Per-ship damage state -------------------------------------------------------
@@ -492,34 +545,40 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
 
     grid = grid_for(ship)
     v_local = rot.T @ np.asarray(m.vel, dtype=np.float64)
+    blast_r = BLAST_RADIUS_K * warhead ** (1.0 / 3.0) if warhead > 0.0 \
+        else 1.0
     if penetrates:
         # SAP interior run: the round keeps punching through structure for
-        # a fraction of the ship's length past the entry point.
-        hit_modules = _path_modules(ship, grid, q_local, v_local,
-                                    run_m=BLAST_RUN_FRAC * ship.length,
-                                    first_only=False, margin=0.02)
+        # a fraction of the ship's length; everything within the blast
+        # radius of that path takes the warhead dose.
+        hit_modules, q_det, min_y_wl = _walk_path(
+            ship, grid, q_local, v_local,
+            run_m=BLAST_RUN_FRAC * ship.length + blast_r,
+            blast_r_m=blast_r, first_only=False)
     else:
         # Frag head: crosses open air/deck and detonates on the FIRST
         # structure met anywhere along its chord through the hull box.
-        hit_modules = _path_modules(ship, grid, q_local, v_local,
-                                    run_m=ship.length + ship.beam,
-                                    first_only=True, margin=FRAG_MARGIN)
+        hit_modules, q_det, min_y_wl = _walk_path(
+            ship, grid, q_local, v_local,
+            run_m=ship.length + ship.beam,
+            blast_r_m=FRAG_CONTACT_M, first_only=True)
 
     # Blast/frag channel: full warhead dose to every module on the path
     # (deterministic and cumulative — two ARMs finish what one started).
     ignition_bonus = 0.0
     dead_before = set(st.dead_modules)
     catastrophe = False
-    for row in hit_modules:
+    for row, inside in hit_modules:
         name, kind = row[0], row[6]
         dose = st.module_dose.get(name, 0.0) + warhead
         st.module_dose[name] = dose
         if kind == "fire":
             ignition_bonus += 0.25      # ruptured fuel space feeds the fire
         if dose >= TOUGHNESS.get(kind, 1.0e9):
-            if kind in ("vls", "magazine") and penetrates:
-                # A penetrating warhead INSIDE a live magazine is the
-                # sympathetic-chain worst case: instant cook-off, no dwell.
+            if kind in ("vls", "magazine") and penetrates and inside:
+                # A penetrating warhead bursting INSIDE a live magazine is
+                # the sympathetic-chain worst case: instant cook-off, no
+                # dwell.  (A blast-radius graze only wrecks the cells.)
                 n = _magazine_ammo(ship, name)
                 _apply_module_kill(ship, st, name, kind, effects_out)
                 if n > 0 and cookoff_tnt_kg(n) >= COOK_SINK_TNT_KG:
@@ -531,15 +590,19 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
             else:
                 _apply_module_kill(ship, st, name, kind, effects_out)
 
-    # Structural channel: KE opens a breach.  Below-waterline entries breach
-    # at full effect; internal detonations above the WL still open a reduced
-    # breach (blast vents through decks/hull — Sheffield took water too).
+    # Structural channel: KE opens a breach at the DETONATION point.  A
+    # path that reached the waterline or below (a sea-skimmer through the
+    # side OR a diver punching down through the decks) breaches at full
+    # effect; a burst that stayed wholly above it opens a reduced breach
+    # (blast vents down through decks — Sheffield took water too).
+    z_det, _y_det, _x_det = local_to_grid(ship, q_det)
+    z_det = min(1.0, max(0.0, z_det))
     breach_area = 0.0
     if penetrates and not catastrophe:
         breach_area = min(BREACH_M2_MAX, ke / KE_PER_BREACH_M2)
-        if y >= 0.0:
+        if min_y_wl >= 0.0:
             breach_area *= ABOVE_WL_BREACH_FRAC
-        ci = st.comp_of(z)
+        ci = st.comp_of(z_det)
         st.breach[ci] += breach_area
         if breach_area >= BREACH_ADJ_M2 and ci + 1 < st.n_comp:
             st.breach[ci + 1] += breach_area * 0.4
@@ -549,12 +612,12 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
         # Internal detonation starts a fire scaled by the warhead
         # (energetics doc: internal fire is the decisive kill mechanism).
         st.fire = min(1.0, st.fire + warhead * IGNITE_PER_KG + ignition_bonus)
-        st.fire_z = z
+        st.fire_z = z_det                # the fire burns where it BURST
     elif not catastrophe:
         # Frag hit: surface fire only if it found something flammable.
         if ignition_bonus > 0.0:
             st.fire = min(1.0, st.fire + ignition_bonus)
-            st.fire_z = z
+            st.fire_z = z_det
 
     if st.fire > FIRE_OUT_I and ship.state == ST_ALIVE and not catastrophe:
         ship.state = ST_BURNING
@@ -573,6 +636,11 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
         "flood": list(st.flood),
         "fire": st.fire, "fire_z": st.fire_z,
         "impact": (z, y, x), "ke": ke, "penetrated": penetrates,
+        # Shot-path drawing (hit cam v2): entry + detonation points in grid
+        # coords, and the blast reach as a length fraction.
+        "entry": (z, y, x),
+        "det": local_to_grid(ship, q_det),
+        "blast_frac": blast_r / ship.length,
         "breach_m2": breach_area,
         "weapon": str(getattr(getattr(m, "weapon", None), "weapon_id",
                               "round")),
