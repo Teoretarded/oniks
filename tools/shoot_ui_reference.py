@@ -146,9 +146,12 @@ def main() -> int:
     key(app, pygame.K_DOWN)                 # leaf to the next sheet
     settle(app)
     save(app, "17_forensics_sheet2.png")
-    key(app, pygame.K_2)                    # BLACK BOX tab: AWAITING DESIGN
+    key(app, pygame.K_2)                    # BLACK BOX: the density deck
     settle(app)
-    save(app, "18_forensics_blackbox_placeholder.png")
+    save(app, "18_forensics_blackbox_deck.png")
+    key(app, pygame.K_3)                    # SENSORS: the plot board
+    settle(app)
+    save(app, "19_forensics_plot_board.png")
     key(app, pygame.K_1)
     key(app, pygame.K_ESCAPE)               # close the sheet (back to map)
     key(app, pygame.K_m)                    # close the map

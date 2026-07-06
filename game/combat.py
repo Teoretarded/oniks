@@ -46,6 +46,7 @@ from game.controls import PLATFORMS_COMBAT, combat_platforms
 from game.flight_recorder import FlightRecorder
 from game.forensics import ForensicsScreen
 from game.sandbox import AIRCRAFT_DRAW_RANGE, HINT_SECONDS, SandboxState
+from game.sensor_log import SensorLog
 from game.scoring import (
     compute_par, compute_scorecard, grade, new_telemetry,
     picture_has_actionable_contact,
@@ -141,6 +142,11 @@ class CombatState(SandboxState):
         # at fixed sim-clock boundaries — the debrief plots 1:1 from this).
         # Own rounds only; the sim never reads it (digest untouched).
         self.flight_recorder = FlightRecorder()
+        # Raw receiver-event log (approved panes 2026-07-06): a pure observer
+        # over the PLAYER PICTURE stores (contacts/emitters/sub fixes) feeding
+        # the forensics micro-ledger strip + plot board LIVE.  Render/AAR
+        # layer only — the sim never reads it (digest untouched).
+        self.sensor_log = SensorLog()
         # FORENSICS / SHOT DEBRIEF ledger: an overlay the render branch draws
         # INSTEAD of the HUD/map — sim_step is untouched, THE SIM NEVER
         # PAUSES under it (tactical-map pattern).  Opened by J, the map
@@ -294,6 +300,8 @@ class CombatState(SandboxState):
         self._accumulate_telemetry()
         # Exact fixed-step path sampling (this method runs once per PHYS_DT).
         self.flight_recorder.update(self.world)
+        # Raw receiver events for the forensics panes (pure observer).
+        self.sensor_log.update(self.world)
         # BLACK BOX: ledger newly-closed rounds (the recorder just classified
         # them), advance the replay tick clock, and drop the periodic state
         # hash (the determinism tripwire replay verifies against).

@@ -22,8 +22,17 @@ THE SIM NEVER PAUSES under this screen (tactical-map pattern: an overlay the
 state renders instead of the HUD; sim_step continues untouched).  The live
 T+ clock chip + inbound count prove it to the player.
 
-BLACK BOX / SENSORS tabs and the sensor-lane strip are NOT visually approved
-yet: they render as "AWAITING DESIGN" placeholders — deliberately undesigned.
+The three panes (approved proto_panels round, 2026-07-06 — variation C of
+each) all feed LIVE data:
+  * SENSOR RECORD micro-ledger (LEDGER tab, right column): raw receiver
+    rows from ``CombatState.sensor_log`` in the selected round's window.
+  * BLACK BOX density deck (tab 2): kind-per-lane density of the SHIPPED
+    BattleLedger (``CombatState.ledger.records``) over the whole battle +
+    the pointed-at window's exact records.  LEFT/RIGHT moves the window.
+  * SENSORS plot board (tab 3): raw sensor GEOMETRY in space — belief
+    paints aging by opacity, ELINT rays, launch-warn rays, acoustic
+    uncertainty rings — never a fused conclusion.  (Pencil calls + AAR
+    grading: a later pass, once the grading rules are designed.)
 
 Engine constraints honored: ASCII-only monospace atlas, font sizes 14/18/28
 only, flat rects + thin draw_lines polylines, no rounded corners.  GL touches
@@ -41,10 +50,11 @@ import pygame
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.states import (
     HINT_BAR_BG, HINT_COL, INK_AMBER, INK_GREEN, INK_RED, INK_TEAL,
-    PAPER_BG, PAPER_CHIP_BG, PAPER_CHIP_EDGE, PAPER_CHIP_MUTED,
+    INK_VIOLET, PAPER_BG, PAPER_CHIP_BG, PAPER_CHIP_EDGE, PAPER_CHIP_MUTED,
     PAPER_CHIP_TEXT, PAPER_DESK, PAPER_DESK_EDGE, PAPER_FIELD, PAPER_HATCH,
     PAPER_HEADLINE, PAPER_INK, PAPER_MUTED, PAPER_SELECT, PAPER_TAG,
 )
+from world.generation import BASE_POS
 
 # ------------------------------------------------------------------ display maps
 
@@ -64,7 +74,14 @@ _WEAPON_NAMES = {"sm2": "SM-2", "sm6": "SM-6", "aim9x": "AIM-9X",
 # Paper inks by semantic key (the pure helpers return keys, not colors,
 # so the display logic stays testable headless).
 _INKS = {"ink": PAPER_INK, "muted": PAPER_MUTED, "red": INK_RED,
-         "teal": INK_TEAL, "amber": INK_AMBER, "green": INK_GREEN}
+         "teal": INK_TEAL, "amber": INK_AMBER, "green": INK_GREEN,
+         "violet": INK_VIOLET}
+
+# Receiver lanes (game/sensor_log.py) -> display name + ink key.
+_LANE_LABEL = {"radar": "RADAR", "lwarn": "L-WARN", "elint": "ELINT",
+               "acoustic": "ACOUSTIC"}
+_LANE_INK = {"radar": "teal", "lwarn": "amber", "elint": "violet",
+             "acoustic": "green"}
 
 # Interceptor cause codes (the counter row's INTERCEPTED bucket).
 _INTERCEPT_CODES = ("sam", "a2a", "ciws", "pantsir")
@@ -190,6 +207,108 @@ def fmt_clock(t: float) -> str:
     return f"T+{int(t // 60):02d}:{int(t % 60):02d}"
 
 
+# ------------------------------------------------- BLACK BOX deck (pure)
+
+# The density deck's lanes = the ledger's record kinds (top-to-bottom).  A
+# DENIED cmd rides the hint lane (the denial channel gets its own ink).
+_DECK_LANES = ("cmd", "hint", "evt", "toggle", "loss", "mark", "hash")
+
+_DECK_LANE_LABEL = {"cmd": "CMD", "hint": "HINT / DENIED", "evt": "EVT",
+                    "toggle": "TOGGLE", "loss": "LOSS", "mark": "MARK (F3)",
+                    "hash": "HASH"}
+
+_DECK_LANE_INK = {"cmd": "teal", "hint": "red", "evt": "green",
+                  "toggle": "amber", "loss": "red", "mark": "amber",
+                  "hash": "muted"}
+
+
+def ledger_lane(record) -> str | None:
+    """Deck lane for a BattleLedger record (None = not a lane: header/end)."""
+    kind = record.get("rec")
+    if kind == "cmd" and not record.get("ok", True):
+        return "hint"                   # denial: rides the refusal lane
+    return kind if kind in _DECK_LANES else None
+
+
+def bin_lane_counts(records, t0: float, t1: float, nbins: int) -> dict:
+    """Per-lane event counts in ``nbins`` equal time bins over [t0, t1)
+    (pure — the deck's density strips).  Records without a lane or outside
+    the range are ignored."""
+    span = max(t1 - t0, 1e-9)
+    bins = {lane: [0] * nbins for lane in _DECK_LANES}
+    for r in records:
+        lane = ledger_lane(r)
+        t = r.get("t")
+        if lane is None or t is None:
+            continue
+        if not t0 <= t < t1:
+            continue
+        i = min(int((t - t0) / span * nbins), nbins - 1)
+        bins[lane][i] += 1
+    return bins
+
+
+def _fmt_val(v) -> str:
+    """Compact arg rendering for the tape: 3-vectors/2-vectors as km."""
+    if isinstance(v, (list, tuple)) and len(v) in (2, 3) \
+            and all(isinstance(x, (int, float)) for x in v):
+        return f"({v[0] / 1e3:+.1f},{v[-1] / 1e3:+.1f})KM"
+    if isinstance(v, float):
+        return f"{v:.1f}"
+    return str(v)
+
+
+def fmt_ledger_row(record, battle_over: bool) -> tuple:
+    """(kind_label, text, ink_key) for one ledger record on the tape.
+
+    FOG GATE: a LOSS row's cause was RECORDED in full, but the mid-battle
+    display may not name an unobserved killer — it prints UNCONFIRMED until
+    the AAR (same rule as the stubs)."""
+    kind = record.get("rec")
+    if kind == "cmd":
+        ok = record.get("ok", True)
+        args = record.get("args", {}) or {}
+        brief = " ".join(f"{k}={_fmt_val(v)}"
+                         for k, v in list(args.items())[:3])
+        text = f"{record.get('verb', '?')} {brief} -> " \
+               + ("OK" if ok else "DENIED")
+        return ("CMD", text, "teal" if ok else "red")
+    if kind == "hint":
+        return ("HINT", f'"{record.get("text", "")}"', "red")
+    if kind == "evt":
+        pos = record.get("pos")
+        where = (f" @ ({pos[0] / 1e3:+.1f}, {pos[-1] / 1e3:+.1f}) KM"
+                 if isinstance(pos, (list, tuple)) and len(pos) >= 2 else "")
+        return ("EVT", f"{record.get('kind', '?')}{where}", "green")
+    if kind == "toggle":
+        return ("TOGGLE",
+                f"{record.get('name', '?')} -> "
+                f"{str(record.get('value')).upper()}", "amber")
+    if kind == "loss":
+        rid = f"{str(record.get('kind', '?')).upper()}-{record.get('seq', 0)}"
+        observed = bool(record.get("observed", False))
+        code = str(record.get("code", "lost"))
+        detail = str(record.get("detail", "") or "")
+        if observed or battle_over:
+            cause = code + (f"/{detail}" if detail else "")
+            tag = "OBSERVED" if observed else "RECONSTRUCTED"
+            return ("LOSS", f"{rid} CAUSE={cause.upper()} - {tag}", "red")
+        return ("LOSS", f"{rid} LOST - UNCONFIRMED", "red")
+    if kind == "hash":
+        digest = str(record.get("digest", ""))[:8].upper()
+        return ("HASH", f"STATE DIGEST {digest} (TICK "
+                        f"{record.get('tick', 0)})", "muted")
+    if kind == "mark":
+        return ("MARK", f"F3 FLAG: {record.get('note', 'BUG')}", "amber")
+    if kind == "header":
+        return ("HDR", f"BATTLE SEED {record.get('seed', 0)} - COMMIT "
+                       f"{record.get('commit', '') or '?'}", "muted")
+    if kind == "end":
+        return ("END", f"{str(record.get('outcome', '')).upper()} "
+                       f"{record.get('grade', '')}".strip(), "ink")
+    return (str(kind).upper()[:6], "", "muted")
+
+
 # ------------------------------------------------------------------ the screen
 
 _TABS = ("LEDGER", "BLACK BOX", "SENSORS")
@@ -206,6 +325,7 @@ class ForensicsScreen:
         self.state = state              # CombatState: recorder, world, text
         self.selected = 0
         self.tab = 0
+        self.bb_offset = 0.0            # deck window shift (s, <= 0 = past)
         self._stub_rects: list = []     # (index, x0, y0, x1, y1)
         self._tab_rects: list = []
 
@@ -237,6 +357,15 @@ class ForensicsScreen:
                 app.audio.ui_click()
                 return True
             n = len(self._recs())
+            # On the BLACK BOX deck LEFT/RIGHT move the record window;
+            # everywhere else they leaf the ledger like UP/DN.
+            if self.tab == 1 and key in (pygame.K_LEFT, pygame.K_RIGHT):
+                step = -30.0 if key == pygame.K_LEFT else 30.0
+                now = float(getattr(self.state.world, "sim_time", 0.0))
+                self.bb_offset = min(0.0, max(-(max(now - 90.0, 0.0)),
+                                              self.bb_offset + step))
+                app.audio.ui_click()
+                return True
             if key in (pygame.K_UP, pygame.K_LEFT):
                 if n:
                     self.selected = (self.selected - 1) % n
@@ -357,24 +486,35 @@ class ForensicsScreen:
         rec = recs[self.selected]
         path = self.state.flight_recorder.path_of(rec)
 
-        # Side-view hero plot.
-        sid = stub_id(rec)
-        text.draw_text(x0, y, f"{sid} - RECORDED FLIGHT PATH - SIDE VIEW, "
-                              f"PLOTTED 1:1 FROM THE PATH RECORDER "
-                              f"(SQUARE TICKS = SAMPLES)",
-                       PAPER_MUTED, SMALL_SIZE)
-        y += text.line_height(SMALL_SIZE) + 4
-        plot_h = int(ph * 0.30)
-        self._side_plot(text, x0, y, inner_w, plot_h, rec, path, battle_over)
-        y += plot_h + 12
+        # Side-view hero plot — LEDGER tab only: the full-band panes
+        # (deck / plot board) take the whole sheet body instead.
+        if self.tab == 0:
+            sid = stub_id(rec)
+            text.draw_text(x0, y, f"{sid} - RECORDED FLIGHT PATH - SIDE "
+                                  f"VIEW, PLOTTED 1:1 FROM THE PATH "
+                                  f"RECORDER (SQUARE TICKS = SAMPLES)",
+                           PAPER_MUTED, SMALL_SIZE)
+            y += text.line_height(SMALL_SIZE) + 4
+            plot_h = int(ph * 0.30)
+            self._side_plot(text, x0, y, inner_w, plot_h, rec, path,
+                            battle_over)
+            y += plot_h + 12
 
-        # Bottom row: top-down (left) + tabs/finding (right).
+        # Bottom band: tab strip, then the ACTIVE pane (approved variation C
+        # of each — LEDGER keeps the split layout; BLACK BOX / SENSORS own
+        # the full band).
+        y = self._tab_strip(text, x0, y)
         bottom_h = py + ph - y - int(pad * 1.7)
-        map_w = int(inner_w * 0.52)
-        self._top_down(text, x0, y, map_w, bottom_h, rec, path)
-        rx = x0 + map_w + pad
-        self._right_column(text, rx, y, x0 + inner_w - rx, bottom_h, recs,
-                           rec, battle_over)
+        if self.tab == 0:
+            map_w = int(inner_w * 0.52)
+            self._top_down(text, x0, y, map_w, bottom_h, rec, path)
+            rx = x0 + map_w + pad
+            self._right_column(text, rx, y, x0 + inner_w - rx, bottom_h,
+                               recs, rec, battle_over)
+        elif self.tab == 1:
+            self._blackbox_deck(text, x0, y, inner_w, bottom_h, battle_over)
+        else:
+            self._plot_board(text, x0, y, inner_w, bottom_h)
 
         self._foot(text, x0, py, ph, inner_w, recs)
         self._hint_bar(text, w, h)
@@ -732,51 +872,39 @@ class ForensicsScreen:
         text.draw_text(x0 + pw - cw - 8, fy + fh - lh - 6, cap, PAPER_MUTED,
                        SMALL_SIZE)
 
+    # ------------------------------------------------------------ tab strip
+
+    def _tab_strip(self, text, x0, y0) -> int:
+        """The 1/2/3 view strip above the bottom band; returns the band's
+        top y.  Click OR number key switches (keyboard path law)."""
+        lh = text.line_height(SMALL_SIZE)
+        tx = x0
+        for i, label in enumerate(_TABS):
+            active = i == self.tab
+            col = PAPER_INK if active else PAPER_MUTED
+            full = f"[{i + 1}] {label}"
+            text.draw_text(tx, y0, full, col, SMALL_SIZE)
+            full_w = text.text_width(full, SMALL_SIZE)
+            if active:
+                text.draw_rect(tx, y0 + lh + 1, full_w, 2, (*PAPER_INK, 1.0))
+            self._tab_rects.append((i, tx, y0, tx + full_w, y0 + lh + 3))
+            tx += full_w + 22
+        return y0 + lh + 10
+
     # --------------------------------------------------------- right column
 
     def _right_column(self, text, x0, y0, pw, ph, recs, rec,
                       battle_over) -> None:
         lh = text.line_height(SMALL_SIZE)
         blh = text.line_height(BODY_SIZE)
-        # Tab strip (BLACK BOX / SENSORS: present, deliberately undesigned).
-        tx = x0
-        for i, label in enumerate(_TABS):
-            tw = text.text_width(label, SMALL_SIZE)
-            active = i == self.tab
-            col = PAPER_INK if active else PAPER_MUTED
-            text.draw_text(tx, y0, f"[{i + 1}] {label}", col, SMALL_SIZE)
-            full_w = text.text_width(f"[{i + 1}] {label}", SMALL_SIZE)
-            if active:
-                text.draw_rect(tx, y0 + lh + 1, full_w, 2, (*PAPER_INK, 1.0))
-            self._tab_rects.append((i, tx, y0, tx + full_w, y0 + lh + 3))
-            tx += full_w + 22
-        y = y0 + lh + 12
+        y = y0
 
-        if self.tab != 0:
-            box_h = ph - (y - y0) - 8
-            self._rect_border(text, x0, y, pw, box_h, (*PAPER_MUTED, 1.0),
-                              1.0, dashed=True)
-            msg = "AWAITING DESIGN"
-            mw = text.text_width(msg, BODY_SIZE)
-            text.draw_text(x0 + (pw - mw) * 0.5, y + box_h * 0.42, msg,
-                           PAPER_MUTED, BODY_SIZE)
-            sub = f"{_TABS[self.tab]} PANE IS NOT DESIGNED YET"
-            sw = text.text_width(sub, SMALL_SIZE)
-            text.draw_text(x0 + (pw - sw) * 0.5, y + box_h * 0.42 + blh + 4,
-                           sub, PAPER_MUTED, SMALL_SIZE)
-            return
-
-        # LEDGER tab. Sensor-lane strip: not visually approved -> placeholder.
-        strip_h = max(int(ph * 0.22), lh * 2 + 16)
-        self._rect_border(text, x0, y, pw, strip_h, (*PAPER_MUTED, 1.0), 1.0,
-                          dashed=True)
-        text.draw_text(x0 + 10, y + 6, "SENSOR RECORD", PAPER_MUTED,
-                       SMALL_SIZE)
-        msg = "AWAITING DESIGN"
-        mw = text.text_width(msg, SMALL_SIZE)
-        text.draw_text(x0 + (pw - mw) * 0.5, y + strip_h * 0.5 - lh * 0.5,
-                       msg, PAPER_MUTED, SMALL_SIZE)
-        y += strip_h + 12
+        # SENSOR RECORD micro-ledger (approved variation C): raw receiver
+        # rows from the LIVE sensor log, filtered to this round's flight
+        # window, newest last; the recorder's close-out is the struck row.
+        strip_h = max(int(ph * 0.40), lh * 6 + 20)
+        y = self._micro_ledger(text, x0, y, pw, strip_h, rec, battle_over)
+        y += 12
 
         # The finding: killer bar + headline (fog-gated).
         cause = rec.get("cause")
@@ -834,6 +962,347 @@ class ForensicsScreen:
                               (*scol, 1.0), 2.0)
             text.draw_text(sx, sy, stamp, scol, BODY_SIZE)
 
+    # --------------------------------------------------------- micro-ledger
+
+    def _micro_ledger(self, text, x0, y0, pw, ph, rec, battle_over) -> int:
+        """SENSOR RECORD as a typed table (approved variation C): one row
+        per RAW receiver record inside the selected round's flight window —
+        facts only, straight from the live SensorLog.  Returns bottom y."""
+        lh = text.line_height(SMALL_SIZE)
+        text.draw_text(x0, y0, "SENSOR RECORD - RAW RECEIVER ROWS - THIS "
+                               "ROUND'S WINDOW", PAPER_MUTED, SMALL_SIZE)
+        fy = y0 + lh + 4
+        fh = ph - lh - 4
+        text.draw_rect(x0, fy, pw, fh, (*PAPER_FIELD, 1.0))
+        self._rect_border(text, x0, fy, pw, fh, (*PAPER_INK, 1.0), 2.0)
+
+        log = getattr(self.state, "sensor_log", None)
+        world = self.state.world
+        now = float(getattr(world, "sim_time", 0.0))
+        t0 = float(rec["launch_t"])
+        death = rec.get("death")
+        t1 = float(death["t"]) if death is not None else now
+        events = log.events_between(t0, t1) if log is not None else []
+
+        # Column layout: T+ | RECEIVER | RECORD | REF (right-aligned).
+        cx_t, cx_rcv, cx_body = x0 + 10, x0 + 84, x0 + 176
+        ref_w = 96
+        row_h = lh + 4
+        hy = fy + 5
+        for cx, head in ((cx_t, "T+"), (cx_rcv, "RECEIVER"),
+                         (cx_body, "RECORD")):
+            text.draw_text(cx, hy, head, PAPER_MUTED, SMALL_SIZE)
+        text.draw_text(x0 + pw - ref_w, hy, "REF", PAPER_MUTED, SMALL_SIZE)
+        text.draw_rect(x0 + 4, hy + lh + 1, pw - 8, 1, (*PAPER_INK, 0.8))
+        yy = hy + lh + 5
+
+        rows_fit = max(int((fy + fh - yy - 4) // row_h), 1)
+        cause = rec.get("cause")
+        n_data = rows_fit - (1 if cause is not None else 0)
+        clipped = max(0, len(events) - n_data)
+        for e in events[clipped:] if n_data > 0 else []:
+            lane_ink = _INKS[_LANE_INK.get(e["lane"], "muted")]
+            text.draw_text(cx_t, yy, fmt_clock(e["t"])[2:], PAPER_MUTED,
+                           SMALL_SIZE)
+            text.draw_text(cx_rcv, yy, _LANE_LABEL.get(e["lane"], "?"),
+                           lane_ink, SMALL_SIZE)
+            text.draw_text(cx_body, yy, e["label"], PAPER_INK, SMALL_SIZE)
+            ref = str(e["ref"]).upper()[:10]
+            rw = text.text_width(ref, SMALL_SIZE)
+            text.draw_text(x0 + pw - 10 - rw, yy, ref, PAPER_MUTED,
+                           SMALL_SIZE)
+            yy += row_h
+        if cause is not None and death is not None and rows_fit > 0:
+            status, ink_key = stub_status(cause, battle_over)
+            col = _INKS[ink_key if ink_key != "muted" else "red"]
+            text.draw_rect(x0 + 4, yy - 1, pw - 8, row_h, (*INK_RED, 0.08))
+            text.draw_text(cx_t, yy, fmt_clock(death["t"])[2:], col,
+                           SMALL_SIZE)
+            text.draw_text(cx_rcv, yy, "RECORDER", col, SMALL_SIZE)
+            text.draw_text(cx_body, yy, f"{stub_id(rec)} CLOSED - {status}",
+                           col, SMALL_SIZE)
+            yy += row_h
+        if not events and cause is None:
+            msg = ("NO RECEIVER RECORDS IN THIS WINDOW YET"
+                   if log is not None else "NO SENSOR LOG THIS SESSION")
+            text.draw_text(cx_t, yy, msg, PAPER_MUTED, SMALL_SIZE)
+        if clipped > 0:
+            note = f"+{clipped} EARLIER"
+            nw = text.text_width(note, SMALL_SIZE)
+            text.draw_text(x0 + pw - 10 - nw, fy + fh - lh - 4, note,
+                           PAPER_MUTED, SMALL_SIZE)
+        return fy + fh
+
+    # -------------------------------------------------------- black box deck
+
+    def _blackbox_deck(self, text, x0, y0, pw, ph, battle_over) -> None:
+        """BLACK BOX (approved variation C): kind-per-lane density of the
+        WHOLE battle ledger on top, the pointed-at window's exact records
+        below.  Feeds CombatState.ledger.records — the shipped JSONL,
+        nothing invented.  LEFT/RIGHT move the window."""
+        lh = text.line_height(SMALL_SIZE)
+        ledger = getattr(self.state, "ledger", None)
+        records = getattr(ledger, "records", None)
+        if not records:
+            self._rect_border(text, x0, y0, pw, ph - 8, (*PAPER_MUTED, 1.0),
+                              1.0, dashed=True)
+            text.draw_text(x0 + 14, y0 + 12, "NO BATTLE LEDGER THIS "
+                                             "SESSION", PAPER_MUTED,
+                           SMALL_SIZE)
+            return
+        now = max(float(getattr(self.state.world, "sim_time", 0.0)), 1.0)
+
+        # --- the deck: one density lane per record kind, full battle ---
+        label_w = 132
+        lane_h = lh + 8
+        ruler_h = lh + 4
+        deck_h = ruler_h + lane_h * len(_DECK_LANES) + 6
+        text.draw_rect(x0, y0, pw, deck_h, (*PAPER_FIELD, 1.0))
+        self._rect_border(text, x0, y0, pw, deck_h, (*PAPER_INK, 1.0), 2.0)
+        gx0 = x0 + label_w
+        gw = pw - label_w - 14
+        nbins = 90
+        bins = bin_lane_counts(records, 0.0, now, nbins)
+        # Ruler.
+        for frac, tag in ((0.0, "T+00"), (0.34, fmt_clock(now * 0.34)),
+                          (0.67, fmt_clock(now * 0.67)), (1.0, fmt_clock(now))):
+            tx = gx0 + frac * gw
+            tw = text.text_width(tag, SMALL_SIZE)
+            text.draw_text(min(tx, x0 + pw - tw - 8), y0 + 4, tag,
+                           PAPER_MUTED, SMALL_SIZE)
+        text.draw_rect(gx0, y0 + ruler_h, gw, 1, (*PAPER_INK, 0.5))
+        yy = y0 + ruler_h + 2
+        bin_w = gw / nbins
+        for lane in _DECK_LANES:
+            ink = _INKS[_DECK_LANE_INK[lane]]
+            text.draw_text(x0 + 8, yy + 4, _DECK_LANE_LABEL[lane], ink,
+                           SMALL_SIZE)
+            for i, c in enumerate(bins[lane]):
+                if c <= 0:
+                    continue
+                bar = min(lane_h - 6, 3 + 3 * c)
+                text.draw_rect(gx0 + i * bin_w, yy + lane_h - 3 - bar,
+                               max(bin_w - 2, 2), bar, (*ink, 0.9))
+            if lane != _DECK_LANES[-1]:
+                text.draw_rect(gx0, yy + lane_h - 1, gw, 1,
+                               (*PAPER_INK, 0.12))
+            yy += lane_h
+
+        # The pointed-at window box across all lanes.
+        win_s = 90.0
+        w_t1 = max(min(now + self.bb_offset, now), min(win_s, now))
+        w_t0 = max(0.0, w_t1 - win_s)
+        wx0 = gx0 + (w_t0 / now) * gw
+        wx1 = gx0 + (w_t1 / now) * gw
+        self._rect_border(text, wx0, y0 + ruler_h + 1, max(wx1 - wx0, 6),
+                          deck_h - ruler_h - 5, (*PAPER_INK, 1.0), 2.0)
+
+        y = y0 + deck_h + 6
+        text.draw_text(x0, y, f"WINDOW {fmt_clock(w_t0)} .. "
+                              f"{fmt_clock(w_t1)} - LEFT/RIGHT MOVES - THE "
+                              f"HASH LANE'S EVEN PULSE = REPLAY INTEGRITY",
+                       PAPER_MUTED, SMALL_SIZE)
+        y += lh + 6
+
+        # --- the window table: exact records, newest last ---
+        th = y0 + ph - y - lh - 10
+        text.draw_rect(x0, y, pw, th, (*PAPER_FIELD, 1.0))
+        self._rect_border(text, x0, y, pw, th, (*PAPER_INK, 1.0), 2.0)
+        window = [r for r in records
+                  if r.get("t") is not None and w_t0 <= r["t"] <= w_t1]
+        row_h = lh + 4
+        rows_fit = max(int((th - 10) // row_h), 1)
+        clipped = max(0, len(window) - rows_fit)
+        yy = y + 5
+        for r in window[clipped:]:
+            kind, body, ink_key = fmt_ledger_row(r, battle_over)
+            ink = _INKS[ink_key]
+            text.draw_text(x0 + 10, yy, fmt_clock(r["t"])[2:], PAPER_MUTED,
+                           SMALL_SIZE)
+            text.draw_text(x0 + 84, yy, kind, ink, SMALL_SIZE)
+            body_x = x0 + 172
+            max_w = pw - (body_x - x0) - 12
+            while body and text.text_width(body, SMALL_SIZE) > max_w:
+                body = body[:-4] + ".."
+            text.draw_text(body_x, yy, body,
+                           PAPER_INK if ink_key in ("teal", "green", "ink")
+                           else ink, SMALL_SIZE)
+            yy += row_h
+        if clipped > 0:
+            note = f"+{clipped} EARLIER IN WINDOW"
+            nw = text.text_width(note, SMALL_SIZE)
+            text.draw_text(x0 + pw - 10 - nw, y + th - lh - 4, note,
+                           PAPER_MUTED, SMALL_SIZE)
+
+        denied = sum(1 for r in records
+                     if r.get("rec") == "cmd" and not r.get("ok", True))
+        marks = sum(1 for r in records if r.get("rec") == "mark")
+        text.draw_text(x0, y + th + 6,
+                       f"{len(records)} RECORDS - {denied} DENIED - "
+                       f"{marks} MARK(S) - EVERY ROW IS ONE LEDGER RECORD "
+                       f"(REPLAYABLE BIT-EXACT)", PAPER_MUTED, SMALL_SIZE)
+
+    # ----------------------------------------------------------- plot board
+
+    def _plot_board(self, text, x0, y0, pw, ph) -> None:
+        """SENSORS (approved variation C): raw sensor GEOMETRY in space —
+        belief paints aging by opacity, ELINT/launch-warn bearing rays from
+        the base, acoustic uncertainty rings, dropped-return X marks.  The
+        board never fuses; conclusions stay yours."""
+        lh = text.line_height(SMALL_SIZE)
+        legend_w = 360
+        bw = pw - legend_w - 18
+        bh = ph - 8
+        text.draw_rect(x0, y0, bw, bh, (*PAPER_FIELD, 1.0))
+        self._rect_border(text, x0, y0, bw, bh, (*PAPER_INK, 1.0), 2.0)
+
+        log = getattr(self.state, "sensor_log", None)
+        world = self.state.world
+        now = float(getattr(world, "sim_time", 0.0))
+        events = list(log.events)[-160:] if log is not None else []
+        base_xz = (float(BASE_POS[0]), float(BASE_POS[2]))
+        buoys = [(float(b[0]), float(b[2]))
+                 for b in getattr(world, "sonobuoys", ())]
+
+        pts = [base_xz] + buoys + [e["pos"] for e in events
+                                   if e["pos"] is not None]
+        min_x = min(p[0] for p in pts) - 10_000.0
+        max_x = max(p[0] for p in pts) + 10_000.0
+        min_z = min(p[1] for p in pts) - 10_000.0
+        max_z = max(p[1] for p in pts) + 10_000.0
+        margin = 30
+        scale = min((bw - 2 * margin) / max(max_x - min_x, 1_000.0),
+                    (bh - 2 * margin) / max(max_z - min_z, 1_000.0))
+        cx = (min_x + max_x) * 0.5
+        cz = (min_z + max_z) * 0.5
+
+        def PX(wx):
+            return x0 + bw * 0.5 + (wx - cx) * scale
+
+        def PZ(wz):
+            return y0 + bh * 0.5 - (wz - cz) * scale
+
+        # 25 km grid at the uniform scale.
+        grid = 25_000.0
+        gxx = math.floor(min_x / grid) * grid
+        while gxx < max_x + grid:
+            sx = PX(gxx)
+            if x0 + 2 < sx < x0 + bw - 2:
+                text.draw_rect(sx, y0 + 2, 1, bh - 4, (*INK_TEAL, 0.14))
+            gxx += grid
+        gzz = math.floor(min_z / grid) * grid
+        while gzz < max_z + grid:
+            sz = PZ(gzz)
+            if y0 + 2 < sz < y0 + bh - 2:
+                text.draw_rect(x0 + 2, sz, bw - 4, 1, (*INK_TEAL, 0.14))
+            gzz += grid
+
+        # Own-force fixtures (own truth is always allowed): base + buoys.
+        bx, bz = PX(base_xz[0]), PZ(base_xz[1])
+        text.draw_rect(bx - 7, bz - 5, 14, 10, (*INK_GREEN, 1.0))
+        text.draw_text(bx - 20, bz + 9, "BASE", INK_GREEN, SMALL_SIZE)
+        for wx, wz in buoys:
+            sx, sz = PX(wx), PZ(wz)
+            self._dash_circle(text, sx, sz, 5, (*INK_GREEN, 1.0), seg=8)
+
+        # Raw sensor geometry, oldest first (fresh ink prints on top).
+        fade_s = 240.0
+        for e in events:
+            if e["pos"] is None:
+                continue
+            ex, ez = PX(e["pos"][0]), PZ(e["pos"][1])
+            if not (x0 + 4 < ex < x0 + bw - 4 and y0 + 4 < ez < y0 + bh - 4):
+                continue
+            age = max(0.0, now - e["t"])
+            a = max(0.25, 1.0 - age / fade_s)
+            lane = e["lane"]
+            if lane == "radar":
+                if e["label"] == "TRACK DROPPED":
+                    s = 5
+                    text.draw_lines([(ex - s, ez - s), (ex + s, ez + s)],
+                                    (*INK_RED, a), 2.0)
+                    text.draw_lines([(ex - s, ez + s), (ex + s, ez - s)],
+                                    (*INK_RED, a), 2.0)
+                else:
+                    text.draw_rect(ex - 3, ez - 3, 6, 6, (*INK_TEAL, a))
+            elif lane == "lwarn":
+                # The RAY is the CUE moment; later refreshes just paint
+                # (a board of every refresh ray drowns in amber).
+                if e["label"] == "LAUNCH CUE":
+                    text.draw_lines([(bx, bz), (ex, ez)],
+                                    (*INK_AMBER, 0.5 * a), 2.5)
+                if e["label"] == "TRACK DROPPED":
+                    s = 5
+                    text.draw_lines([(ex - s, ez - s), (ex + s, ez + s)],
+                                    (*INK_AMBER, a), 2.0)
+                    text.draw_lines([(ex - s, ez + s), (ex + s, ez - s)],
+                                    (*INK_AMBER, a), 2.0)
+                else:
+                    text.draw_rect(ex - 3, ez - 3, 6, 6, (*INK_AMBER, a))
+            elif lane == "elint":
+                if e["label"] == "EMITTER HEARD":
+                    text.draw_lines([(bx, bz), (ex, ez)],
+                                    (*INK_VIOLET, 0.35 * a), 1.5)
+                self._diamond(text, ex, ez, 6, (*INK_VIOLET, a))
+            elif lane == "acoustic":
+                r_px = max(10.0, float(e.get("quality") or 0.0) * scale)
+                self._dash_circle(text, ex, ez, min(r_px, 90.0),
+                                  (*INK_GREEN, a))
+                if e["label"] == "LAUNCH DATUM":
+                    self._diamond(text, ex, ez, 5, (*INK_GREEN, a))
+
+        cap = (f"GRID 25 KM - UNIFORM {scale * 1_000.0:.2f} PX/KM - RAYS = "
+               f"BEARINGS - RINGS = FIX UNCERTAINTY - PAINTS AGE BY OPACITY")
+        cw = text.text_width(cap, SMALL_SIZE)
+        text.draw_text(x0 + bw - cw - 8, y0 + bh - lh - 6, cap, PAPER_MUTED,
+                       SMALL_SIZE)
+
+        # Legend + newest-first raw feed.
+        rx = x0 + bw + 18
+        rw = pw - bw - 18
+        y = y0
+        text.draw_text(rx, y, "THE BOARD NEVER FUSES - YOU MAKE THE CALL",
+                       PAPER_MUTED, SMALL_SIZE)
+        y += lh + 6
+        legend = (("SQUARE PAINT - ONE BELIEF FIX, AGES BY INK", "teal"),
+                  ("HEAVY RAY - LAUNCH-WARNING CUE", "amber"),
+                  ("THIN RAY + DIAMOND - ELINT EMITTER FIX", "violet"),
+                  ("DASHED RING - ACOUSTIC UNCERTAINTY", "green"),
+                  ("X - A TRACK THAT STOPPED COMING BACK", "red"))
+        for line, ink_key in legend:
+            text.draw_text(rx, y, line, _INKS[ink_key], SMALL_SIZE)
+            y += lh + 2
+        y += 8
+        text.draw_text(rx, y, "RAW EVENTS - NEWEST FIRST", PAPER_MUTED,
+                       SMALL_SIZE)
+        y += lh + 4
+        fh = y0 + ph - y - lh - 12
+        text.draw_rect(rx, y, rw, fh, (*PAPER_FIELD, 1.0))
+        self._rect_border(text, rx, y, rw, fh, (*PAPER_INK, 1.0), 1.0)
+        row_h = lh + 4
+        rows_fit = max(int((fh - 8) // row_h), 1)
+        feed = log.latest(rows_fit) if log is not None else []
+        yy = y + 4
+        for e in feed:
+            ink = _INKS[_LANE_INK.get(e["lane"], "muted")]
+            text.draw_text(rx + 8, yy, fmt_clock(e["t"])[2:], PAPER_MUTED,
+                           SMALL_SIZE)
+            text.draw_text(rx + 74, yy, _LANE_LABEL.get(e["lane"], "?"),
+                           ink, SMALL_SIZE)
+            body = e["label"]
+            ref = str(e["ref"]).upper()[:9]
+            text.draw_text(rx + 168, yy, body, PAPER_INK, SMALL_SIZE)
+            rw2 = text.text_width(ref, SMALL_SIZE)
+            text.draw_text(rx + rw - 8 - rw2, yy, ref, PAPER_MUTED,
+                           SMALL_SIZE)
+            yy += row_h
+        if not feed:
+            text.draw_text(rx + 8, yy, "NO RECEIVER RECORDS YET",
+                           PAPER_MUTED, SMALL_SIZE)
+        text.draw_text(rx, y0 + ph - lh - 2,
+                       "PENCIL CALLS + AAR GRADING - NEXT PASS",
+                       PAPER_MUTED, SMALL_SIZE)
+
     # ---------------------------------------------------------- draw helpers
 
     @staticmethod
@@ -874,6 +1343,17 @@ class ForensicsScreen:
     def _diamond(text, cx, cy, r, rgba):
         text.draw_lines([(cx, cy - r), (cx + r, cy), (cx, cy + r),
                          (cx - r, cy), (cx, cy - r)], rgba, 2.0)
+
+    @staticmethod
+    def _dash_circle(text, cx, cy, r, rgba, seg: int = 20, width=1.5):
+        """Dashed ring from alternating arc segments (flat-line idiom)."""
+        for i in range(0, seg, 2):
+            a0 = 2.0 * math.pi * i / seg
+            a1 = 2.0 * math.pi * (i + 1) / seg
+            text.draw_lines(
+                [(cx + r * math.cos(a0), cy + r * math.sin(a0)),
+                 (cx + r * math.cos(a1), cy + r * math.sin(a1))],
+                rgba, width)
 
     @staticmethod
     def _x_anchor(text, cx, cy, col):
