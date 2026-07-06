@@ -183,6 +183,130 @@ def test_sandbox_weapons_free_defends():
 
 
 # ---------------------------------------------------------------------------
+# Director orders (Phase B): work while PASSIVE, spend real magazine ammo
+# ---------------------------------------------------------------------------
+
+def _newest_strikes(w, before_ids):
+    from sim.strike import StrikeMissile
+    return [m for m in w.missiles if isinstance(m, StrikeMissile)
+            and id(m) not in before_ids]
+
+
+def _closest_armed_destroyer(w):
+    """Nearest hull with rounds in the TLAM bank (the AAW escort and the
+    flagship honestly carry none — doctrine, not a bug)."""
+    from world.generation import BASE_POS
+    hulls = [s for s in w.ships if isinstance(s, Destroyer)
+             and getattr(s, "tomahawk_ammo", 0) > 0]
+    return min(hulls, key=lambda s: float(
+        np.hypot(s.pos[0] - BASE_POS[0], s.pos[2] - BASE_POS[2])))
+
+
+def test_director_units_inventory():
+    w = SandboxWorld()
+    units = w.director_units()
+    kinds = {u["kind"] for u in units}
+    assert {"destroyer", "sub", "fighters"} <= kinds
+    by_uid = {u["uid"]: u for u in units}
+    assert by_uid["fighters"]["ready"]          # parked jets at spawn
+    dd_rows = [u for u in units if u["kind"] == "destroyer"]
+    assert any(u["ready"] for u in dd_rows)     # the TLAM shooters
+    # TLAM-less escorts (AAW / flagship) honestly report not-ready.
+    assert all(u["ready"] == (u["ammo"] > 0) for u in dd_rows if u["alive"])
+    assert all(u["ready"] for u in units if u["kind"] == "sub")
+
+
+def test_director_tomahawk_at_point_while_passive():
+    w = SandboxWorld()
+    dd = _closest_armed_destroyer(w)
+    before_ammo = dd.tomahawk_ammo
+    before_ids = {id(m) for m in w.missiles}
+    tx, tz = float(dd.pos[0]) + 20_000.0, float(dd.pos[2]) - 60_000.0
+    ok, msg = w.director_order(dd.ship_id, (tx, tz))
+    assert ok, msg
+    rounds = _newest_strikes(w, before_ids)
+    assert rounds and all(getattr(m, "is_hostile", False) for m in rounds)
+    for m in rounds:
+        assert np.hypot(m.target_x - tx, m.target_z - tz) < 2_000.0
+    assert dd.tomahawk_ammo == before_ammo - len(rounds)
+    assert w.enemy_weapons_free is False        # order != auto-engage
+
+
+def test_director_kalibr_at_point_while_passive():
+    w = SandboxWorld()
+    sub = w.subs[0]
+    before_ammo = sub.kalibr_ammo
+    before_ids = {id(m) for m in w.missiles}
+    from world.generation import BASE_POS
+    tx, tz = float(BASE_POS[0]), float(BASE_POS[2])
+    ok, msg = w.director_order(sub.sub_id, (tx, tz))
+    assert ok, msg
+    rounds = _newest_strikes(w, before_ids)
+    assert rounds and all(getattr(m, "is_hostile", False) for m in rounds)
+    # Kalibr flies at the CEP-jittered refined aim: within the doctrine CEP
+    # band of the click, not a magic bullseye.
+    for m in rounds:
+        assert np.hypot(m.target_x - tx, m.target_z - tz) < 10_000.0
+    assert sub.kalibr_ammo == before_ammo - len(rounds)
+    # The boat betrayed itself: a launch datum entered the player picture.
+    assert any(rec.get("kind") == "datum" for rec in w.sub_contacts.values())
+
+
+@pytest.mark.slow
+def test_director_jassm_package_releases_while_passive():
+    from sim.enemy_air import FIGHTER_ALT_M, FS_PARKED
+    DT_COARSE = 0.25
+    w = SandboxWorld()
+    from world.generation import BASE_POS
+    tx, tz = float(BASE_POS[0]), float(BASE_POS[2])
+    before_ids = {id(m) for m in w.missiles}
+    ok, msg = w.director_order("fighters", (tx, tz))
+    assert ok, msg
+    jets = [f for f in w._fighter_list
+            if f._strike_target_xz is not None and f.state != FS_PARKED]
+    assert len(jets) == 2
+    for f in jets:
+        assert f.hardpoints.count("jassm") == 2
+    # Scenario forcing (the 5b e2e pattern): finish the climb, teleport to
+    # 99 km off the aim point (inside JASSM_RELEASE_RANGE_M = 150 km).
+    for f in jets:
+        f.pos[1] = FIGHTER_ALT_M
+    w.step(DT_COARSE)
+    for f in jets:
+        dx, dz = float(f.pos[0] - tx), float(f.pos[2] - tz)
+        d = max(float(np.hypot(dx, dz)), 1e-9)
+        f.pos[0] = tx + dx / d * 99_000.0
+        f.pos[2] = tz + dz / d * 99_000.0
+    released = []
+    for _ in range(int(8.0 / DT_COARSE)):
+        w.step(DT_COARSE)
+        released = _newest_strikes(w, before_ids)
+        if released:
+            break
+    assert released, "ordered JASSM package must release while passive"
+    assert all(getattr(m, "is_hostile", False) for m in released)
+
+
+def test_director_order_dead_unit_refused():
+    from sim.ships import ST_SINKING
+    w = SandboxWorld()
+    dd = _closest_destroyer(w)
+    dd.state = ST_SINKING
+    before_ids = {id(m) for m in w.missiles}
+    ok, msg = w.director_order(dd.ship_id, (0.0, 0.0))
+    assert not ok and msg
+    assert _newest_strikes(w, before_ids) == []
+
+
+def test_director_weapons_free_toggle():
+    w = SandboxWorld()
+    w.set_weapons_free(True)
+    assert w.enemy_weapons_free is True
+    w.set_weapons_free(False)
+    assert w.enemy_weapons_free is False
+
+
+# ---------------------------------------------------------------------------
 # No session end
 # ---------------------------------------------------------------------------
 
