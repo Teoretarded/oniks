@@ -49,6 +49,23 @@ no agents).  Branch feat/combat-expansion.
 - The nearest destroyer can be the TLAM-less AAW escort — tests and the
   strike scene pick an ARMED hull; the panel shows 0/"-" honestly.
 
+## Phase D findings
+
+- **Full suite red #1**: the director ActionDef was appended after the
+  SIMULATION forensics entry, splitting the ENGAGEMENT group in two —
+  the settings screen + F1 overlay derive group headers from registry
+  order (test-locked).  Moved inside the contiguous ENGAGEMENT block.
+- **Perf red**: tools/perf_sandbox_war.py (new gate: toybox live loop,
+  8x, 16 ms budget) measured TOTAL 50.0 ms/frame.  Profile named the
+  mechanism: `_publish_ew_state` -> `ew.effective_range` terrain ray
+  march at 120 Hz = 78% of the world step (only visible with a LIVE
+  jammer — combat's n_jammers=0 default never ran it).  Fix: 4 Hz
+  publish cadence at the step() call site (EW_PUBLISH_PERIOD_S); the
+  method stays a pure recompute for direct/test callers.  Re-measured:
+  sim 44.3 -> 9.7 ms, TOTAL 15.4 ms, PASS.  p95 spikes ~30 ms remain
+  (ELINT triangulation bursts on its own cadence) — absorbed by the
+  main loop's accumulator; candidate for a later spread-the-work pass.
+
 ## Known nits (logged, not blocking)
 
 1. Map label overprint near the top edge (ENEMY AIRFIELD / ENEMY RADAR /
@@ -72,7 +89,10 @@ no agents).  Branch feat/combat-expansion.
 
 ## Phase D status
 
-- [x] world/director tests green
-- [ ] full suite `pytest -q -n auto`
-- [x] visual review (7 scenes)
-- [ ] perf sanity on the live loop (existing perf harness)
+- [x] world/director tests green (22 new tests)
+- [x] full suite `pytest -q -n auto` (first run caught the keybind
+      registry split — fixed; final run green)
+- [x] visual review (7 scenes, re-shot after the perf fix — EW
+      burn-through row alive under the cadence)
+- [x] perf gate: tools/perf_sandbox_war.py PASS (15.4 ms avg vs 16 ms
+      budget after the EW-cadence fix)
