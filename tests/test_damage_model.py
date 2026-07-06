@@ -259,6 +259,37 @@ def test_subsystem_battle_deterministic():
             w.drain_events()
     assert state_digest(worlds[0]) == state_digest(worlds[1])
 
+def test_hitcam_stamp_is_write_only_and_complete():
+    """The dead round carries the full X-ray snapshot (render-layer input);
+    legacy rounds never carry it (guarded above)."""
+    ship = _destroyer()
+    r = _hit_at(ship, 0.35, -1.0)
+    apply_missile_hits([r], [ship], [], damage_model="subsystem")
+    snap = r.hitcam
+    assert snap["ship_type"] == "destroyer"
+    assert snap["penetrated"] is True
+    assert snap["breach_m2"] > 1.0
+    assert "mer2_port" in snap["new_dead"]
+    assert snap["impact"][1] < 0.0            # below the waterline
+    assert snap["catastrophe"] is False
+    assert len(snap["flood"]) == 6
+
+def test_hitcam_overlay_logic_headless():
+    """notify/tick/dismiss run GL-free (draw is the only GL-touching path)."""
+    from game.hitcam import HITCAM_S, HitCam
+    cam = HitCam(state=None)
+    assert not cam.active
+    cam.notify({"ship_type": "destroyer"})
+    assert cam.active
+    cam.tick(HITCAM_S * 0.5)
+    assert cam.active
+    cam.tick(HITCAM_S)                        # countdown expires
+    assert not cam.active and cam.snap is None
+    cam.notify({"ship_type": "destroyer"})
+    cam.dismiss()
+    assert not cam.active
+
+
 def test_digest_ignores_damage_state_in_legacy_mode():
     """Legacy digests must not change because the subsystem code exists."""
     from game.blackbox import state_digest

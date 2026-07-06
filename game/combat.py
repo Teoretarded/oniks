@@ -45,6 +45,7 @@ from game.combat_end import CombatEndOverlay
 from game.controls import PLATFORMS_COMBAT, combat_platforms
 from game.flight_recorder import FlightRecorder
 from game.forensics import ForensicsScreen
+from game.hitcam import SLOWMO_SCALE, HitCam
 from game.sandbox import AIRCRAFT_DRAW_RANGE, HINT_SECONDS, SandboxState
 from game.sensor_log import SensorLog
 from game.scoring import (
@@ -159,6 +160,12 @@ class CombatState(SandboxState):
         # side-rail button, or the AAR DEBRIEF row.
         self.forensics = ForensicsScreen(self)
         self.forensics_open = False
+        # X-RAY HIT CAM (2026-07-06 damage revamp): full-screen slow-mo
+        # cutaway on a player round's ship hit — reads the WRITE-ONLY
+        # ``m.hitcam`` stamp off closed flight-recorder rounds; the sim
+        # never pauses (time merely slows via effective_time_scale).
+        self.hitcam = HitCam(self)
+        self._hitcam_seen: set[int] = set()
         self._rail_rect = None       # map side-rail DEBRIEF button hit box
         # BLACK BOX (AI-testability build 2026-07-05): the battle ledger +
         # command recorder — every player world-verb call (keyboard, map or
@@ -306,6 +313,16 @@ class CombatState(SandboxState):
         self._accumulate_telemetry()
         # Exact fixed-step path sampling (this method runs once per PHYS_DT).
         self.flight_recorder.update(self.world)
+        # X-ray hit cam: a just-closed player round carrying the damage
+        # model's hitcam stamp opens the cutaway (subsystem mode only —
+        # legacy rounds never carry the stamp).
+        for key, rec in self.flight_recorder.tracks.items():
+            if rec["death"] is None or key in self._hitcam_seen:
+                continue
+            self._hitcam_seen.add(key)
+            snap = getattr(rec["_m"], "hitcam", None)
+            if snap is not None:
+                self.hitcam.notify(snap)
         # Raw receiver events for the forensics panes (pure observer).
         self.sensor_log.update(self.world)
         # BLACK BOX: ledger newly-closed rounds (the recorder just classified
@@ -640,6 +657,10 @@ class CombatState(SandboxState):
             # is paused; nothing tactical can be missed underneath).
             self._bug_ui_event(ev)
             return
+        if (self.hitcam.active and ev.type == pygame.KEYDOWN
+                and ev.key == pygame.K_ESCAPE):
+            self.hitcam.dismiss()       # skip the cutaway, keep fighting
+            return
         if self.forensics_open:
             if self.forensics.handle_event(ev):
                 return
@@ -672,6 +693,9 @@ class CombatState(SandboxState):
         if self._pantsir_engage_left > 0.0:
             self._pantsir_engage_left = max(
                 0.0, self._pantsir_engage_left - max(0.0, float(dt_real)))
+        # Hit-cam countdown runs in REAL seconds (it slows sim time itself,
+        # so a sim-dt clock would stretch its own life 4x).
+        self.hitcam.tick(max(0.0, float(dt_real)))
         if self.forensics_open:
             self.controls.update(dt_real)        # free-cam still flies
             self.rig.update(dt_real, self.followed)
@@ -698,6 +722,20 @@ class CombatState(SandboxState):
             self._render_bug_tail(w, h)
             return
         super().render(dt_real)
+        # X-ray hit cam over the live HUD (never over forensics / the AAR —
+        # both branches above returned already).
+        if self.hitcam.active:
+            w, h = self.window.size()
+            self.hitcam.draw(w, h)
+            self.text.flush(w, h)
+
+    def effective_time_scale(self) -> float:
+        """Sandbox scale, slowed to the cinematic rate while the X-ray hit
+        cam is up (the sim NEVER pauses — spec: slow-mo, not freeze)."""
+        scale = super().effective_time_scale()
+        if self.hitcam.active:
+            return min(scale, SLOWMO_SCALE)
+        return scale
         w, h = self.window.size()
         if self.map_open:
             self._draw_map_rail(w, h)

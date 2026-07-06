@@ -508,6 +508,8 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
     # Blast/frag channel: full warhead dose to every module on the path
     # (deterministic and cumulative — two ARMs finish what one started).
     ignition_bonus = 0.0
+    dead_before = set(st.dead_modules)
+    catastrophe = False
     for row in hit_modules:
         name, kind = row[0], row[6]
         dose = st.module_dose.get(name, 0.0) + warhead
@@ -522,7 +524,8 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
                 _apply_module_kill(ship, st, name, kind, effects_out)
                 if n > 0 and cookoff_tnt_kg(n) >= COOK_SINK_TNT_KG:
                     _catastrophe(ship, st, effects_out, impact_world)
-                    return
+                    catastrophe = True
+                    break
                 st.fire = min(1.0, st.fire + 0.5)   # deflagration fire
                 st.fire_z = z
             else:
@@ -531,30 +534,51 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
     # Structural channel: KE opens a breach.  Below-waterline entries breach
     # at full effect; internal detonations above the WL still open a reduced
     # breach (blast vents through decks/hull — Sheffield took water too).
-    if penetrates:
-        area = min(BREACH_M2_MAX, ke / KE_PER_BREACH_M2)
+    breach_area = 0.0
+    if penetrates and not catastrophe:
+        breach_area = min(BREACH_M2_MAX, ke / KE_PER_BREACH_M2)
         if y >= 0.0:
-            area *= ABOVE_WL_BREACH_FRAC
+            breach_area *= ABOVE_WL_BREACH_FRAC
         ci = st.comp_of(z)
-        st.breach[ci] += area
-        if area >= BREACH_ADJ_M2 and ci + 1 < st.n_comp:
-            st.breach[ci + 1] += area * 0.4
-        if area >= BREACH_ADJ2_M2 and ci - 1 >= 0:
-            st.breach[ci - 1] += area * 0.4
+        st.breach[ci] += breach_area
+        if breach_area >= BREACH_ADJ_M2 and ci + 1 < st.n_comp:
+            st.breach[ci + 1] += breach_area * 0.4
+        if breach_area >= BREACH_ADJ2_M2 and ci - 1 >= 0:
+            st.breach[ci - 1] += breach_area * 0.4
 
         # Internal detonation starts a fire scaled by the warhead
         # (energetics doc: internal fire is the decisive kill mechanism).
         st.fire = min(1.0, st.fire + warhead * IGNITE_PER_KG + ignition_bonus)
         st.fire_z = z
-    else:
+    elif not catastrophe:
         # Frag hit: surface fire only if it found something flammable.
         if ignition_bonus > 0.0:
             st.fire = min(1.0, st.fire + ignition_bonus)
             st.fire_z = z
 
-    if st.fire > FIRE_OUT_I and ship.state == ST_ALIVE:
+    if st.fire > FIRE_OUT_I and ship.state == ST_ALIVE and not catastrophe:
         ship.state = ST_BURNING
         ship.burn_timer = BURN_TIME     # visual ladder; step_ships refreshes
+
+    # X-RAY HIT-CAM snapshot (WRITE-ONLY: the render layer reads it off the
+    # dead round like the forensics stamps; NO sim code ever does — the
+    # digest contract is untouched).
+    grid = grid_for(ship)
+    m.hitcam = {
+        "ship_type": getattr(ship, "ship_type", "ship"),
+        "grid": grid,
+        "kinds": {row[0]: row[6] for row in grid},
+        "new_dead": sorted(st.dead_modules - dead_before),
+        "all_dead": sorted(st.dead_modules),
+        "flood": list(st.flood),
+        "fire": st.fire, "fire_z": st.fire_z,
+        "impact": (z, y, x), "ke": ke, "penetrated": penetrates,
+        "breach_m2": breach_area,
+        "weapon": str(getattr(getattr(m, "weapon", None), "weapon_id",
+                              "round")),
+        "catastrophe": catastrophe,
+        "dead_in_water": float(getattr(ship, "speed", 1.0)) == 0.0,
+    }
 
 
 # --- Per-step dynamics -------------------------------------------------------------

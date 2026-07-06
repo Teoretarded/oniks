@@ -21,7 +21,7 @@ HITCAM_S = 5.0             # real seconds the cutaway stays up
 SLOWMO_SCALE = 0.25        # sim-time multiplier while the cam is up
 
 # Palette (matches the wardroom-dusk HUD language: dark field, hot accents)
-_BG = (0.02, 0.03, 0.05, 0.82)
+_BG = (0.02, 0.03, 0.05, 0.92)
 _HULL = (0.55, 0.62, 0.70)
 _WATER = (0.16, 0.38, 0.55, 0.35)
 _MODULE = (0.20, 0.26, 0.34, 0.9)
@@ -59,12 +59,12 @@ _MODULE_LABELS = {
 }
 
 _KIND_CONSEQUENCE = {
-    "propulsion": "PROPULSION HIT — TARGET SLOWING",
+    "propulsion": "PROPULSION HIT - TARGET SLOWING",
     "sensors": "RADAR BLINDED",
     "vls": "MISSILE CELLS DESTROYED",
     "magazine": "MAGAZINE HIT",
     "c2": "COMMAND SPACES HIT",
-    "fire": "FUEL RUPTURED — FEEDING THE FIRE",
+    "fire": "FUEL RUPTURED - FEEDING THE FIRE",
     "aviation": "HANGAR HIT",
 }
 
@@ -117,8 +117,8 @@ class HitCam:
         pw = int(w * 0.56)
         ph = int(h * 0.58)
 
-        title = f"HIT — {_SHIP_NAMES.get(s['ship_type'], s['ship_type'].upper())}"
-        text.draw_text(px, int(h * 0.07), title, _ACCENT, 30)
+        title = f"HIT - {_SHIP_NAMES.get(s['ship_type'], s['ship_type'].upper())}"
+        text.draw_text(px, int(h * 0.07), title, _ACCENT, 28)
         sub = (f"{s['weapon'].upper()}  IMPACT {s['ke'] / 1e6:.0f} MJ  "
                + ("PENETRATED HULL" if s["penetrated"] else "SURFACE BURST"))
         text.draw_text(px, int(h * 0.11), sub, _INK, 18)
@@ -127,7 +127,7 @@ class HitCam:
         self._readout(text, s, px + pw + int(w * 0.04), py, w, h)
 
         text.draw_text(px, int(h * 0.88),
-                       "X-RAY HIT CAM — TIME SLOWED  (ESC TO DISMISS)",
+                       "X-RAY HIT CAM - TIME SLOWED  (ESC TO DISMISS)",
                        (0.6, 0.6, 0.6), 14)
 
     # The side-view cutaway: hull outline, waterline, module grid boxes,
@@ -167,6 +167,16 @@ class HitCam:
             text.draw_rect(x0, top, x1 - x0, keel - top,
                            (*_FLOOD, 0.35 + 0.5 * min(1.0, level)))
 
+        # Fire glow band around the burning region — drawn UNDER the module
+        # boxes so the dead-module reds stay legible on top of it.
+        fire = float(s.get("fire", 0.0))
+        if fire > 0.03:
+            fz = float(s.get("fire_z", 0.5))
+            half = 0.06 + 0.10 * fire
+            text.draw_rect(X(max(0.0, fz - half)), deck - 8,
+                           X(min(1.0, fz + half)) - X(max(0.0, fz - half)),
+                           (keel - deck) + 8, (*_FIRE, 0.14 + 0.22 * fire))
+
         # Module boxes.
         new_dead = set(s.get("new_dead", ()))
         all_dead = set(s.get("all_dead", ()))
@@ -184,15 +194,6 @@ class HitCam:
                            max(2, yb - yt - 2), col)
             text.draw_lines([(x0, yt), (x1, yt), (x1, yb), (x0, yb),
                              (x0, yt)], (*_MODULE_EDGE, 0.8), 1.0)
-
-        # Fire glow band around the burning region.
-        fire = float(s.get("fire", 0.0))
-        if fire > 0.03:
-            fz = float(s.get("fire_z", 0.5))
-            half = 0.06 + 0.10 * fire
-            text.draw_rect(X(max(0.0, fz - half)), deck - 8,
-                           X(min(1.0, fz + half)) - X(max(0.0, fz - half)),
-                           (keel - deck) + 8, (*_FIRE, 0.20 + 0.35 * fire))
 
         # Impact marker: crosshair at the entry point.
         iz, iy, _ix = s["impact"]
@@ -216,19 +217,19 @@ class HitCam:
         if not new_dead and not s.get("penetrated"):
             line("SUPERFICIAL DAMAGE", _INK)
         for name in new_dead:
-            line(_MODULE_LABELS.get(name, name.upper()) + " — DESTROYED",
+            line(_MODULE_LABELS.get(name, name.upper()) + " - DESTROYED",
                  _DEAD_NEW)
             cons = _KIND_CONSEQUENCE.get(kinds.get(name, ""), "")
             if cons:
-                line("   " + cons, _INK, 15)
+                line("   " + cons, _INK, 14)
         if s.get("breach_m2", 0.0) > 0.05:
-            line(f"HULL BREACH {s['breach_m2']:.1f} m2 — FLOODING", _FLOOD[:3])
+            line(f"HULL BREACH {s['breach_m2']:.1f} m2 - FLOODING", _FLOOD[:3])
         if s.get("fire", 0.0) > 0.05:
-            line(f"FIRE ONBOARD — INTENSITY {int(s['fire'] * 100)}%",
+            line(f"FIRE ONBOARD - INTENSITY {int(s['fire'] * 100)}%",
                  _FIRE[:3])
         if s.get("dead_in_water"):
             line("TARGET DEAD IN THE WATER", _KILL)
         if s.get("catastrophe"):
             y += lh // 2
-            line("MAGAZINE DETONATION", _KILL, 26)
-            line("SHIP IS LOST", _KILL, 26)
+            line("MAGAZINE DETONATION", _KILL, 28)
+            line("SHIP IS LOST", _KILL, 28)
