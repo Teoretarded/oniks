@@ -627,3 +627,12 @@ within hours of existing.
 **Gates:** digest 7d5716..06add byte-identical (NCTR is player-picture
 only); smoke 84/84; probes ALL PASS (blackbox live + overlaps both
 layouts); 240 targeted green; full suite halves in the session report.
+
+**Design round 2026-07-06 (user-requested):** 3 variations x 3 undesigned
+panes as HTML mocks in `Assets of oinks/proto_panels/` (+ renders/, README):
+SENSOR RECORD strip (pen lanes / stamped tape / micro-ledger), BLACK BOX
+(teleprinter tape / twin column / density deck — all fed by the SHIPPED
+BattleLedger JSONL kinds), SENSORS you-deduce (strip chart + call slips /
+feed + cluster cards / plot board). Ledger-paper language throughout, fog
+law by construction, every element maps to existing data channels. No game
+code — awaiting the user's pick per the locked prototype-first workflow.
