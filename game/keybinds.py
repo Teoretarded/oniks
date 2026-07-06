@@ -103,6 +103,18 @@ ACTIONS: tuple[ActionDef, ...] = (
     # no fix the actions are graceful no-op hints (SANDBOX worlds too).
     ActionDef("buoy_drop", "SONOBUOY DROP (MAP)", "ENGAGEMENT", pygame.K_u),
     ActionDef("asw_launch", "ASW LAUNCH", "ENGAGEMENT", pygame.K_k),
+    # RED-FORCE DIRECTOR (sandbox war 2026-07-06): I opens the director
+    # panel on the tactical map — order enemy ships/planes/subs to launch
+    # at a clicked map point, or flip the global auto-engage.  An overlay
+    # on the map, not a menu — the sim NEVER pauses under it.  I is
+    # unclaimed by every other default; outside the WAR SANDBOX (combat,
+    # where the red force answers to its own commander) the action is a
+    # graceful no-op hint, same convention as forensics-in-sandbox.
+    # Registry position: INSIDE the contiguous ENGAGEMENT block — the
+    # settings screen + F1 overlay derive their group headers from
+    # registry order (one block per group, test-locked).
+    ActionDef("director", "RED-FORCE DIRECTOR (MAP)", "ENGAGEMENT",
+              pygame.K_i),
     # M6 per-battery STATUS PANEL: toggles the EXPANDED full battery board
     # (every Oniks/S-300 tube's LOADED/RELOADING/EMPTY + the magazine pool +
     # refill timers), drawn like the F1 overlay.  Player-only own-force
@@ -115,15 +127,6 @@ ACTIONS: tuple[ActionDef, ...] = (
     # NEVER pauses under it.  J is unclaimed by every other default; in
     # SANDBOX (no flight recorder) the action is a graceful no-op.
     ActionDef("forensics", "FORENSICS / DEBRIEF", "SIMULATION", pygame.K_j),
-    # RED-FORCE DIRECTOR (sandbox war 2026-07-06): I opens the director
-    # panel on the tactical map — order enemy ships/planes/subs to launch
-    # at a clicked map point, or flip the global auto-engage.  An overlay
-    # on the map, not a menu — the sim NEVER pauses under it.  I is
-    # unclaimed by every other default; outside the WAR SANDBOX (combat,
-    # where the red force answers to its own commander) the action is a
-    # graceful no-op hint, same convention as forensics-in-sandbox.
-    ActionDef("director", "RED-FORCE DIRECTOR (MAP)", "ENGAGEMENT",
-              pygame.K_i),
     # Command-board map test (2026-07-05): F4 flips the tactical map between
     # the new BOARD layout and the CLASSIC one (persisted, the revert
     # switch); F5 toggles the launch-cinema PiP on the map.  Both free keys.
