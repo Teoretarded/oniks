@@ -405,6 +405,11 @@ AIRFIELD_FIGHTERS = 2       # parked at the airfield at spawn
 CARRIER_FIGHTERS = 2        # parked on the carrier at spawn
 
 INTEL_CHECK_PERIOD_S = 1.0  # s between fixed-installation intel checks
+
+# UI-only EW summary refresh (see _publish_ew_state): 4 Hz is far above
+# anything the HUD burn-through row / map jam wedge can show moving, and
+# it keeps the terrain-marching effective_range call off the 120 Hz path.
+EW_PUBLISH_PERIOD_S = 0.25
 #                             (cheap: a range gate rejects the radar path
 #                             instantly; SAR is a hypot)
 
@@ -944,6 +949,7 @@ class CombatWorld(WorldState):
             "active": False, "burn_through_m": None,
             "jammer_fix_xz": None, "jammer_bearing": None,
         }
+        self._ew_publish_next_t = 0.0   # UI cadence gate (EW_PUBLISH_PERIOD_S)
 
         # ---- Phase 5a: enemy air order of battle ----
         ax, az = AIRFIELD_XZ
@@ -2011,7 +2017,14 @@ class CombatWorld(WorldState):
         enemy jammer the state is INACTIVE and the legacy byte-identical path is
         preserved (the EW field model is never consulted).  The burn-through km
         comes from sim/ew.effective_range for the player ship-ring radar under
-        the live enemy jammers — the SINGLE SOURCE OF TRUTH (never recomputed)."""
+        the live enemy jammers — the SINGLE SOURCE OF TRUTH (never recomputed).
+
+        This method ALWAYS recomputes (direct callers — tests — get a fresh
+        read); the 120 Hz step throttles it through EW_PUBLISH_PERIOD_S at
+        the call site (sandbox-war perf fix 2026-07-06: effective_range
+        terrain-ray-marches height_scalar ~180x per call, and with a live
+        jammer that was 78% of the whole world step — measured 2.8 ms ->
+        0.58 ms per step with the gate)."""
         jammers = self._active_enemy_jammers()
         if not jammers:
             self.ew_state = {
@@ -4009,5 +4022,9 @@ class CombatWorld(WorldState):
         # jammers + the recon/SIGINT picture are current this step.  Pure read:
         # it derives the burn-through from sim/ew (single source of truth) and
         # the believed jammer fix/bearing from the ELINT picture — it touches no
-        # sim state, so the default battle stays byte-identical.
-        self._publish_ew_state()
+        # sim state, so the default battle stays byte-identical.  Throttled to
+        # EW_PUBLISH_PERIOD_S: a UI summary has no business terrain-marching at
+        # 120 Hz (the sandbox-war perf gate; _publish_ew_state docstring).
+        if self.sim_time >= self._ew_publish_next_t:
+            self._ew_publish_next_t = self.sim_time + EW_PUBLISH_PERIOD_S
+            self._publish_ew_state()

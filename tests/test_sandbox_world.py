@@ -307,6 +307,27 @@ def test_director_weapons_free_toggle():
 
 
 # ---------------------------------------------------------------------------
+# EW summary cadence (perf fix 2026-07-06): throttled, never silenced
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_ew_state_still_publishes_under_cadence():
+    """The 4 Hz publish gate must not kill the summary: with the toybox's
+    live jammer the state goes ACTIVE with a real burn-through within the
+    first second, and keeps refreshing (jammer death clears it)."""
+    w = SandboxWorld()
+    for _ in range(int(1.0 / DT)):
+        w.step(DT)
+    assert w.ew_state["active"] is True
+    assert w.ew_state["burn_through_m"] is not None
+    for j in w._jammers:
+        j.emitter.emitting = False      # the jammer_lift order's own gate
+    for _ in range(int(1.0 / DT)):
+        w.step(DT)
+    assert w.ew_state["active"] is False
+
+
+# ---------------------------------------------------------------------------
 # No session end
 # ---------------------------------------------------------------------------
 
