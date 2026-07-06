@@ -223,20 +223,35 @@ STALL_MACH_FRAC = 0.6      # fraction of lo cruise speed below which lift fades
 STALL_REF_SOUND = 340.3    # m/s, fixed sea-level a (deterministic reference)
 
 # Terminal evasive weave (Task RTG, oniks_reference.md "erratic terminal
-# maneuvers"): lateral S-curve jinks across the last 12 km, full amplitude
-# between WEAVE_FULL_RANGE and the ramp-in band, tapered to ZERO by 1.5 km
-# so the final run is clean. The jink is applied as a kinematic cross-track
-# OVERLAY on top of the homing core (stripped before each integration step,
-# re-applied after): the displacement profile is exact and deterministic,
-# the g-limited guidance never fights it, and the hit is untouched — the
-# rudder-driven jink authority is modeled, not re-derived from the 11 g
-# airframe clamp (a 200 m / 4 s weave is ~5x that limit; cinematic spec).
+# maneuvers"): lateral S-curve jinks across the last 12 km, tapered to
+# ZERO by 1.5 km so the final run is clean.
+#
+# 2026-07-06 PHYSICS FIX (probe_missile_physics: the old kinematic
+# position/velocity OVERLAY added up to +69 m/s of PHANTOM speed at the
+# weave peaks and cost zero energy — the user's "swerves without losing
+# speed" report, measured).  The weave is now a cross-track ACCELERATION
+# COMMAND summed into the guidance output BEFORE the q-limit clamp, the
+# autopilot lag and the induced-drag charge — the jink is genuinely flown:
+# it can never exceed what the fins have at this q, it takes ~tau to bite,
+# and every meter of sideways lift is paid for in drag (the ramjet burns
+# fuel holding Mach through it).  Displacement amplitude is a/omega^2
+# shaped by the PN loop fighting it — tuned by probe to the same 150-250 m
+# excursion contract the overlay met (tests/test_retarget.py).
 WEAVE_RANGE = 12_000.0       # m range-to-aim at which the jinks start
 WEAVE_RAMP_IN = 1_500.0      # m of range over which the amplitude ramps in
 WEAVE_FULL_RANGE = 4_500.0   # m: full amplitude until here ...
 WEAVE_END_RANGE = 1_500.0    # m: ... then tapered to zero by here
-WEAVE_AMP = 200.0            # m cross-track amplitude (plan: 150-250)
-WEAVE_OMEGA = 2.0 * math.pi / 4.0   # rad/s (plan: ~4 s period)
+WEAVE_G = 15.0               # g of COMMANDED cross-track weave authority.
+                             # Deliberately above the q-limit (~14 g at a
+                             # Mach-2 skim): the command rides the fin stops
+                             # like a real terminal S-maneuver and the
+                             # airframe delivers what physics allows.
+                             # PROBE-TUNED (probe_missile_physics 2026-07-06):
+                             # 12 g -> 118 m excursion, 15 g -> 201 m (the
+                             # 150-250 m contract), 20 g -> 446 m; speed
+                             # honestly bleeds 680->657 m/s mid-weave.
+WEAVE_OMEGA = 2.0 * math.pi / 10.0  # rad/s: 10 s period — flown against the
+                             # steer loop this sweeps ~200 m cross-track
 WEAVE_PHASE_STEP = 2.399963229728653   # rad per salvo ordinal (golden angle)
 
 _UP = np.array([0.0, 1.0, 0.0])
@@ -466,8 +481,6 @@ class Missile:
         self.salvo = int(salvo)
         self.weave_phi = (int(salvo) * WEAVE_PHASE_STEP) % (2.0 * math.pi)
         self._weave_t = 0.0
-        self._weave_x = self._weave_z = 0.0
-        self._weave_vx = self._weave_vz = 0.0
         # M4-B loitering swarm: an optional COMMANDED ground speed for the
         # cruise Mach-hold (sim/swarm.compute_swarm_speeds sets it per round so
         # a bundle reaches the aim point simultaneously).  UNSET (None) is the
@@ -777,17 +790,6 @@ class Missile:
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
 
-        # Strip the terminal weave overlay (Task RTG): the integration below
-        # always runs on the clean homing core; the overlay is re-applied at
-        # the bottom of the step from the fresh range/clock.
-        if self._weave_x != 0.0 or self._weave_z != 0.0:
-            self.pos[0] -= self._weave_x
-            self.pos[2] -= self._weave_z
-            self.vel[0] -= self._weave_vx
-            self.vel[2] -= self._weave_vz
-            self._weave_x = self._weave_z = 0.0
-            self._weave_vx = self._weave_vz = 0.0
-
         alt = float(self.pos[1])
         vx, vy, vz = self.vel.tolist()         # plain floats: scalar-fast math
         speed = math.sqrt(vx * vx + vy * vy + vz * vz)
@@ -926,6 +928,14 @@ class Missile:
             qs = q * w.ref_area
             drag = qs * cd_from_mach_scalar(m_now)
             gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
+            if self.phase == PH_TERMINAL:
+                # Terminal evasive weave as a GUIDANCE command: it enters
+                # the same q-limit clamp / autopilot lag / induced-drag
+                # charge as the homing accel below — genuinely flown, never
+                # free (2026-07-06 physics fix; see the WEAVE_* block).
+                wax, waz = self._weave_accel(dt, vx, vz)
+                gx += wax
+                gz += waz
             # --- energy model (sim/aero.py; research doc §3-§5) ---
             # 1. q-limit: the airframe can only lift q*S*CLmax — at low
             #    speed or high altitude the rated max_g simply is not there.
@@ -994,10 +1004,6 @@ class Missile:
                 self.alive = False
                 return
 
-        # --- terminal weave overlay (Task RTG) ---
-        if self.phase == PH_TERMINAL:
-            self._apply_weave(dt, vx, vz)
-
         self._update_body(dt)
 
     def _update_body(self, dt):
@@ -1029,33 +1035,27 @@ class Missile:
         self.body_dir[1] = by
         self.body_dir[2] = bz
 
-    def _apply_weave(self, dt, vx, vz):
-        """Re-apply the evasive S-curve as a cross-track overlay on the core
-        state: amplitude ramps in below WEAVE_RANGE, holds WEAVE_AMP, tapers
-        to zero by WEAVE_END_RANGE so the final run is straight. Pure scalar
-        math (one sin/cos per terminal step — Task 22 hot-loop style)."""
+    def _weave_accel(self, dt, vx, vz):
+        """The evasive S-curve as a cross-track ACCELERATION command:
+        authority ramps in below WEAVE_RANGE, holds WEAVE_G, tapers to zero
+        by WEAVE_END_RANGE so the final run is straight.  Returned raw —
+        the caller sums it with the homing command and the shared q-limit /
+        autopilot-lag / induced-drag chain makes it physical.  Pure scalar
+        math (one sin per terminal step — Task 22 hot-loop style)."""
         self._weave_t += dt
         tgt = self.locked_ship.pos if self.locked_ship is not None \
             else self.target_point
         d = math.hypot(float(tgt[0]) - self.pos[0],
                        float(tgt[2]) - self.pos[2])
         if d >= WEAVE_RANGE or d <= WEAVE_END_RANGE:
-            return
+            return 0.0, 0.0
         hsp = math.hypot(vx, vz)
         if hsp < 1e-9:
-            return
-        amp = WEAVE_AMP * min((WEAVE_RANGE - d) / WEAVE_RAMP_IN,
-                              (d - WEAVE_END_RANGE)
-                              / (WEAVE_FULL_RANGE - WEAVE_END_RANGE), 1.0)
-        ph = WEAVE_OMEGA * self._weave_t + self.weave_phi
-        y = amp * math.sin(ph)
-        ydot = amp * WEAVE_OMEGA * math.cos(ph)
+            return 0.0, 0.0
+        env = min((WEAVE_RANGE - d) / WEAVE_RAMP_IN,
+                  (d - WEAVE_END_RANGE)
+                  / (WEAVE_FULL_RANGE - WEAVE_END_RANGE), 1.0)
+        a = WEAVE_G * GRAVITY * env * math.sin(
+            WEAVE_OMEGA * self._weave_t + self.weave_phi)
         pxh, pzh = vz / hsp, -vx / hsp         # horizontal right-hand perp
-        self._weave_x = pxh * y
-        self._weave_z = pzh * y
-        self._weave_vx = pxh * ydot
-        self._weave_vz = pzh * ydot
-        self.pos[0] += self._weave_x
-        self.pos[2] += self._weave_z
-        self.vel[0] += self._weave_vx
-        self.vel[2] += self._weave_vz
+        return pxh * a, pzh * a

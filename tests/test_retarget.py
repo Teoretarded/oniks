@@ -331,3 +331,39 @@ def test_weaving_flight_bit_deterministic():
             m.update(DT, w)
         runs.append(m.impact_pos.copy())
     assert runs[0] is not None and np.array_equal(runs[0], runs[1])
+
+
+def test_terminal_weave_is_flown_not_free():
+    """2026-07-06 physics fix (probe-measured): the old kinematic weave
+    OVERLAY added up to +69 m/s of phantom speed at the jink peaks.  The
+    flown weave must obey energy: in a LEVEL lo-lo terminal the speed never
+    rises meaningfully above window entry (thrust holds Mach, turns bleed),
+    and the achieved acceleration never exceeds the physical q-limit.
+    Two-sided: the weave must also genuinely BLEED speed at mid-weave
+    (a free ride would hold it perfectly) — the jinks cost energy."""
+    from sim.aero import q_scalar
+    target = np.array([0.0, 0.0, 90_000.0])
+    m = _launch("lo-lo", target=tuple(target))
+    w = _World()
+    v_entry = None
+    v_min = float("inf")
+    v_max = 0.0
+    for _ in range(int(220 / DT)):
+        m.update(DT, w)
+        if not m.alive:
+            break
+        d = math.hypot(float(m.pos[0]) - target[0],
+                       float(m.pos[2]) - target[2])
+        if m.phase == PH_TERMINAL and WEAVE_END_RANGE < d < WEAVE_RANGE:
+            speed = float(np.linalg.norm(m.vel))
+            if v_entry is None:
+                v_entry = speed
+            v_min = min(v_min, speed)
+            v_max = max(v_max, speed)
+            # Physical g-limit honesty at every sample in the weave window.
+            a_ach = math.sqrt(m._ap_x ** 2 + m._ap_y ** 2 + m._ap_z ** 2)
+            qs = q_scalar(speed, max(float(m.pos[1]), 0.0)) * ONIKS.ref_area
+            assert a_ach <= qs * m._cl_max / m.mass + 0.5
+    assert v_entry is not None                      # the weave window ran
+    assert v_max <= v_entry + 8.0                   # no phantom energy
+    assert v_min <= v_entry - 5.0                   # the jinks COST speed
