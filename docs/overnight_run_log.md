@@ -636,3 +636,32 @@ BattleLedger JSONL kinds), SENSORS you-deduce (strip chart + call slips /
 feed + cluster cards / plot board). Ledger-paper language throughout, fog
 law by construction, every element maps to existing data channels. No game
 code — awaiting the user's pick per the locked prototype-first workflow.
+
+## SESSION 2026-07-06 (evening) — forensics panes go LIVE (approved C/C/C)
+
+User approved variation C of all three proto_panels mocks; implemented into
+the in-game forensics screen, every element fed by REAL live data:
+- `game/sensor_log.py` (new, TDD 10 tests): raw receiver-event recorder, a
+  pure observer over the PLAYER PICTURE stores per fixed sim step —
+  contacts.tracks (radar / launch-warn channel via the round's own
+  launch_warning flag), emitter_contacts (ELINT), sub_contacts (acoustic
+  fix/datum + quality). 30 s per-contact cadence cap (a held sub fix logged
+  ~320 rows before the cap), ring buffer, deterministic, fog by
+  construction. Wired into CombatState.sim_step.
+- SENSOR RECORD micro-ledger (LEDGER tab): typed raw-receiver table in the
+  selected round's window, '+N EARLIER' spill, recorder close-out struck red.
+- BLACK BOX density deck (tab 2, full band — side plot skipped on full-band
+  tabs): kind-per-lane density of ledger.records over the whole battle
+  (hash lane = 5 s integrity heartbeat) + exact window table; LEFT/RIGHT
+  moves the window; fmt_ledger_row FOG-GATES unobserved loss causes
+  mid-battle (8 pane tests).
+- SENSORS plot board (tab 3, full band): belief paints aging by opacity,
+  launch-cue rays (cue moment only), ELINT rays/diamonds, acoustic
+  uncertainty rings, drop X marks; legend + newest-first feed. PENCIL CALLS
+  + AAR GRADING deferred to the next pass (grading rules undesigned —
+  stated on the pane).
+Gates: digest df9dbde3..7b2321 (current baseline) unchanged; targeted 71
+green; screenshots 16-19 regenerated + compared against the approved mocks.
+KNOWN PRE-EXISTING smoke red (verified via git stash at tip, NOT mine, NOT
+masked): '40N6 kills the AWACS beyond 200 km on the forced track' — 83/84.
+Likely energy-model aero fallout; needs its own sim-side session.
