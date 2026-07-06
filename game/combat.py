@@ -83,7 +83,13 @@ class CombatState(SandboxState):
         available here; falls back to the CombatWorld default when None (the
         screen-less smoke/test path)."""
         config = getattr(self, "_config", None)
-        return CombatWorld(config) if config is not None else CombatWorld()
+        if config is not None:
+            return CombatWorld(config)
+        # 2026-07-06 damage revamp: even the screen-less fallback battle
+        # PLAYS the subsystem model (permanent in every mode); the pure
+        # CombatWorld() default stays "legacy" for the headless test suite.
+        from world.combat_config import clamp_config
+        return CombatWorld(clamp_config(damage_model="subsystem"))
 
     def __init__(self, app, config=None):
         # _config must exist before super().__init__ -> _build_meshes/

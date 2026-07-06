@@ -159,6 +159,8 @@ def next_config(campaign: CampaignState,
     fields.update(_escalated_counts(base, campaign.battle_idx))
     fields["seed"] = (int(base.seed) if campaign.battle_idx == 0
                       else derive_seed(campaign.seed, campaign.battle_idx))
+    # 2026-07-06 damage revamp: campaign battles play the subsystem model.
+    fields["damage_model"] = "subsystem"
     return clamp_config(**fields)
 
 

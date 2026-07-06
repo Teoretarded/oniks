@@ -553,6 +553,9 @@ class CombatSetupState(GameState):
             kwargs[field] = (float(v)
                              if isinstance(getattr(defaults, field), float)
                              else int(v))
+        # 2026-07-06 damage revamp: every setup-screen battle plays the
+        # subsystem model (not a spinner — "legacy" is a test-compat flag).
+        kwargs["damage_model"] = "subsystem"
         return clamp_config(**kwargs)
 
     # ------------------------------------------------------------------ render

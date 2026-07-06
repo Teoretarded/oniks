@@ -58,6 +58,9 @@ DIRECTOR_PACKAGE_JETS = 2
 SANDBOX_SEED = 7
 SANDBOX_CONFIG = clamp_config(
     seed=SANDBOX_SEED,
+    # 2026-07-06 damage revamp: the game PLAYS the subsystem model in every
+    # mode; "legacy" survives only as the test-compat flag.
+    damage_model="subsystem",
     # Red force.
     n_destroyers=3,
     n_flagship=1,
