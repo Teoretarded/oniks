@@ -88,13 +88,15 @@ class App:
     # ------------------------------------------------------- state switching
 
     def start_sandbox(self) -> None:
-        """Menu SANDBOX item: start a fresh game session."""
-        from game.sandbox import SandboxState   # after the GL context exists
+        """Menu SANDBOX item: start a fresh WAR-SANDBOX session (the
+        2026-07-06 port: the sandbox runs the full combat toybox — passive
+        red force, all-seeing map, director on I — on the combat shell)."""
+        from game.sandbox_war import SandboxWarState  # after the GL context
         self._draw_loading_frame()          # world build takes ~2 s: show it
         if self.sandbox is not None:
             self.sandbox.dispose()          # free the replaced session's GL
         self.paused = False
-        self.sandbox = SandboxState(self)
+        self.sandbox = SandboxWarState(self)
         self.states.switch(self.sandbox)
 
     def open_combat_setup(self) -> None:

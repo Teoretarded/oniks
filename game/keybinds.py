@@ -115,6 +115,15 @@ ACTIONS: tuple[ActionDef, ...] = (
     # NEVER pauses under it.  J is unclaimed by every other default; in
     # SANDBOX (no flight recorder) the action is a graceful no-op.
     ActionDef("forensics", "FORENSICS / DEBRIEF", "SIMULATION", pygame.K_j),
+    # RED-FORCE DIRECTOR (sandbox war 2026-07-06): I opens the director
+    # panel on the tactical map — order enemy ships/planes/subs to launch
+    # at a clicked map point, or flip the global auto-engage.  An overlay
+    # on the map, not a menu — the sim NEVER pauses under it.  I is
+    # unclaimed by every other default; outside the WAR SANDBOX (combat,
+    # where the red force answers to its own commander) the action is a
+    # graceful no-op hint, same convention as forensics-in-sandbox.
+    ActionDef("director", "RED-FORCE DIRECTOR (MAP)", "ENGAGEMENT",
+              pygame.K_i),
     # Command-board map test (2026-07-05): F4 flips the tactical map between
     # the new BOARD layout and the CLASSIC one (persisted, the revert
     # switch); F5 toggles the launch-cinema PiP on the map.  Both free keys.

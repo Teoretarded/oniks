@@ -577,6 +577,14 @@ class SandboxState(GameState):
         no-op hint in SANDBOX, same convention as toggle_forensics."""
         self.show_hint("BUG REPORT: COMBAT ONLY")
 
+    def toggle_director(self) -> None:
+        """I (director binding): the RED-FORCE DIRECTOR panel lives on the
+        WAR SANDBOX's tactical map (game/sandbox_war.py overrides this) —
+        graceful no-op hint everywhere else, same convention as
+        toggle_forensics.  In COMBAT the red force answers to its own
+        commander, never to the player."""
+        self.show_hint("DIRECTOR: WAR SANDBOX ONLY")
+
     def toggle_map_layout(self) -> None:
         """F4 (map_layout binding): flip the tactical map BOARD <-> CLASSIC
         (the 2026-07-05 command-board test's revert switch, persisted)."""
