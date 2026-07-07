@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from sim.clutter import CLUTTER_ALT_M, sea_clutter_range_factor
 from world.generation import terrain_height_scalar
 
 HORIZON_K = 4_120.0     # m per sqrt(m): d = K*(sqrt(h_radar) + sqrt(h_tgt))
@@ -106,7 +107,7 @@ class Radar:
 
     def __init__(self, radar_id: str, pos, antenna_m: float, ranges: dict,
                  height_fn=terrain_height_scalar, scan: ScanDef = STARING,
-                 band: str = "S", phase0_s: float = 0.0):
+                 band: str = "S", phase0_s: float = 0.0, sea_state: int = 3):
         self.radar_id = radar_id
         self.pos = np.asarray(pos, dtype=np.float64)
         self.antenna_m = float(antenna_m)
@@ -123,6 +124,10 @@ class Radar:
         self.band = band
         self.phase0_s = float(phase0_s)
         self.boresight_deg = 0.0
+        # F3-P2 sea clutter (sim/clutter.py): Douglas state this radar's sea
+        # sits at.  Default 3 == identity by construction (the factor is
+        # exactly 1.0), so every existing construction is byte-identical.
+        self.sea_state = int(sea_state)
         # M3-terrain F3: the terrain height function for this radar's LOS
         # check. Default == the module shim terrain_height_scalar, so existing
         # callers stay byte-identical; world/combat.py threads the active
@@ -183,6 +188,13 @@ class Radar:
         else:
             from sim import ew
             max_range = ew.effective_range(self, size_class, target_pos, jammers)
+        # F3-P2 sea clutter: a low-flying small target competes with the
+        # sea return (docs/research/sea_clutter.md).  State 3 (the default)
+        # multiplies by exactly 1.0 — identity by construction; ships/
+        # aircraft at altitude and surface hulls are untouched.
+        tgt_alt = float(target_pos[1])
+        if size_class in ("missile", "stealth") and tgt_alt < CLUTTER_ALT_M:
+            max_range *= sea_clutter_range_factor(self.sea_state, tgt_alt)
         dx = float(target_pos[0]) - float(self.pos[0])
         dz = float(target_pos[2]) - float(self.pos[2])
         rng = math.hypot(dx, dz)

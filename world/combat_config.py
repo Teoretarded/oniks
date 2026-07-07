@@ -187,6 +187,13 @@ class CombatConfig:
     # bands.  The GAME layer always passes "scanned" — same pattern as
     # damage_model: "functional" is a compatibility flag, not a UI mode.
     radar_model: str = "functional"
+    # F3-P1/P2 Douglas sea state (docs/research/sea_clutter.md).  DEFAULT 3
+    # ("slight") is today's implicit sea: sea_amp_scale(3) == 1.0 and
+    # sea_clutter_range_factor(3, ·) == 1.0 EXACTLY, so the default battle
+    # is byte-identical by construction.  Higher states raise the visual
+    # swell (u_sea_amp) and cut radar detection of low-flying missiles
+    # (sim/clutter.py inside Radar.detects) — one sea, both sides.
+    sea_state: int = 3
 
 
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
@@ -273,6 +280,8 @@ CLAMP_RELOAD_S:      tuple = (5, 600)
 # would silently swap the out-of-the-box battle to a terrain map). Ceiling 3
 # (FJORD COAST) — exactly len(MAP_PRESET_NAMES) - 1.
 CLAMP_MAP_PRESET:    tuple = (0, 3)
+# F3-P1 Douglas sea state 0 (glass) .. 9 (phenomenal); default 3 = identity.
+CLAMP_SEA_STATE:     tuple = (0, 9)
 
 # M5 submarine warfare + ASW: every floor is 0 (OFF) so the byte-identical
 # default survives a clamp_config round-trip — the setup-default path runs every
@@ -359,6 +368,7 @@ def clamp_config(
     beachhead_grace_s: float = CombatConfig.beachhead_grace_s,
     damage_model: str = CombatConfig.damage_model,
     radar_model: str = CombatConfig.radar_model,
+    sea_state: int = CombatConfig.sea_state,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
     legal UI ranges.  Intended for the setup screen: pass raw slider values,
@@ -445,6 +455,7 @@ def clamp_config(
         damage_model=("legacy" if damage_model == "legacy" else "subsystem"),
         radar_model=("functional" if radar_model == "functional"
                      else "scanned"),
+        sea_state=clamp_field(int(sea_state), *CLAMP_SEA_STATE),
     )
 
 

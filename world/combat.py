@@ -1146,6 +1146,29 @@ class CombatWorld(WorldState):
         self._beachhead_left: float | None = None
         self._beachhead_lost = False  # latched True only on an honest expiry
 
+        # ---- F3-P2: one sea, both sides — thread the battle's Douglas state
+        # onto every radar built above (default 3 keeps the factor at exactly
+        # 1.0: byte-identical).  Fighter NOSE radars are deliberately left at
+        # the default: lookdown clutter for an airborne AESA is a different
+        # (Doppler-notch) problem, documented in docs/research/sea_clutter.md.
+        self.sea_state = int(getattr(config, "sea_state", 3))
+        for r in self._all_sea_state_radars():
+            r.sea_state = self.sea_state
+
+    def _all_sea_state_radars(self):
+        """Every surface/surveillance radar affected by sea clutter: the
+        player net (station(s), fleet SPY-1s, Pantsir, Buk 9S36, CBR), the
+        station engagement FCR, enemy ground EW radars, enemy ship arrays
+        and the AWACS rotodome."""
+        radars = list(self.radar_net.radars)
+        radars.append(self.station_engagement)
+        radars.extend(self._enemy_ground_radars)
+        radars.extend(s.radar for s in self.ships
+                      if getattr(s, "radar", None) is not None)
+        if getattr(self, "awacs", None) is not None:
+            radars.append(self.awacs.radar)
+        return radars
+
     # --- M6 campaign carry-forward -----------------------------------------
     def apply_initial_state(self, initial_state: dict | None) -> None:
         """Campaign carry-forward: overwrite the offensive magazine pools from a
