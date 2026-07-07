@@ -256,3 +256,56 @@ Fix path for the next session (in order):
    the v5/v6 plan escape hatches.
 Also: re-run perf_clouds --mist on a QUIET machine before/after (all
 round-6/7 numbers were load-polluted).
+
+## Round 7b - ungated step LOD + empty-only skip
+
+Implemented in `world/clouds.py`:
+- H1: removed the `lod_gate`; `lod_b`, `lod_d`, and `lod_w` now always
+  follow `dt_step`.
+- H1 root fix: `sun_transmittance` now takes the caller's `dt_step` and
+  passes it through to all `density_at` taps, so view and sun march read
+  the same density resolution.
+- H2: mist skip-ahead now resets on any `d >= 0.003`; skip growth only
+  happens through essentially empty samples.
+
+Isolation note: H2-only was tested briefly. It reduced approach component
+jump only 23 -> 19, so it is not the primary fix. H1+H2 reduced jump 23
+-> 6 and frame diff 8.45 -> 3.34, so H1 is the main approach-morphing
+mechanism.
+
+Approach probe (`python -m tools.probe_cloud_flight --spec docs/examples/flight_approach.json`):
+
+| run | frame diff mean/max | max comp jump | worst mask drop | worst mask step | mask start/end |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 8.45 / 58.11 | 23 | 0.5913 | 0.5913 | 0.2570 / 0.4166 |
+| H2 only | 7.48 / 57.71 | 19 | 0.6004 | 0.6004 | 0.2580 / 0.4296 |
+| H1+H2 final | 3.34 / 59.74 | 6 | 0.6623 | 0.6623 | 0.2688 / 0.3088 |
+
+Stationary watch (`python -m tools.probe_cloud_flight --spec docs/examples/flight_morph_watch.json`):
+
+| run | diff mean/max | coh 0-37 | coh 0-75 | coh 0-150 | coh 0-299 | comp jump |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| before | 0.33 / 0.35 | 0.962 | 0.922 | 0.794 | 0.578 | 2 |
+| H1+H2 final | 0.09 / 0.12 | 0.929 | 0.877 | 0.770 | 0.608 | 1 |
+
+Verdicts:
+- H1: confirmed for approach morphing (large reduction in component
+  jumps and frame diff), but it regresses stationary coherence at 0-37,
+  0-75, and 0-150 and is much more expensive in mist.
+- H2: weak contributor; useful invariant for edge stepping, but not the
+  main approach fix by itself.
+
+Perf (`python -m tools.perf_clouds 300 --mist`):
+
+| run | clouds avg/p95 | frame avg | result |
+| --- | ---: | ---: | --- |
+| H1+H2 final | 18.89 / 29.59 ms | 40.90 ms | FAIL vs 3.0 / 5.0 ms |
+
+Smoke sweep (`python -m tools.probe_cloud_sweep 7`) completed and wrote:
+`renders/cloud_sweep_2km_seed7.png`, `4km`, `10km`, `30km`, and `50km`.
+
+Status: BLOCKED. Approach morphing improves clearly, but two required
+gates fail: stationary coherence regresses at three measured pairs, and
+mist GPU time is far over budget. The next pass needs a cheaper
+mean-preserving resolution strategy, likely capped LOD or half-res
+clouds, rather than fully ungated LOD at full resolution.

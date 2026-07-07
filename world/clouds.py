@@ -350,14 +350,12 @@ float height_profile(float hfrac, float ctype, float top){
 float density_at(vec3 wp, float view_t, float dt_step){
     float hfrac = (wp.y - u_cloud_base) / (u_cloud_top - u_cloud_base);
     if (hfrac < 0.0 || hfrac > 1.0) return 0.0;
-    // Engage the step LOD only at DISTANCE: near the camera the sun march
-    // reads fine density, and a blurred VIEW density disagrees with it in
-    // the crevices (fine says gap, blurred says cloud) -> every crevice
-    // shaded as deep interior = black marbling (v6 sweep iterations 2-5).
-    float lod_gate = smoothstep(8000.0, 25000.0, view_t);
-    float lod_b = clamp(log2(dt_step / 46.9), 0.0, 6.0) * lod_gate;
-    float lod_d = clamp(log2(dt_step / 37.5), 0.0, 4.0) * lod_gate;
-    float lod_w = clamp(log2(dt_step / 586.0), 0.0, 5.0) * lod_gate;
+    // Step-matched LOD is shape-safe only when every density query,
+    // including sun transmittance, reads the same resolution for this
+    // march sample.  Distance may change resolution, not structure.
+    float lod_b = clamp(log2(dt_step / 46.9), 0.0, 6.0);
+    float lod_d = clamp(log2(dt_step / 37.5), 0.0, 4.0);
+    float lod_w = clamp(log2(dt_step / 586.0), 0.0, 5.0);
     vec3 drift = vec3(u_time * WIND_MS, 0.0, u_time * WIND_MS * 0.35);
     vec3 cs = wp + drift;
     vec2 wuv = cs.xz / WEATHER_TILE;
@@ -389,17 +387,17 @@ float density_at(vec3 wp, float view_t, float dt_step){
     return clamp(d * coverage, 0.0, 1.0);
 }
 
-float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t){
-    // Sun taps sample FINE density (lod ~0): passing the tap spacing as
-    // the LOD footprint blurred away the gaps light shines through and
-    // turned every near cloud flank black (v6 sweep iteration 2).
+float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t, float dt_step){
+    // Sun taps use the caller's view-step footprint so lighting and view
+    // march agree on the same density field.  The old fine sun march made
+    // blurred view-density crevices shade as deep interiors.
     float tau_m = 0.0;
     for (int i = 1; i <= SUN_STEPS; i++){
         tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t,
-                            60.0) * SUN_STEP_M;
+                            dt_step) * SUN_STEP_M;
     }
     tau_m += density_at(wp + sun_dir * SUN_COARSE_DIST_M, view_t,
-                        350.0) * SUN_COARSE_WEIGHT_M;
+                        dt_step) * SUN_COARSE_WEIGHT_M;
     return exp(-tau_m * SIGMA * 1.6);
 }
 
@@ -462,7 +460,7 @@ void main(){
             if (t > t1) break;
             vec3 wp = u_cam_pos + rd * t;
             float d = density_at(wp, t, dt);
-            if (d > 0.02){
+            if (d >= 0.003){
                 mist_run = 0;
                 skip_mul = 1.0;      // full reset: gradual halving left a
                                      // giant stride mid-cloud (black blobs)
@@ -499,7 +497,7 @@ void main(){
                 if (t_hit < 0.0) t_hit = t;
                 if ((lit_step % 2) == 0){
                     float measured_sun_T = sun_transmittance(wp, u_sun_dir,
-                                                             t);
+                                                             t, dt);
                     if (lit_step == 0) cached_sun_T = measured_sun_T;
                     else cached_sun_T = mix(cached_sun_T, measured_sun_T,
                                             0.45);
