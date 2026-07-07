@@ -336,31 +336,46 @@ float height_profile(float hfrac, float ctype, float top){
     return mix(bottom * cap, cirrus * 0.35, step(0.9, ctype));
 }
 
-float density_at(vec3 wp, float view_t){
+// Step-matched texture LOD: GLSL auto-mip picks the level from SCREEN
+// derivatives, which says nothing about how far apart the MARCH samples
+// are ALONG the ray.  Sampling 47 m noise voxels every 300-900 m aliases
+// into coherent interference rings ('CRT' ripples, every playtest).
+// Force the mip whose footprint matches the step length.
+float density_at(vec3 wp, float view_t, float dt_step){
     float hfrac = (wp.y - u_cloud_base) / (u_cloud_top - u_cloud_base);
     if (hfrac < 0.0 || hfrac > 1.0) return 0.0;
+    // Engage the step LOD only at DISTANCE: near the camera the sun march
+    // reads fine density, and a blurred VIEW density disagrees with it in
+    // the crevices (fine says gap, blurred says cloud) -> every crevice
+    // shaded as deep interior = black marbling (v6 sweep iterations 2-5).
+    float lod_gate = smoothstep(8000.0, 25000.0, view_t);
+    float lod_b = clamp(log2(dt_step / 46.9), 0.0, 6.0) * lod_gate;
+    float lod_d = clamp(log2(dt_step / 37.5), 0.0, 4.0) * lod_gate;
+    float lod_w = clamp(log2(dt_step / 586.0), 0.0, 5.0) * lod_gate;
     vec3 drift = vec3(u_time * WIND_MS, 0.0, u_time * WIND_MS * 0.35);
     vec2 wuv = (wp.xz + drift.xz) / WEATHER_TILE;
-    vec3 wm = texture(u_weather, wuv).rgb;     // coverage, type, top
+    vec3 wm = textureLod(u_weather, wuv, lod_w).rgb;   // coverage/type/top
     float coverage = clamp(wm.r + u_coverage_bias, 0.0, 1.0);
     if (coverage <= 0.01) return 0.0;
     float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
     if (prof <= 0.0) return 0.0;
     float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t) * 0.6;
     vec2 warp_uv = wp.xz / (WEATHER_TILE * WARP_WEATHER_SCALE) + vec2(0.618);
-    vec2 base_warp = (texture(u_weather, warp_uv).gb - vec2(0.5))
+    vec2 base_warp = (textureLod(u_weather, warp_uv, lod_w).gb - vec2(0.5))
                      * WARP_OFFSET_M;
     vec3 base_wp = wp + drift;
     base_wp.xz += base_warp;
-    float b1 = texture(u_base_noise, base_wp / BASE_TILE).r;
-    float b2 = texture(u_base_noise, base_wp / (BASE_TILE * BASE_RATIO)).r;
+    float b1 = textureLod(u_base_noise, base_wp / BASE_TILE, lod_b).r;
+    float b2 = textureLod(u_base_noise, base_wp / (BASE_TILE * BASE_RATIO),
+                          max(lod_b - 1.4, 0.0)).r;   // 2.618x coarser tile
     float base = mix(b1, b2, BASE_BLEND);
     base = mix(base, 0.5, far_flat);
     base = remap(base, 0.30, 0.90, 0.0, 1.0);  // texture band -> full range
     float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
     d = mix(d, coverage * prof, far_flat);
     if (d <= 0.0) return 0.0;
-    float det = texture(u_detail_noise, (wp + drift * 1.6) / DETAIL_TILE).r;
+    float det = textureLod(u_detail_noise, (wp + drift * 1.6) / DETAIL_TILE,
+                           lod_d).r;
     float eroded = remap(d, det * 0.5, 1.0, 0.0, 1.0);
     float detail_amt = 1.0 - smoothstep(DETAIL_FADE0_M, DETAIL_FADE1_M,
                                         view_t);
@@ -369,13 +384,16 @@ float density_at(vec3 wp, float view_t){
 }
 
 float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t){
+    // Sun taps sample FINE density (lod ~0): passing the tap spacing as
+    // the LOD footprint blurred away the gaps light shines through and
+    // turned every near cloud flank black (v6 sweep iteration 2).
     float tau_m = 0.0;
     for (int i = 1; i <= SUN_STEPS; i++){
-        tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t)
-                 * SUN_STEP_M;
+        tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t,
+                            60.0) * SUN_STEP_M;
     }
-    tau_m += density_at(wp + sun_dir * SUN_COARSE_DIST_M, view_t)
-             * SUN_COARSE_WEIGHT_M;
+    tau_m += density_at(wp + sun_dir * SUN_COARSE_DIST_M, view_t,
+                        350.0) * SUN_COARSE_WEIGHT_M;
     return exp(-tau_m * SIGMA * 1.6);
 }
 
@@ -437,15 +455,41 @@ void main(){
     for (int i = 0; i < MARCH_STEPS; i++){
             if (t > t1) break;
             vec3 wp = u_cam_pos + rd * t;
-            float d = density_at(wp, t);
+            float d = density_at(wp, t, dt);
             if (d > 0.02){
                 mist_run = 0;
-                skip_mul = max(1.0, skip_mul * 0.5);
+                skip_mul = 1.0;      // full reset: gradual halving left a
+                                     // giant stride mid-cloud (black blobs)
             } else {
                 mist_run += 1;
-                if (mist_run >= 8) skip_mul *= 2.0;
+                // Cap 8x: unbounded doubling grew the stride past whole
+                // clouds and the entry bisection then searched a km-wide
+                // interval - near clouds shaded at random interior points
+                // (v6 sweep iteration 3, obsidian-cloud bug).
+                if (mist_run >= 8) skip_mul = min(skip_mul * 2.0, 8.0);
             }
             if (d > 0.003){
+                if (t_hit < 0.0){
+                    // FIRST surface crossing: the sample lands anywhere up
+                    // to a whole step past the cloud boundary, so first-hit
+                    // depth quantizes to the step grid -> concentric rings
+                    // on every deck seen from above (v6 sweep; jitter can't
+                    // decorrelate 90 m vs 300-900 m steps).  Bisect back to
+                    // the surface and restart stepping FROM it: all pixels
+                    // then sample at consistent surface-relative depths.
+                    float lo = max(t - dt, t0);
+                    float hi = t;
+                    for (int k = 0; k < 4; k++){
+                        float mid = 0.5 * (lo + hi);
+                        if (density_at(u_cam_pos + rd * mid, mid, dt)
+                            > 0.003) hi = mid;
+                        else lo = mid;
+                    }
+                    t_hit = hi;
+                    t = lo;
+                    dt = march_dt(max(t, DT_MIN_M), rd, skip_mul);
+                    continue;
+                }
                 if (t_hit < 0.0) t_hit = t;
                 if ((lit_step % 2) == 0){
                     cached_sun_T = sun_transmittance(wp, u_sun_dir, t);
