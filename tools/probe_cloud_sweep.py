@@ -19,7 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pygame
 
-ALTS_M = (2_000.0, 10_000.0, 30_000.0, 50_000.0)
+ALTS_M = (2_000.0, 4_000.0, 10_000.0, 30_000.0, 50_000.0)
+# 4 km = deck-skim: just above the fair-cu tops, the view that exposed
+# black crevices / choppy shading in playtest round 3 (2026-07-07).
 CAM_XZ = (0.0, 40_000.0)
 TILE_W, TILE_H = 500, 281          # per-view thumbnail in the sheet
 
