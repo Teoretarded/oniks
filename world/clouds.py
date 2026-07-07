@@ -31,7 +31,7 @@ import numpy as np
 BASE_N = 128          # base Perlin-Worley texture, voxels per axis
 DETAIL_N = 32         # detail Worley texture
 WEATHER_N = 512       # weathermap texels per axis
-CACHE_VERSION = "v1"  # bump when the bake recipe changes (invalidates caches)
+CACHE_VERSION = "v3"  # bump when the bake recipe changes (invalidates caches)
 
 # World-space scales (metres) — consumed by the shader AND (W-P6) the CPU
 # density query, so they live here as the single source of truth.
@@ -203,8 +203,11 @@ def build_noise(seed: int, cache_dir=Path("cache")) -> dict:
     # Weathermap: coverage / type / top-height (FAIR/PARTLY default mix).
     cov_n = _fbm(_perlin2, rng, WEATHER_N, 5, 4)
     # Threshold shaping: honest gaps AND honest clouds (test contract) —
-    # roughly 35-55% coverage with soft edges.
-    coverage = np.clip(_remap(cov_n, 0.45, 0.75, 0.0, 1.0), 0.0, 1.0)
+    # solid cores (coverage -> 1) with clear lanes between.  v1 0.45-0.75
+    # starved the density remap (one faint blob); v2 0.42-0.62 read as a
+    # 7-okta broken deck (screenshot gate); v3 targets FAIR/PARTLY:
+    # roughly half the sky in honest blue.
+    coverage = np.clip(_remap(cov_n, 0.47, 0.70, 0.0, 1.0), 0.0, 1.0)
     type_n = _fbm(_perlin2, rng, WEATHER_N, 3, 2)      # low-freq type bands
     top_n = _fbm(_perlin2, rng, WEATHER_N, 4, 3)
     # Type channel (PART 2 §12): mostly fair cumulus, patches of towering
@@ -219,3 +222,298 @@ def build_noise(seed: int, cache_dir=Path("cache")) -> dict:
         cache.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache, **out)
     return out
+
+
+# =================================================================== GL half
+# Deferred-GL from here down (sky.py pattern): unit tests import the bake
+# above; only the game render path constructs ``Clouds``.
+
+CLOUD_VERT = """
+#version 330 core
+layout(location=0) in vec2 a_pos;          // fullscreen triangle, NDC
+out vec2 v_ndc;
+void main(){
+    v_ndc = a_pos;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+"""
+
+# The raymarcher (locked F3 conventions + PART 2 §12 taxonomy):
+#  * slab [u_cloud_base, u_cloud_top], march <= MARCH_STEPS with early-out,
+#    march distance capped, dithered start offset (screen-space hash);
+#  * density = base Perlin-Worley remapped by weathermap coverage, shaped
+#    by a per-type vertical profile, eroded by detail Worley;
+#  * lighting = Beer-Lambert x powder x dual-lobe-ish HG, 6-step sun cone,
+#    ambient from the sky gradient pair;
+#  * depth: gl_FragDepth at the SLAB ENTRY point via the exact locked
+#    log-depth formula log2(1 + w) * fcoef * 0.5 (terrain occludes);
+#  * apply_haze() on the lit result; premultiplied-alpha output.
+CLOUD_FRAG = """
+#version 330 core
+in vec2 v_ndc;
+uniform mat4 u_inv_proj_rot;      // inverse(proj * view_rot): NDC -> ray
+uniform mat4 u_proj, u_view_rot;  // forward path for the entry-point depth
+uniform vec3 u_cam_pos;           // world-space camera (noise sampling)
+uniform float u_time;             // SIM time (replay-identical drift)
+uniform float u_cloud_base, u_cloud_top;
+uniform float u_coverage_bias;    // W-P8 preset knob (0 = baked map as-is)
+uniform float u_log_depth_fcoef;
+uniform sampler3D u_base_noise;
+uniform sampler3D u_detail_noise;
+uniform sampler2D u_weather;
+uniform vec3 u_sun_color;
+out vec4 frag;
+""" + "__HAZE__" + """
+
+const int   MARCH_STEPS   = 64;
+const int   SUN_STEPS     = 6;
+const float MARCH_MAX_M   = 40000.0;   // grazing-ray cap: 940 m steps at
+                                       // 60 km made heavy dither grain
+const float SUN_STEP_M    = 350.0;
+const float SIGMA         = 0.006;    // extinction per density per metre
+const float WEATHER_TILE  = 300000.0;
+const float BASE_TILE     = 6000.0;
+const float DETAIL_TILE   = 1200.0;
+const float WIND_MS       = 18.0;     // slab drift, sim-time clocked
+
+float remap(float x, float a, float b, float c, float d){
+    return c + (x - a) / max(b - a, 1e-5) * (d - c);
+}
+
+// Per-type vertical profile (PART 2 §12): type 0 stratus (thin, low flat),
+// 0.25 fair cu, 0.5 towering, 0.75 cumulonimbus, 1.0 cirrus (thin, high).
+float height_profile(float hfrac, float ctype, float top){
+    float h = hfrac / max(top, 0.05);          // 0..1 inside THIS column
+    if (h > 1.0) return 0.0;
+    float bottom = smoothstep(0.0, 0.08 + 0.12 * ctype, h);
+    float cap    = 1.0 - smoothstep(0.6 + 0.35 * ctype, 1.0, h);
+    // Cirrus band: thin sheet riding near the column top.
+    float cirrus = smoothstep(0.75, 0.9, h) * (1.0 - smoothstep(0.9, 1.0, h));
+    return mix(bottom * cap, cirrus * 0.35, step(0.9, ctype));
+}
+
+float density_at(vec3 wp){
+    float hfrac = (wp.y - u_cloud_base) / (u_cloud_top - u_cloud_base);
+    if (hfrac < 0.0 || hfrac > 1.0) return 0.0;
+    vec3 drift = vec3(u_time * WIND_MS, 0.0, u_time * WIND_MS * 0.35);
+    vec2 wuv = (wp.xz + drift.xz * 4.0) / WEATHER_TILE;
+    vec3 wm = texture(u_weather, wuv).rgb;     // coverage, type, top
+    float coverage = clamp(wm.r + u_coverage_bias, 0.0, 1.0);
+    if (coverage <= 0.01) return 0.0;
+    float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
+    if (prof <= 0.0) return 0.0;
+    float base = texture(u_base_noise, (wp + drift) / BASE_TILE).r;
+    base = remap(base, 0.30, 0.90, 0.0, 1.0);  // texture band -> full range
+    float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
+    if (d <= 0.0) return 0.0;
+    float det = texture(u_detail_noise, (wp + drift * 1.6) / DETAIL_TILE).r;
+    d = remap(d, det * 0.35, 1.0, 0.0, 1.0);   // erode edges
+    return clamp(d * coverage, 0.0, 1.0);
+}
+
+float sun_transmittance(vec3 wp, vec3 sun_dir){
+    float tau = 0.0;
+    for (int i = 1; i <= SUN_STEPS; i++){
+        tau += density_at(wp + sun_dir * (SUN_STEP_M * float(i)));
+    }
+    return exp(-tau * SIGMA * SUN_STEP_M * 1.6);
+}
+
+float hg(float ct, float g){
+    float g2 = g * g;
+    return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * ct, 1.5) * 0.0796;
+}
+
+float hash12(vec2 p){
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+void main(){
+    // Ray from the camera through this pixel (camera-relative space:
+    // the camera sits at the origin; u_cam_pos only offsets NOISE lookups).
+    vec4 rp = u_inv_proj_rot * vec4(v_ndc, 1.0, 1.0);
+    vec3 rd = normalize(rp.xyz / rp.w);
+
+    // Slab entry/exit along the ray (horizontal slab in world Y).
+    float cy = u_cam_pos.y;
+    float t0, t1;
+    if (abs(rd.y) < 1e-4){
+        if (cy < u_cloud_base || cy > u_cloud_top) discard;
+        t0 = 0.0; t1 = MARCH_MAX_M;
+    } else {
+        float ta = (u_cloud_base - cy) / rd.y;
+        float tb = (u_cloud_top - cy) / rd.y;
+        t0 = max(min(ta, tb), 0.0);
+        t1 = max(ta, tb);
+        if (t1 <= 0.0) discard;
+    }
+    t1 = min(t1, t0 + MARCH_MAX_M);
+    if (t1 <= t0) discard;
+
+    // Depth at the slab ENTRY point (locked log-depth formula) — the
+    // depth TEST culls cloud pixels behind terrain/ships drawn earlier.
+    vec3 entry_rel = rd * max(t0, 1.0);
+    vec4 clip = u_proj * u_view_rot * vec4(entry_rel, 1.0);
+    gl_FragDepth = log2(max(1.0 + clip.w, 1e-6)) * (u_log_depth_fcoef * 0.5);
+
+    float dt = (t1 - t0) / float(MARCH_STEPS);
+    float t = t0 + dt * hash12(gl_FragCoord.xy);   // dithered start
+    float ct = dot(rd, u_sun_dir);
+    float phase = mix(hg(ct, 0.55), hg(ct, -0.25), 0.3);  // dual lobe
+    vec3 amb_lo = vec3(0.70, 0.78, 0.86) * 0.55;   // sky gradient pair
+    vec3 amb_hi = vec3(0.35, 0.45, 0.62) * 0.55;
+
+    float T = 1.0;
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < MARCH_STEPS; i++){
+        vec3 wp = u_cam_pos + rd * t;
+        float d = density_at(wp);
+        if (d > 0.003){
+            float sun_T = sun_transmittance(wp, u_sun_dir);
+            float ext = d * SIGMA * dt;
+            // Powder: local-density form (the step-size form blew out —
+            // huge grazing steps saturated it to 1 everywhere).
+            float powder = 1.0 - exp(-4.0 * d);
+            float hfrac = clamp((wp.y - u_cloud_base)
+                                / (u_cloud_top - u_cloud_base), 0.0, 1.0);
+            vec3 amb = mix(amb_lo, amb_hi, hfrac);
+            vec3 s = u_sun_color * sun_T * phase * 9.0 * powder + amb;
+            acc += T * s * (1.0 - exp(-ext));
+            T *= exp(-ext);
+            if (T < 0.01) break;
+        }
+        t += dt;
+    }
+    float alpha = 1.0 - T;
+    if (alpha < 0.003) discard;
+    // Haze on the lit cloud (view vector = entry point, camera-relative).
+    vec3 hazed = apply_haze(acc / max(alpha, 1e-4), entry_rel, u_cam_pos.y);
+    frag = vec4(hazed * alpha, alpha);             // premultiplied
+}
+"""
+
+
+class Clouds:
+    """GL wrapper: bakes/loads the noise (one npz per seed), uploads the
+    three REPEAT textures, draws the fullscreen raymarch pass.  Draw LAST
+    (after every opaque + particle draw, before the HUD): depth TEST on,
+    depth WRITE off, premultiplied blend."""
+
+    def __init__(self, seed: int, cache_dir=Path("cache")):
+        from OpenGL.GL import (GL_CLAMP_TO_EDGE, GL_LINEAR, GL_R8, GL_RED,
+                               GL_REPEAT, GL_RGB, GL_RGB8, GL_TEXTURE_2D,
+                               GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER,
+                               GL_TEXTURE_MIN_FILTER, GL_TEXTURE_WRAP_R,
+                               GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
+                               GL_UNSIGNED_BYTE, glBindTexture,
+                               glGenTextures, glTexImage2D, glTexImage3D,
+                               glTexParameteri)
+        from engine.mesh import Mesh          # noqa: F401  (GL context check)
+        from engine.shader import Shader
+        from engine.shaderlib import HAZE_GLSL
+
+        noise = build_noise(seed, cache_dir=cache_dir)
+
+        def _tex3(arr):
+            tid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_3D, tid)
+            for wrap in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
+                         GL_TEXTURE_WRAP_R):
+                glTexParameteri(GL_TEXTURE_3D, wrap, GL_REPEAT)
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            b = (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+            n = arr.shape[0]
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, n, n, n, 0, GL_RED,
+                         GL_UNSIGNED_BYTE, np.ascontiguousarray(b))
+            return tid
+
+        self._t_base = _tex3(noise["base"])
+        self._t_detail = _tex3(noise["detail"])
+
+        tid = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        wb = (np.clip(noise["weather"], 0.0, 1.0) * 255.0 + 0.5).astype(
+            np.uint8)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, WEATHER_N, WEATHER_N, 0,
+                     GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(wb))
+        self._t_weather = tid
+
+        # Fullscreen triangle (3 verts cover the screen; no index buffer).
+        from OpenGL.GL import (GL_ARRAY_BUFFER, GL_FLOAT, GL_STATIC_DRAW,
+                               glBindBuffer, glBindVertexArray, glBufferData,
+                               glEnableVertexAttribArray, glGenBuffers,
+                               glGenVertexArrays, glVertexAttribPointer)
+        self._vao = glGenVertexArrays(1)
+        glBindVertexArray(self._vao)
+        vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        tri = np.array([-1.0, -1.0, 3.0, -1.0, -1.0, 3.0], dtype=np.float32)
+        glBufferData(GL_ARRAY_BUFFER, tri.nbytes, tri, GL_STATIC_DRAW)
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 2, GL_FLOAT, False, 8, None)
+        glBindVertexArray(0)
+        self._vbo = vbo
+
+        self.shader = Shader(CLOUD_VERT,
+                             CLOUD_FRAG.replace("__HAZE__", HAZE_GLSL))
+        self.enabled = True
+
+    def draw(self, renderer, camera, sim_time: float) -> None:
+        if not self.enabled:
+            return
+        from OpenGL.GL import (GL_BLEND, GL_CULL_FACE, GL_DEPTH_TEST, GL_ONE,
+                               GL_ONE_MINUS_SRC_ALPHA, GL_TEXTURE0,
+                               GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TRIANGLES,
+                               glActiveTexture, glBindTexture,
+                               glBindVertexArray, glBlendFunc, glDepthMask,
+                               glDisable, glDrawArrays, glEnable)
+        sh = self.shader
+        renderer.set_common(sh)      # proj/view_rot/sun/haze/fcoef/cam_alt
+        inv = np.linalg.inv(np.asarray(renderer.proj, dtype=np.float64)
+                            @ np.asarray(renderer.view_rot,
+                                         dtype=np.float64))
+        sh.set_mat4("u_inv_proj_rot", inv)
+        sh.set_vec3("u_cam_pos", camera.eye)
+        sh.set_float("u_time", float(sim_time))
+        sh.set_float("u_cloud_base", CLOUD_BASE_M)
+        sh.set_float("u_cloud_top", CLOUD_TOP_M)
+        sh.set_float("u_coverage_bias", 0.0)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_3D, self._t_base)
+        sh.set_int("u_base_noise", 0)
+        glActiveTexture(GL_TEXTURE0 + 1)
+        glBindTexture(GL_TEXTURE_3D, self._t_detail)
+        sh.set_int("u_detail_noise", 1)
+        glActiveTexture(GL_TEXTURE0 + 2)
+        glBindTexture(GL_TEXTURE_2D, self._t_weather)
+        sh.set_int("u_weather", 2)
+        glActiveTexture(GL_TEXTURE0)
+
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(False)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)   # premultiplied
+        # The engine declares front = CW (left-handed world, renderer.py);
+        # a CCW NDC fullscreen triangle is a BACK face — cull off, like the
+        # sky dome (the first screenshot gate caught the invisible pass).
+        glDisable(GL_CULL_FACE)
+        glBindVertexArray(self._vao)
+        glDrawArrays(GL_TRIANGLES, 0, 3)
+        glBindVertexArray(0)
+        glEnable(GL_CULL_FACE)
+        glDisable(GL_BLEND)
+        glDepthMask(True)
+
+    def delete(self) -> None:
+        from OpenGL.GL import glDeleteBuffers, glDeleteTextures, \
+            glDeleteVertexArrays
+        glDeleteTextures([self._t_base, self._t_detail, self._t_weather])
+        glDeleteVertexArrays(1, [self._vao])
+        glDeleteBuffers(1, [self._vbo])

@@ -35,9 +35,9 @@ def test_bake_deterministic_and_seed_unique():
 
 
 def test_bake_cache_roundtrip(tmp_path):
-    from world.clouds import build_noise
+    from world.clouds import CACHE_VERSION, build_noise
     a = build_noise(seed=9, cache_dir=tmp_path)
-    assert (tmp_path / "clouds_v1_seed9.npz").exists()
+    assert (tmp_path / f"clouds_{CACHE_VERSION}_seed9.npz").exists()
     b = build_noise(seed=9, cache_dir=tmp_path)    # loads the cache
     for k in ("base", "detail", "weather"):
         assert np.array_equal(a[k], b[k])

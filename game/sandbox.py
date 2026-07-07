@@ -374,6 +374,12 @@ class SandboxState(GameState):
         from world.ocean import sea_amp_scale
         self._sea_amp = sea_amp_scale(
             getattr(getattr(self.world, "_config", None), "sea_state", 3))
+        # F3-P4 volumetric clouds: seeded per battle ([seed, 17] — a new
+        # seed is a new sky), npz-cached so only the FIRST battle on a
+        # seed pays the ~5 s bake (under the BUILDING WORLD frame).
+        from world.clouds import Clouds
+        self.clouds = Clouds(
+            int(getattr(getattr(self.world, "_config", None), "seed", 0)))
         # M3-F4: render the ACTIVE map field so the 3D coast/islands match the
         # field the sim masks LOS with. CombatWorld carries a per-preset
         # height_field; the sandbox WorldState has none (default map).
@@ -1561,6 +1567,8 @@ class SandboxState(GameState):
             mesh.delete()
         self.terrain.delete()
         self.ocean.delete()
+        if self.clouds is not None:
+            self.clouds.delete()
         self.sky.delete()
         self.particles.delete()
         self.tactical_map.delete()
@@ -1670,6 +1678,10 @@ class SandboxState(GameState):
         self._draw_tel()
         self._draw_missiles()
         self.particles.draw(self.renderer, self.effects)
+        # F3-P4 volumetric clouds: drawn LAST into the default framebuffer
+        # (depth test culls them behind terrain/hulls; the locked v1 order).
+        if self.clouds is not None:
+            self.clouds.draw(self.renderer, self.camera, self.world.sim_time)
 
     def _draw_ships(self) -> None:
         for ship in self.world.ships:
