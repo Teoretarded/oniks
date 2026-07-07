@@ -1667,6 +1667,7 @@ class SandboxState(GameState):
 
     def _draw_scene(self, w: int, h: int) -> None:
         self.renderer.begin(self.camera, w / h)
+        self._bind_cloud_shadows()
         self.sky.draw(self.renderer)
         self.terrain.draw(self.renderer)
         self.ocean.draw(self.renderer, self.camera, self.world.sim_time,
@@ -1682,6 +1683,19 @@ class SandboxState(GameState):
         # (depth test culls them behind terrain/hulls; the locked v1 order).
         if self.clouds is not None:
             self.clouds.draw(self.renderer, self.camera, self.world.sim_time)
+
+    def _bind_cloud_shadows(self) -> None:
+        clouds = self.clouds
+        if clouds is not None and getattr(clouds, "enabled", False):
+            clouds.bind_shadow_uniforms(self.renderer.lit, 6, self.camera,
+                                        self.world.sim_time)
+            clouds.bind_shadow_uniforms(self.ocean.shader, 6, self.camera,
+                                        self.world.sim_time)
+            return
+        self.renderer.lit.use()
+        self.renderer.lit.set_float("u_cloud_amt", 0.0)
+        self.ocean.shader.use()
+        self.ocean.shader.set_float("u_cloud_amt", 0.0)
 
     def _draw_ships(self) -> None:
         for ship in self.world.ships:

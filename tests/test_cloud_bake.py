@@ -44,13 +44,12 @@ def test_bake_cache_roundtrip(tmp_path):
 
 
 def test_weathermap_has_cloud_and_gap_regions():
-    # The FAIR/PARTLY default mix must produce real coverage variation:
-    # some columns cloudy, some clear — never a uniform overcast sheet.
     from world.clouds import build_noise
     w = build_noise(seed=7, cache_dir=None)["weather"]
     coverage = w[:, :, 0]
-    assert (coverage < 0.1).mean() > 0.10          # honest gaps
-    assert (coverage > 0.4).mean() > 0.10          # honest clouds
+    assert (coverage < 0.1).mean() > 0.30          # big clear lanes (v5)
+    assert (coverage > 0.4).mean() > 0.08          # honest cloud systems
+    assert (coverage > 0.4).mean() < 0.45          # never wall-to-wall
 
 
 def test_no_sim_module_imports_clouds():

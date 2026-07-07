@@ -27,7 +27,7 @@ from OpenGL.GL import (
 )
 
 from engine.shader import Shader
-from engine.shaderlib import HAZE_GLSL
+from engine.shaderlib import CLOUD_SHADOW_GLSL, HAZE_GLSL
 
 LIT_VERT = """
 #version 330 core
@@ -57,7 +57,7 @@ in vec3 v_nrm; in vec3 v_col; in vec3 v_view_vec; in float v_flogz;
 uniform vec3 u_sun_color;
 uniform float u_log_depth_fcoef;
 out vec4 frag;
-""" + HAZE_GLSL + """
+""" + HAZE_GLSL + CLOUD_SHADOW_GLSL + """
 void main(){
     gl_FragDepth = log2(max(v_flogz, 1e-6)) * (u_log_depth_fcoef * 0.5);
     vec3 n = normalize(v_nrm);
@@ -74,7 +74,9 @@ void main(){
     vec3 v = normalize(-v_view_vec);
     vec3 hv = normalize(v + u_sun_dir);
     float spec = pow(max(dot(n, hv), 0.0), 48.0) * 0.25;
-    vec3 col = v_col * (u_sun_color * ndl + hemi) + u_sun_color * spec * step(0.01, ndl);
+    float cshadow = cloud_shadow(v_view_vec);
+    vec3 col = v_col * (u_sun_color * ndl * cshadow + hemi)
+               + u_sun_color * spec * step(0.01, ndl) * cshadow;
     frag = vec4(apply_haze(col, v_view_vec, u_cam_alt), 1.0);
 }
 """

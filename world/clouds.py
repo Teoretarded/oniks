@@ -19,6 +19,14 @@ TWO HALVES, one module:
 
 Determinism guard (LOCKED): no sim module imports this file
 (tests/test_cloud_bake.py greps for offenders).
+
+GPU density anti-wallpaper formulas (W-P6 must mirror these on CPU):
+* Base lookup domain warp samples ``weather`` at
+  ``wp.xz / (WEATHER_TILE_M * 0.37) + 0.618`` and uses
+  ``(gb - 0.5) * 5000 m`` as an x/z offset, applied only to base noise.
+* Two-scale base samples ``base`` at the warped ``(wp + drift)`` position
+  over ``BASE_TILE_M`` and ``BASE_TILE_M * 2.618``, then blends
+  ``base = mix(b1, b2, 0.38)`` before the density remap.
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ import numpy as np
 BASE_N = 128          # base Perlin-Worley texture, voxels per axis
 DETAIL_N = 32         # detail Worley texture
 WEATHER_N = 512       # weathermap texels per axis
-CACHE_VERSION = "v4"  # bump when the bake recipe changes (invalidates caches)
+CACHE_VERSION = "v5"  # bump when the bake recipe changes (invalidates caches)
 
 # World-space scales (metres) — consumed by the shader AND (W-P6) the CPU
 # density query, so they live here as the single source of truth.
@@ -173,7 +181,8 @@ def build_noise(seed: int, cache_dir=Path("cache")) -> dict:
       mix, preset knobs arrive with W-P6).  All periodic.
 
     ``cache_dir`` None disables the disk cache (tests); otherwise
-    ``cache/clouds_v1_seed{seed}.npz`` makes the bake one-time per seed.
+    ``cache/clouds_{CACHE_VERSION}_seed{seed}.npz`` makes the bake one-time
+    per seed.
     """
     cache = None
     if cache_dir is not None:
@@ -202,15 +211,17 @@ def build_noise(seed: int, cache_dir=Path("cache")) -> dict:
               + _worley(rng, DETAIL_N, 8, 3) * 0.2).astype(np.float32)
 
     # Weathermap: coverage / type / top-height (FAIR/PARTLY default mix).
-    # TWO-SCALE coverage (v4, playtest 2026-07-07 "zero variation"):
+    # TWO-SCALE coverage (v5, playtest 2026-07-07 "zero variation"):
     # large weather MASSES (freq 3 — tens of km) modulate a small PUFF
     # field (freq 9) — clusters, lone puffs and honest clear lanes emerge
     # instead of one same-size blob wallpaper.
     mass_n = _fbm(_perlin2, rng, WEATHER_N, 3, 3)
     puff_n = _fbm(_perlin2, rng, WEATHER_N, 9, 3)
-    mass = np.clip(_remap(mass_n, 0.42, 0.68, 0.0, 1.0), 0.0, 1.0)
+    mass = np.clip(_remap(mass_n, 0.50, 0.70, 0.0, 1.0), 0.0, 1.0)
     puff = np.clip(_remap(puff_n, 0.44, 0.62, 0.0, 1.0), 0.0, 1.0)
-    coverage = np.clip(mass * (0.30 + 0.70 * puff) + 0.35 * mass * mass,
+    # Probed 2026-07-07 across seeds 7/0/1337: clear(<0.1) ~0.69-0.73,
+    # dense(>0.4) ~0.09 — FAIR ~3 okta with big honest blue lanes.
+    coverage = np.clip(mass * (0.30 + 1.00 * puff) + 0.40 * mass * mass,
                        0.0, 1.0)
     type_n = _fbm(_perlin2, rng, WEATHER_N, 3, 2)      # low-freq type bands
     top_n = _fbm(_perlin2, rng, WEATHER_N, 4, 3)
@@ -246,7 +257,7 @@ void main(){
 
 # The raymarcher (locked F3 conventions + PART 2 §12 taxonomy):
 #  * slab [u_cloud_base, u_cloud_top], march <= MARCH_STEPS with early-out,
-#    march distance capped, dithered start offset (screen-space hash);
+#    march distance capped, dithered start offset (screen-space IGN);
 #  * density = base Perlin-Worley remapped by weathermap coverage, shaped
 #    by a per-type vertical profile, eroded by detail Worley;
 #  * lighting = Beer-Lambert x powder x dual-lobe-ish HG, 6-step sun cone,
@@ -273,19 +284,20 @@ out vec4 frag;
 
 const int   MARCH_STEPS   = 128;
 const int   SUN_STEPS     = 6;
-const float DT0_M         = 60.0;     // first step: fine where the eye is
-const float DT_GROWTH     = 1.018;    // gentle geometric growth — equal
-                                      // 600 m steps read as TV static and
-                                      // fast growth sliced the far deck
-                                      // into horizontal bands (playtest)
-const float DT_MAX_M      = 220.0;    // stride cap: a step must never
-                                      // cross a whole cloud layer
+const float DT_MIN_M      = 60.0;     // near-field step
+const float DT_MAX_M      = 6000.0;   // far-field stride with mip'd noise
+const float MARCH_DIST_CAP = 450000.0;
 const float SUN_STEP_M    = 350.0;
-const float SIGMA         = 0.011;    // extinction per density per metre
+const float SUN_COARSE_STEP_M = 1800.0;
+const float SIGMA         = 0.022;    // extinction per density per metre
 const float WEATHER_TILE  = 300000.0;
 const float BASE_TILE     = 6000.0;
 const float DETAIL_TILE   = 1200.0;
 const float WIND_MS       = 18.0;     // slab drift, sim-time clocked
+const float BASE_RATIO    = 2.618;
+const float BASE_BLEND    = 0.38;
+const float WARP_WEATHER_SCALE = 0.37;
+const float WARP_OFFSET_M = 5000.0;
 const float DETAIL_FADE0_M = 8000.0;
 const float DETAIL_FADE1_M = 25000.0;
 const float FAR_FLAT0_M    = 60000.0;
@@ -293,6 +305,10 @@ const float FAR_FLAT1_M    = 160000.0;
 
 float remap(float x, float a, float b, float c, float d){
     return c + (x - a) / max(b - a, 1e-5) * (d - c);
+}
+
+float march_dt(float t){
+    return clamp(t * 0.055, DT_MIN_M, DT_MAX_M);
 }
 
 // Per-type vertical profile (PART 2 §12): type 0 stratus (thin, low flat),
@@ -311,14 +327,21 @@ float density_at(vec3 wp, float view_t){
     float hfrac = (wp.y - u_cloud_base) / (u_cloud_top - u_cloud_base);
     if (hfrac < 0.0 || hfrac > 1.0) return 0.0;
     vec3 drift = vec3(u_time * WIND_MS, 0.0, u_time * WIND_MS * 0.35);
-    vec2 wuv = (wp.xz + drift.xz * 4.0) / WEATHER_TILE;
+    vec2 wuv = (wp.xz + drift.xz) / WEATHER_TILE;
     vec3 wm = texture(u_weather, wuv).rgb;     // coverage, type, top
     float coverage = clamp(wm.r + u_coverage_bias, 0.0, 1.0);
     if (coverage <= 0.01) return 0.0;
     float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
     if (prof <= 0.0) return 0.0;
     float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t);
-    float base = texture(u_base_noise, (wp + drift) / BASE_TILE).r;
+    vec2 warp_uv = wp.xz / (WEATHER_TILE * WARP_WEATHER_SCALE) + vec2(0.618);
+    vec2 base_warp = (texture(u_weather, warp_uv).gb - vec2(0.5))
+                     * WARP_OFFSET_M;
+    vec3 base_wp = wp + drift;
+    base_wp.xz += base_warp;
+    float b1 = texture(u_base_noise, base_wp / BASE_TILE).r;
+    float b2 = texture(u_base_noise, base_wp / (BASE_TILE * BASE_RATIO)).r;
+    float base = mix(b1, b2, BASE_BLEND);
     base = mix(base, 0.5, far_flat);
     base = remap(base, 0.30, 0.90, 0.0, 1.0);  // texture band -> full range
     float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
@@ -333,11 +356,14 @@ float density_at(vec3 wp, float view_t){
 }
 
 float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t){
-    float tau = 0.0;
+    float tau_m = 0.0;
     for (int i = 1; i <= SUN_STEPS; i++){
-        tau += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t);
+        tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t)
+                 * SUN_STEP_M;
     }
-    return exp(-tau * SIGMA * SUN_STEP_M * 1.6);
+    tau_m += density_at(wp + sun_dir * SUN_COARSE_STEP_M, view_t)
+             * SUN_COARSE_STEP_M;
+    return exp(-tau_m * SIGMA * 1.6);
 }
 
 float hg(float ct, float g){
@@ -345,10 +371,8 @@ float hg(float ct, float g){
     return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * ct, 1.5) * 0.0796;
 }
 
-float hash12(vec2 p){
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+float ign(vec2 p){
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
 void main(){
@@ -362,20 +386,22 @@ void main(){
     float t0, t1;
     if (abs(rd.y) < 1e-4){
         if (cy < u_cloud_base || cy > u_cloud_top) discard;
-        t0 = 0.0; t1 = 3.0e4;
+        t0 = 0.0;
+        t1 = MARCH_DIST_CAP;
     } else {
         float ta = (u_cloud_base - cy) / rd.y;
         float tb = (u_cloud_top - cy) / rd.y;
         t0 = max(min(ta, tb), 0.0);
         t1 = max(ta, tb);
         if (t1 <= 0.0) discard;
+        t1 = min(t1, t0 + MARCH_DIST_CAP);
     }
     if (t1 <= t0) discard;
 
-    // Geometric march: fine steps near the camera (speckle lives where
-    // the eye is), coarse far out; total reach ~34 km past t0.
-    float dt = DT0_M;
-    float t = t0 + dt * hash12(gl_FragCoord.xy);   // dithered start
+    // Distance-proportional march: near detail stays fine, horizon reaches
+    // 450 km with mipmapped noise carrying the far field.
+    float dt = march_dt(max(t0, DT_MIN_M));
+    float t = t0 + dt * ign(gl_FragCoord.xy);      // dithered one-step start
     float ct = dot(rd, u_sun_dir);
     float phase = mix(hg(ct, 0.55), hg(ct, -0.25), 0.3);  // dual lobe
     vec3 amb_lo = vec3(0.70, 0.78, 0.86) * 0.55;   // sky gradient pair
@@ -398,13 +424,15 @@ void main(){
             float hfrac = clamp((wp.y - u_cloud_base)
                                 / (u_cloud_top - u_cloud_base), 0.0, 1.0);
             vec3 amb = mix(amb_lo, amb_hi, hfrac);
-            vec3 s = u_sun_color * sun_T * phase * 9.0 * powder + amb;
+            amb = mix(amb * vec3(0.62, 0.70, 0.85), amb, sun_T);
+            amb *= 0.35 + 0.65 * sun_T;
+            vec3 s = u_sun_color * sun_T * phase * 10.0 * powder + amb;
             acc += T * s * (1.0 - exp(-ext));
             T *= exp(-ext);
             if (T < 0.01) break;
         }
         t += dt;
-        dt = min(dt * DT_GROWTH, DT_MAX_M);
+        dt = march_dt(t);
     }
     float alpha = 1.0 - T;
     if (alpha < 0.003) discard;
@@ -544,6 +572,23 @@ class Clouds:
         glEnable(GL_CULL_FACE)
         glDisable(GL_BLEND)
         glDepthMask(True)
+
+    def bind_shadow_uniforms(self, shader, unit: int, camera,
+                             sim_time: float, amount: float = 0.5) -> None:
+        """Bind the mipmapped weather texture for terrain/ocean cloud shadows."""
+        shader.use()
+        amt = float(amount) if self.enabled else 0.0
+        shader.set_float("u_cloud_amt", amt)
+        if amt <= 0.0:
+            return
+        from OpenGL.GL import (GL_TEXTURE0, GL_TEXTURE_2D, glActiveTexture,
+                               glBindTexture)
+        glActiveTexture(GL_TEXTURE0 + int(unit))
+        glBindTexture(GL_TEXTURE_2D, self._t_weather)
+        shader.set_int("u_cloud_weather", int(unit))
+        shader.set_vec2("u_cloud_cam_xz", (camera.eye[0], camera.eye[2]))
+        shader.set_float("u_cloud_time", float(sim_time))
+        glActiveTexture(GL_TEXTURE0)
 
     def delete(self) -> None:
         from OpenGL.GL import glDeleteBuffers, glDeleteTextures, \

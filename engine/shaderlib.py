@@ -21,3 +21,19 @@ vec3 apply_haze(vec3 color, vec3 view_vec, float cam_alt){
     return mix(color, mix(u_haze_color, u_sun_haze_color, sun_amt), f);
 }
 """
+
+# Cloud shadows depend on HAZE_GLSL's u_sun_dir; do not redeclare it here.
+CLOUD_SHADOW_GLSL = """
+uniform sampler2D u_cloud_weather;
+uniform vec2 u_cloud_cam_xz;
+uniform float u_cloud_amt;
+uniform float u_cloud_time;
+float cloud_shadow(vec3 view_vec){
+    if (u_cloud_amt <= 0.0) return 1.0;
+    vec2 xz = u_cloud_cam_xz + view_vec.xz;
+    xz -= (u_sun_dir.xz / max(u_sun_dir.y, 0.2)) * 2500.0;
+    vec2 drift = vec2(u_cloud_time * 18.0, u_cloud_time * 18.0 * 0.35);
+    float coverage = texture(u_cloud_weather, (xz + drift) / 300000.0).r;
+    return 1.0 - u_cloud_amt * smoothstep(0.30, 0.75, coverage);
+}
+"""

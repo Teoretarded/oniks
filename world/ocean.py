@@ -21,7 +21,7 @@ import numpy as np
 
 from engine import math3d
 from engine.meshdata import MeshData
-from engine.shaderlib import HAZE_GLSL
+from engine.shaderlib import CLOUD_SHADOW_GLSL, HAZE_GLSL
 
 RINGS = [  # (outer_radius_m, cell_m, wave_weight)
     (2_000, 16, 1.0),
@@ -136,7 +136,7 @@ in vec3 v_nrm; in vec3 v_view_vec; in float v_flogz;
 uniform vec3 u_sun_color;
 uniform float u_log_depth_fcoef;
 out vec4 frag;
-""" + HAZE_GLSL + """
+""" + HAZE_GLSL + CLOUD_SHADOW_GLSL + """
 void main(){
     gl_FragDepth = log2(max(v_flogz, 1e-6)) * (u_log_depth_fcoef * 0.5);
     vec3 n = normalize(v_nrm);
@@ -151,7 +151,12 @@ void main(){
     float gt = clamp(length(v_view_vec) / 9000.0, 0.0, 1.0);
     float spow = mix(600.0, 140.0, gt);
     float sint = mix(1.2, 0.30, gt);
-    col += u_sun_color * pow(max(dot(n, hv), 0.0), spow) * sint;
+    float cshadow = cloud_shadow(v_view_vec);
+    // The water has no explicit sun-diffuse term, so a glint-only shadow
+    // is invisible off the sun axis — dim the whole surface too (the sky
+    // the water reflects is darker under a cloud).
+    col *= mix(0.68, 1.0, cshadow);
+    col += u_sun_color * pow(max(dot(n, hv), 0.0), spow) * sint * cshadow;
     frag = vec4(apply_haze(col, v_view_vec, u_cam_alt), 1.0);
 }
 """
