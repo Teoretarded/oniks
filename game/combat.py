@@ -90,7 +90,8 @@ class CombatState(SandboxState):
         # PLAYS the subsystem model (permanent in every mode); the pure
         # CombatWorld() default stays "legacy" for the headless test suite.
         from world.combat_config import clamp_config
-        return CombatWorld(clamp_config(damage_model="subsystem"))
+        return CombatWorld(clamp_config(damage_model="subsystem",
+                                        radar_model="scanned"))
 
     def __init__(self, app, config=None):
         # _config must exist before super().__init__ -> _build_meshes/

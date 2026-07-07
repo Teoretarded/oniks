@@ -161,6 +161,8 @@ def next_config(campaign: CampaignState,
                       else derive_seed(campaign.seed, campaign.battle_idx))
     # 2026-07-06 damage revamp: campaign battles play the subsystem model.
     fields["damage_model"] = "subsystem"
+    # R-P0 2026-07-07: campaign battles play scanned radars.
+    fields["radar_model"] = "scanned"
     return clamp_config(**fields)
 
 

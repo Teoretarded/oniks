@@ -61,6 +61,11 @@ SANDBOX_CONFIG = clamp_config(
     # 2026-07-06 damage revamp: the game PLAYS the subsystem model in every
     # mode; "legacy" survives only as the test-compat flag.
     damage_model="subsystem",
+    # R-P0 2026-07-07: same pattern — the game PLAYS scanned radars
+    # everywhere; "functional" survives only as the test-compat flag.
+    # (The sandbox's ALL-SEEING board is a separate, deliberate design:
+    # SandboxWorld overrides _build_contacts ungated either way.)
+    radar_model="scanned",
     # Red force.
     n_destroyers=3,
     n_flagship=1,

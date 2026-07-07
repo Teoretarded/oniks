@@ -556,6 +556,9 @@ class CombatSetupState(GameState):
         # 2026-07-06 damage revamp: every setup-screen battle plays the
         # subsystem model (not a spinner — "legacy" is a test-compat flag).
         kwargs["damage_model"] = "subsystem"
+        # R-P0 2026-07-07: every setup-screen battle plays scanned radars
+        # ("functional" is a test-compat flag, not a mode the UI offers).
+        kwargs["radar_model"] = "scanned"
         return clamp_config(**kwargs)
 
     # ------------------------------------------------------------------ render

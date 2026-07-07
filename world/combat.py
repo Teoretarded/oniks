@@ -163,7 +163,7 @@ from sim.enemy_ship_classes import (AirDefenseShip, Flagship, GeneralDestroyer,
 from sim.enemy_strikes import SALVO_PERIOD_S, SALVO_SIZE, EnemyStrikeController
 from sim.missile import Missile
 from sim.pantsir import Pantsir, PantsirDefenseController
-from sim.radar import Radar, RadarNetwork
+from sim.radar import Radar, RadarNetwork, ScanDef, STARING
 from sim.recon import (ACOUSTIC_FIX_ACTIONABLE_M, AcousticReceiver, DRONE_GONE,
                        DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
@@ -210,6 +210,18 @@ PLAYER_RADAR_RANGES = {         # size class -> max detection range (m)
     # splashes) and never alters the 'ship'/'fighter'/'missile'/'stealth' rings.
     "lcac": 60_000.0,
 }
+
+# --- R-P0 radar scan patterns (NORMATIVE: docs/research/radar_scan_and_bands.md)
+# Consumed ONLY under CombatConfig.radar_model == "scanned"; in the legacy
+# "functional" mode every radar behaves as always-painting regardless of its
+# ScanDef (the paint layer is simply never consulted).  Boresight convention:
+# 0 deg = +Z north = the enemy-continent threat axis (z = 502 km), so the
+# fixed-sector sets (Buk 9S36, CBR) emplace facing the threat by default.
+SCAN_ACQ_91N6 = ScanDef("rotating", 12.0, 2.0, 360.0)   # station acquisition
+SCAN_ENG_30N6 = ScanDef("sector", 2.0, 2.0, 60.0)       # station engagement FCR
+SCAN_BUK_9S36 = ScanDef("sector", 2.0, 2.0, 90.0)       # Buk TEL sector FCR
+SCAN_CBR = ScanDef("sector", 1.0, 2.0, 90.0)            # CBR staring wedge
+SCAN_ENEMY_EW = ScanDef("rotating", 10.0, 2.0, 360.0)   # P-18/Nebo class
 
 # --- M5 Buk mid-SAM site (config-driven, n_buk default 0) ----------------------
 # A medium-range gap-filler battery on dry land MIDWAY between the home base
@@ -582,6 +594,10 @@ class CombatWorld(WorldState):
         # first step already routes hits correctly.  getattr keeps old
         # config dicts/replay headers without the field on the legacy path.
         self.damage_model = getattr(config, "damage_model", "legacy")
+        # R-P0 radar scan model flag (see world/combat_config.py): same
+        # pattern/ordering rationale as damage_model — set before
+        # super().__init__ because _build_contacts reads it.
+        self.radar_model = getattr(config, "radar_model", "functional")
         # M3-terrain F3/F4: the ONE active terrain field for this map, built
         # once here and threaded to every sensor (player AND enemy) so they
         # read a single terrain truth — no fog asymmetry, no truth leak.
@@ -740,7 +756,8 @@ class CombatWorld(WorldState):
         # AWACS datalink (built below; the closure resolves lazily).
         self.defense = EnemyDefenseController(
             destroyers, rng=np.random.default_rng(rng_seed),
-            cue_radars_fn=self._enemy_cue_radars)
+            cue_radars_fn=self._enemy_cue_radars,
+            scanned=(self.radar_model == "scanned"))
         # Phase 3: ESM localization -> Tomahawk salvos at the radar station.
         self.strikes = EnemyStrikeController(destroyers, self.radar_station)
         # Destructible player base (sim/bases.py). The radar-station
@@ -1337,6 +1354,9 @@ class CombatWorld(WorldState):
                 antenna_m=_ENEMY_RADAR_ANTENNA_M,
                 ranges=_ENEMY_RADAR_RANGES,
                 height_fn=self._height_fn,
+                # P-18/Nebo-class early-warning rotator, staggered phases.
+                scan=SCAN_ENEMY_EW, band="S",
+                phase0_s=i * SCAN_ENEMY_EW.period_s / max(n, 1),
             )
             self._enemy_ground_radars.append(r)
 
@@ -1376,17 +1396,28 @@ class CombatWorld(WorldState):
 
     def _build_contacts(self) -> ContactBoard:
         n = int(getattr(self._config, "n_player_radars", 1))
+        nn = max(1, n)
         self.player_radars: list[Radar] = []
-        for i in range(max(1, n)):
+        for i in range(nn):
             x, z = self._player_radar_xz(i)
             radar = Radar(
                 f"radar_player_{i:02d}",
                 (x, terrain_height_scalar(x, z), z),
                 RADAR_ANTENNA_M, PLAYER_RADAR_RANGES,
-                height_fn=self._height_fn)
+                height_fn=self._height_fn,
+                # 91N6-class rotating acquisition (S-band); deterministic
+                # rotation stagger across the set — crews don't synchronize.
+                scan=SCAN_ACQ_91N6, band="S",
+                phase0_s=i * SCAN_ACQ_91N6.period_s / nn)
             self.player_radars.append(radar)
         self.radar_station = self.player_radars[0]
         self.radar_net = RadarNetwork(list(self.player_radars))
+        # R-P0: scanned mode gates the picture on real beam paints and
+        # drives refresh off the paint schedule; functional mode keeps the
+        # legacy visible_fn gate + range-band refresh byte-identically.
+        if self.radar_model == "scanned":
+            return ContactBoard((BASE_POS[0], BASE_POS[2]),
+                                paint_fn=self._player_paint_state)
         return ContactBoard((BASE_POS[0], BASE_POS[2]),
                             visible_fn=self._player_visible)
 
@@ -1462,6 +1493,22 @@ class CombatWorld(WorldState):
         drone = getattr(self, "drone", None)
         return (size_class in ("ship", "lcac") and drone is not None
                 and drone.alive and self.sar.detects(drone.pos, pos))
+
+    def _player_paint_state(self, pos, size_class: str, now: float,
+                            window: float):
+        """Scanned-mode player picture gate (R-P0): the radar net's
+        (painted, next_paint) answer, jammer field threaded exactly like
+        _player_visible. The drone SAR strip is a continuous imager — a
+        surface hull under the strip is 'painted' every check (the floor
+        clamp in sim/contacts.py bounds the refresh cadence)."""
+        seen, nxt = self.radar_net.paint_state(
+            pos, size_class, now, window,
+            jammers=self._active_enemy_jammers())
+        drone = getattr(self, "drone", None)
+        if (not seen and size_class in ("ship", "lcac") and drone is not None
+                and drone.alive and self.sar.detects(drone.pos, pos)):
+            return True, now
+        return seen, nxt
 
     # ---------------------------------------------------------------- phase 4
 
@@ -3489,6 +3536,9 @@ class CombatWorld(WorldState):
                 antenna_m=BUK_RADAR_ANTENNA_M,
                 ranges=BUK_RADAR_RANGES,
                 height_fn=self._height_fn,
+                # 9S36 X-band sector FCR; boresight 0 deg = the enemy-
+                # continent threat axis (north) at emplacement.
+                scan=SCAN_BUK_9S36, band="X",
             )
             self._buk_radars.append(radar)
             self.radar_net.radars.append(radar)
@@ -3522,6 +3572,8 @@ class CombatWorld(WorldState):
                 antenna_m=CBR_ANTENNA_M,
                 ranges=CBR_RANGES,
                 height_fn=self._height_fn,
+                # TPQ-53-class: emplaced staring at the northern threat arc.
+                scan=SCAN_CBR, band="S",
             )
             self._cbr_radars.append(radar)
             self.radar_net.radars.append(radar)

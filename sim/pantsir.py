@@ -194,11 +194,16 @@ class Pantsir:
         self.engaging = False
 
         # --- Radar (joins the player network) ----------------------------------
+        from sim.radar import ScanDef
         self.radar = Radar(
             radar_id=f"{unit_id}_pantsir",
             pos=self.pos,
             antenna_m=PANTSIR_ANTENNA_M,
             ranges=PANTSIR_RADAR_RANGES,
+            # SOTS/2RL80-class fast acquisition rotator (S-band, ~2 s).
+            # The Ku tracking channel stares while engaging and is not a
+            # search radar (docs/research/radar_scan_and_bands.md).
+            scan=ScanDef("rotating", 2.0, 4.0, 360.0), band="S",
         )
         if radar_network is not None:
             radar_network.radars.append(self.radar)

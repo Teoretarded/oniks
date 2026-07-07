@@ -161,6 +161,53 @@ def test_paint_mode_track_drops_when_radar_dies():
     assert "tgt" not in board.tracks
 
 
+# --- Task 4: world wiring ------------------------------------------------------
+
+def test_scanned_mode_wires_paint_fn():
+    from world.combat import CombatWorld
+    from world.combat_config import CombatConfig
+    w = CombatWorld(CombatConfig(radar_model="scanned"))
+    assert w.contacts.paint_fn is not None
+    assert w.radar_station.scan.kind == "rotating"      # 91N6 acquisition
+    assert w.radar_station.band == "S"
+    w2 = CombatWorld(CombatConfig())                    # functional default
+    assert w2.contacts.paint_fn is None                 # legacy identity
+    assert w2.contacts.visible_fn is not None
+
+
+def test_game_layer_forces_scanned():
+    import inspect
+    from world.sandbox_world import SANDBOX_CONFIG
+    assert SANDBOX_CONFIG.radar_model == "scanned"
+    from game.combat_setup import CombatSetupState
+    assert '"scanned"' in inspect.getsource(CombatSetupState.build_config)
+    from game import campaign
+    assert '"scanned"' in inspect.getsource(campaign.next_config)
+
+
+def test_enemy_awacs_and_fighter_scan_assignments():
+    import inspect
+    from sim import enemy_air
+    # AWACS rotodome rotates; fighter nose is a body-fixed sector.
+    assert 'ScanDef("rotating", 10.0' in inspect.getsource(
+        enemy_air.Awacs.__init__)
+    assert 'ScanDef("sector", 2.0, 3.0, 120.0)' in inspect.getsource(
+        enemy_air.FighterRadar.__init__)
+
+
+def test_fighter_nose_sector_follows_heading():
+    # A fighter flying SOUTH cannot paint a target to its NORTH under the
+    # scanned model — the AESA field of regard is body-fixed.
+    import math as _m
+    from sim import enemy_air
+    fr = enemy_air.FighterRadar("f_r", np.array([0.0, 8_000.0, 0.0]), 0.0)
+    tgt_north = np.array([0.0, 8_000.0, 60_000.0])
+    fr._heading_ref = 0.0                       # nose north
+    assert fr._radar.next_paint_t(tgt_north, 0.0) < _m.inf
+    fr._heading_ref = _m.pi                     # nose south
+    assert fr._radar.next_paint_t(tgt_north, 0.0) == _m.inf
+
+
 def test_legacy_visible_fn_path_untouched():
     # The range-band tables and the visible_fn path must survive verbatim
     # (radar_model="functional" identity).

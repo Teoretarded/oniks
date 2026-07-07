@@ -494,9 +494,18 @@ class FighterRadar:
             pos=pos,
             antenna_m=antenna_m,
             ranges=dict(FIGHTER_RADAR_RANGES),
+            # Nose AESA: X-band, +/-60 deg field of regard fixed to the
+            # airframe (docs/research/radar_scan_and_bands.md) — a fighter
+            # cannot search behind itself under radar_model="scanned".
+            scan=_radar_mod.ScanDef("sector", 2.0, 3.0, 120.0), band="X",
             **radar_kw,
         )
         self._heading_ref: float = 0.0   # set by Fighter each update
+        # Body-fixed boresight: the sector rides the airframe heading.
+        # Convention check: _heading_ref is the LOCKED heading (0 = +Z
+        # north, CW positive) in RADIANS; ScanDef boresight wants degrees.
+        self._radar.boresight_deg = (
+            lambda: math.degrees(self._heading_ref) % 360.0)
 
     # --- passthrough attributes -----------------------------------------------
 
@@ -1499,6 +1508,8 @@ class Awacs:
             pos=self.pos.copy(),   # kept in sync each update
             antenna_m=AWACS_ANTENNA_OFFSET_M,
             ranges=dict(AWACS_RADAR_RANGES),
+            # E-3/A-50-class rotodome: 6 rpm surveillance sweep (S-band).
+            scan=_radar_mod.ScanDef("rotating", 10.0, 1.5, 360.0), band="S",
             **_awacs_radar_kw,
         )
 

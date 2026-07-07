@@ -264,10 +264,17 @@ class ShipDefense:
     to track FORMATION only — see _detects below for the SARH seam.
     None (the default) preserves Phase-2/3/4 behavior exactly."""
 
-    def __init__(self, ship, rng, cue_radars_fn=None):
+    def __init__(self, ship, rng, cue_radars_fn=None, scanned=False):
         self.ship = ship
         self.rng = rng          # shared side rng: CIWS rolls + SM-2 noise seeds
         self._cue_radars_fn = cue_radars_fn
+        # R-P0 scanned radar model: when True, CUE radars (the rotating
+        # AWACS rotodome) only contribute a detection when their beam has
+        # actually painted the bearing inside the check window.  The ship's
+        # OWN radar is a staring multifunction array (Aegis-class faces,
+        # docs/research/radar_scan_and_bands.md) — always painting, so it
+        # is deliberately NOT paint-gated.  False = legacy byte-identical.
+        self._scanned = bool(scanned)
         self.ciws = Ciws(ship.ciws_ammo, rng)
         # id(missile) -> dict(missile, t_next, since, pos, vel, age):
         # the same cadence/sustain gating shape as ContactBoard._vis, plus
@@ -283,7 +290,7 @@ class ShipDefense:
 
     # -------------------------------------------------------------- tracking
 
-    def _detects(self, pos, size_class):
+    def _detects(self, pos, size_class, now=0.0):
         """Track-formation detection: the ship's own SPY-1, OR any
         datalinked cueing radar (Phase 5a: the AWACS — spec section 3).
 
@@ -300,7 +307,13 @@ class ShipDefense:
             return True
         if self._cue_radars_fn is None:
             return False
+        if not self._scanned:
+            return any(r.detects(pos, size_class)
+                       for r in self._cue_radars_fn())
+        # Scanned model: the rotating rotodome contributes only when its
+        # beam painted the bearing inside the current check window.
         return any(r.detects(pos, size_class)
+                   and r.painted(pos, now, VIS_CHECK_PERIOD)
                    for r in self._cue_radars_fn())
 
     def _update_tracks(self, hostiles, now, dt):
@@ -317,7 +330,7 @@ class ShipDefense:
                 st["age"] += dt
             if now >= st["t_next"]:
                 st["t_next"] = now + VIS_CHECK_PERIOD
-                if self._detects(m.pos, "missile"):
+                if self._detects(m.pos, "missile", now):
                     if st["since"] is None:
                         st["since"] = now
                     st["pos"] = m.pos.copy()    # fresh fire-control fix
@@ -350,7 +363,7 @@ class ShipDefense:
                 st["age"] += dt
             if now >= st["t_next"]:
                 st["t_next"] = now + VIS_CHECK_PERIOD
-                if self._detects(d.pos, d.radar_size):
+                if self._detects(d.pos, d.radar_size, now):
                     if st["since"] is None:
                         st["since"] = now
                     st["pos"] = d.pos.copy()    # fresh fire-control fix
@@ -685,9 +698,11 @@ class EnemyDefenseController:
     (world/combat.py CombatWorld.step).  ``cue_radars_fn`` fans the
     shared datalink cue (the AWACS) into every ship's fire control."""
 
-    def __init__(self, destroyers, rng=None, cue_radars_fn=None):
+    def __init__(self, destroyers, rng=None, cue_radars_fn=None,
+                 scanned=False):
         rng = np.random.default_rng(0) if rng is None else rng
-        self.units = [ShipDefense(d, rng, cue_radars_fn=cue_radars_fn)
+        self.units = [ShipDefense(d, rng, cue_radars_fn=cue_radars_fn,
+                                  scanned=scanned)
                       for d in destroyers]
 
     def step(self, world, dt):
