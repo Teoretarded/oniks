@@ -309,3 +309,73 @@ gates fail: stationary coherence regresses at three measured pairs, and
 mist GPU time is far over budget. The next pass needs a cheaper
 mean-preserving resolution strategy, likely capped LOD or half-res
 clouds, rather than fully ungated LOD at full resolution.
+
+## Round 8 - consolidation audit
+
+Fresh shader audit:
+- No removed-feature constants remain: `DETAIL_FADE*`, `FAR_FLAT*`,
+  `near_amt`, `detail_amt`, and `far_flat` are gone.
+- No remaining view-distance-dependent density structure remains. The
+  density function no longer takes `view_t`; distance only affects the
+  step footprint `dt_step`, which drives texture LOD.
+- `density_at`, `sun_transmittance`, the entry bisection, and the main
+  march now all pass the same per-sample `dt` into density queries.
+- Skip-ahead and lit threshold are consistent: any `d >= 0.003` resets
+  mist stride; lit work happens for `d > 0.003`.
+- Stale comments still said "slab-entry" depth, while the shader writes
+  first-hit depth. Comments were corrected to first-hit.
+- The hard coverage and erosion remap knees were the main tuning conflict
+  left after Round 7b. They cut facets into the cloud and hurt stationary
+  autocorrelation.
+
+Changes:
+- Added `soft_remap01`, a smoothstep-shaped 0..1 remap.
+- Replaced the coverage knee
+  `remap(base * prof, 1 - coverage * 0.78, 1)` with `soft_remap01`.
+- Replaced detail erosion `remap(d, det * 0.5, 1)` with `soft_remap01`.
+- Removed the now-dead `view_t` parameter from `density_at` and
+  `sun_transmittance`.
+- Corrected first-hit depth comments.
+- MARCH_STEPS stayed 224. The perf run was not quiet, so the 224->192
+  ladder was not applied.
+
+Approach probe (`python -m tools.probe_cloud_flight --spec docs/examples/flight_approach.json`):
+
+| run | frame diff mean/max | max comp jump | worst mask drop | mask start/end |
+| --- | ---: | ---: | ---: | ---: |
+| Round 7b | 3.34 / 59.74 | 6 | 0.6623 | 0.2688 / 0.3088 |
+| Round 8 | 2.62 / 58.73 | 6 | 0.6540 | 0.3220 / 0.2767 |
+
+Acceptance: component jump <= 8 PASS; frame diff mean <= 4 PASS.
+
+Stationary watch (`python -m tools.probe_cloud_flight --spec docs/examples/flight_morph_watch.json`):
+
+| run | diff mean/max | coh 0-37 | coh 0-75 | coh 0-150 | coh 0-299 | comp jump |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Round 7b | 0.09 / 0.12 | 0.929 | 0.877 | 0.770 | 0.608 | 1 |
+| Round 8 | 0.02 / 0.02 | 0.987 | 0.962 | 0.918 | 0.896 | 2 |
+
+Verdict: the short-pair coherence dip was the sharper-edge
+autocorrelation effect, not temporal instability. Softened knees restored
+coherence and reduced per-frame diff.
+
+Perf (`python -m tools.perf_clouds 300 --mist`):
+
+| section | avg ms | p95 ms |
+| --- | ---: | ---: |
+| sim_step | 10.55 | 17.26 |
+| clouds | 15.39 | 30.04 |
+| TOTAL | 41.04 | 61.19 |
+
+Verdict: perf is still not trustworthy for ladder tuning because the
+frame total is far above the <20 ms quiet-machine threshold. No march
+ladder was applied in this pass.
+
+Sweep smoke (`python -m tools.probe_cloud_sweep 7`) completed after the
+final shader cleanup and wrote all five sheets:
+`renders/cloud_sweep_2km_seed7.png`, `4km`, `10km`, `30km`, and `50km`.
+
+Status: DONE_WITH_CONCERNS. The consolidation cleanup and softening pass
+improved approach metrics and restored stationary coherence, with no dead
+view-distance density structure left. The remaining concern is perf: the
+available measurement was load-contaminated and still far over budget.

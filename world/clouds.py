@@ -14,7 +14,7 @@ TWO HALVES, one module:
   textures, draws one fullscreen raymarch pass after opaque geometry and
   before particles into the default framebuffer — depth TEST on
   (terrain/ships occlude clouds via the
-  slab-entry log depth), depth WRITE off, premultiplied blend,
+  first-hit log depth), depth WRITE off, premultiplied blend,
   ``apply_haze`` on the result.  Animation clock = SIM time (replays
   identical), never wall clock.
 
@@ -32,6 +32,8 @@ GPU density anti-wallpaper formulas (W-P6 must mirror these on CPU):
 * Two-scale base samples ``base`` at the warped ``cs`` position over
   ``BASE_TILE_M`` and ``BASE_TILE_M * 2.618``, then blends
   ``base = mix(b1, b2, 0.38)`` before the density remap.
+* Coverage and detail erosion use soft 0..1 remaps (smoothstep-shaped
+  ramps) so mip refinement does not cut hard facets into the density.
 * Detail samples use the same ``cs`` drift.  There is no differential
   detail drift.
 * Camera distance may only change texture LOD/resolution.  Density
@@ -275,7 +277,7 @@ void main(){
 #    by a per-type vertical profile, eroded by detail Worley;
 #  * lighting = Beer-Lambert x powder x dual-lobe-ish HG, 4-step sun cone,
 #    ambient from the sky gradient pair;
-#  * depth: gl_FragDepth at the SLAB ENTRY point via the exact locked
+#  * depth: gl_FragDepth at the FIRST CLOUD HIT via the exact locked
 #    log-depth formula log2(1 + w) * fcoef * 0.5 (terrain occludes);
 #  * apply_haze() on the lit result; premultiplied-alpha output.
 CLOUD_FRAG = """
@@ -322,6 +324,11 @@ float remap(float x, float a, float b, float c, float d){
     return c + (x - a) / max(b - a, 1e-5) * (d - c);
 }
 
+float soft_remap01(float x, float a, float b){
+    float u = clamp((x - a) / max(b - a, 1e-5), 0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
+}
+
 float march_dt(float t, vec3 rd, float skip_mul){
     // 3% growth: 224 steps reach 450+ km while 10 km out still steps
     // ~300 m (0.055 stepped ~550 m there and stippled - v5 gate).
@@ -347,7 +354,7 @@ float height_profile(float hfrac, float ctype, float top){
 // are ALONG the ray.  Sampling 47 m noise voxels every 300-900 m aliases
 // into coherent interference rings ('CRT' ripples, every playtest).
 // Force the mip whose footprint matches the step length.
-float density_at(vec3 wp, float view_t, float dt_step){
+float density_at(vec3 wp, float dt_step){
     float hfrac = (wp.y - u_cloud_base) / (u_cloud_top - u_cloud_base);
     if (hfrac < 0.0 || hfrac > 1.0) return 0.0;
     // Step-matched LOD is shape-safe only when every density query,
@@ -374,10 +381,10 @@ float density_at(vec3 wp, float view_t, float dt_step){
                           max(lod_b - 1.4, 0.0)).r;   // 2.618x coarser tile
     float base = mix(b1, b2, BASE_BLEND);
     base = remap(base, 0.30, 0.90, 0.0, 1.0);  // texture band -> full range
-    float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
+    float d = soft_remap01(base * prof, 1.0 - coverage * 0.78, 1.0);
     if (d <= 0.0) return 0.0;
     float det = textureLod(u_detail_noise, cs / DETAIL_TILE, lod_d).r;
-    d = remap(d, det * 0.5, 1.0, 0.0, 1.0);
+    d = soft_remap01(d, det * 0.5, 1.0);
     if (d <= 0.0) return 0.0;
     // Ragged undersides: real cumulus bases are wispy, not a flat slab
     // (flight probe: the mass base read as one featureless plate).
@@ -387,17 +394,17 @@ float density_at(vec3 wp, float view_t, float dt_step){
     return clamp(d * coverage, 0.0, 1.0);
 }
 
-float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t, float dt_step){
+float sun_transmittance(vec3 wp, vec3 sun_dir, float dt_step){
     // Sun taps use the caller's view-step footprint so lighting and view
     // march agree on the same density field.  The old fine sun march made
     // blurred view-density crevices shade as deep interiors.
     float tau_m = 0.0;
     for (int i = 1; i <= SUN_STEPS; i++){
-        tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t,
+        tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)),
                             dt_step) * SUN_STEP_M;
     }
-    tau_m += density_at(wp + sun_dir * SUN_COARSE_DIST_M, view_t,
-                        dt_step) * SUN_COARSE_WEIGHT_M;
+    tau_m += density_at(wp + sun_dir * SUN_COARSE_DIST_M, dt_step)
+             * SUN_COARSE_WEIGHT_M;
     return exp(-tau_m * SIGMA * 1.6);
 }
 
@@ -459,7 +466,7 @@ void main(){
     for (int i = 0; i < MARCH_STEPS; i++){
             if (t > t1) break;
             vec3 wp = u_cam_pos + rd * t;
-            float d = density_at(wp, t, dt);
+            float d = density_at(wp, dt);
             if (d >= 0.003){
                 mist_run = 0;
                 skip_mul = 1.0;      // full reset: gradual halving left a
@@ -485,8 +492,8 @@ void main(){
                     float hi = t;
                     for (int k = 0; k < 4; k++){
                         float mid = 0.5 * (lo + hi);
-                        if (density_at(u_cam_pos + rd * mid, mid, dt)
-                            > 0.003) hi = mid;
+                        if (density_at(u_cam_pos + rd * mid, dt) > 0.003)
+                            hi = mid;
                         else lo = mid;
                     }
                     t_hit = hi;
@@ -497,7 +504,7 @@ void main(){
                 if (t_hit < 0.0) t_hit = t;
                 if ((lit_step % 2) == 0){
                     float measured_sun_T = sun_transmittance(wp, u_sun_dir,
-                                                             t, dt);
+                                                             dt);
                     if (lit_step == 0) cached_sun_T = measured_sun_T;
                     else cached_sun_T = mix(cached_sun_T, measured_sun_T,
                                             0.45);
