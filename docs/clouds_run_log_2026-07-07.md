@@ -172,3 +172,63 @@ oblique-angle artifact the user found in minutes.
   `density_at` — the v5 plan documents the exact formulas to mirror.
 - First battle on a new seed pays the ~5 s bake under BUILDING WORLD;
   cached after. A boot-thread bake is the fix if it annoys.
+
+## Round 6 - camera-anchored morphing
+
+Diagnosis confirmed in `world/clouds.py`: `density_at` had
+view-distance-dependent structure. Detail erosion faded in over 8-25 km,
+the near block under 4 km added a finer erosion octave plus a density
+boost, and far flattening changed the base field past 120 km. That means
+approach footage could show real camera-anchored shape changes, not just
+resolution refinement.
+
+Final code changes:
+- Weather/base/detail still share one cloud-space coordinate `cs`.
+- Deleted `far_flat`.
+- Deleted `detail_amt`; primary detail erosion is always active.
+- Deleted `near_amt` and the near-only density boost.
+- Raised global `SIGMA` 0.016 -> 0.018.
+- Kept the existing distance-gated texture LOD. Distance now changes
+  resolution only.
+
+Important deviation: the requested always-on second fine detail octave was
+tested but not kept. Paying that extra 3D texture read across the full mist
+march left the GPU gate at 11.66/16.59 ms. Guarding the read at max LOD did
+not improve it (11.55/16.64 ms), and removing the second octave still left
+the final shader over budget.
+
+Approach metric (`docs/examples/flight_approach.json`, 20 s, 15 fps):
+
+| run | frame diff mean/max | max comp jump | worst mask drop | worst mask step | mask start/end |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 7.66 / 47.40 | 19 | 0.6148 | 0.6148 | 0.4522 / 0.2485 |
+| after final | 8.45 / 58.11 | 23 | 0.5913 | 0.5913 | 0.2570 / 0.4166 |
+
+Coherence peaks:
+
+| run | 0-37 | 0-75 | 0-150 | 0-299 |
+| --- | ---: | ---: | ---: | ---: |
+| before | 0.316 | 0.274 | 0.448 | 0.476 |
+| after final | 0.333 | 0.229 | 0.279 | 0.432 |
+
+Perf gate (`python -m tools.perf_clouds 300 --mist`):
+
+| run | clouds avg/p95 | frame avg | result |
+| --- | ---: | ---: | --- |
+| final | 11.27 / 16.87 ms | 39.36 ms | FAIL vs 3.0 / 5.0 ms |
+
+Status: BLOCKED. The view-distance structure terms are removed, but the
+numeric acceptance did not pass and the mist GPU budget is still far over
+target. The next viable path is a separate performance/metric pass, likely
+half-res/temporal clouds or a cheaper detail representation, not more
+camera-distance gating.
+
+**Orchestrator correction to Round 6:** Codex's BLOCKED verdict rested on
+perf numbers taken while the machine was under heavy external load (its
+frame totals read 39 ms; an independent re-run read clouds 3.89/5.91 ms
+with totals still 29 ms — load-polluted, the last clean-machine reading
+of the previous state was 2.93/3.24). The view-independent density
+restructure is KEPT: camera-anchored morphing was the user's primary
+complaint and structure-vs-resolution is the correct invariant. Owed on
+a QUIET machine: the mist gate re-run; if genuinely over 3.0/5.0 the
+knobs are MARCH_STEPS 224->192, then the half-res FBO phase.

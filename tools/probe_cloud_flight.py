@@ -14,6 +14,7 @@ Outputs per shot:
 * renders/flight_{name}_sheet2.png
 * stdout per-frame center-crop mean absolute diff metrics
 * stdout center-crop FFT coherence metrics against frame 0
+* stdout upper-half cloud mask component/fraction stability metrics
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ START_DIST_M = 9_000.0
 END_DIST_M = 2_000.0
 TILE_W, TILE_H = 500, 281
 COHERENCE_PAIRS = (37, 75, 150, 299)
+MASK_MARGIN = 12.0
+MIN_COMPONENT_PIXELS = 16
 
 
 class SpecError(ValueError):
@@ -275,6 +278,46 @@ def _coherence_pair(a: np.ndarray, b: np.ndarray) -> tuple[float, tuple[int, int
     return peak, (dx, dy)
 
 
+def _cloud_mask_stats(arr: np.ndarray) -> tuple[int, float]:
+    rgb = arr.astype(np.float32)
+    lum = rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+    upper = lum[:, :TILE_H // 2]
+    # Use side strips as the local sky/backdrop estimate so a cloud filling
+    # the center of the frame does not raise its own threshold.
+    strip_w = max(8, upper.shape[0] // 10)
+    backdrop = np.concatenate((upper[:strip_w, :].ravel(),
+                               upper[-strip_w:, :].ravel()))
+    thresh = float(np.median(backdrop)) + MASK_MARGIN
+    mask = upper > thresh
+    components = _count_components(mask)
+    return components, float(mask.mean())
+
+
+def _count_components(mask: np.ndarray) -> int:
+    h, w = int(mask.shape[1]), int(mask.shape[0])
+    seen = np.zeros(mask.shape, dtype=np.bool_)
+    count = 0
+    for x in range(w):
+        for y in range(h):
+            if seen[x, y] or not mask[x, y]:
+                continue
+            stack = [(x, y)]
+            seen[x, y] = True
+            size = 0
+            while stack:
+                cx, cy = stack.pop()
+                size += 1
+                for nx, ny in ((cx - 1, cy), (cx + 1, cy),
+                               (cx, cy - 1), (cx, cy + 1)):
+                    if (0 <= nx < w and 0 <= ny < h
+                            and not seen[nx, ny] and mask[nx, ny]):
+                        seen[nx, ny] = True
+                        stack.append((nx, ny))
+            if size >= MIN_COMPONENT_PIXELS:
+                count += 1
+    return count
+
+
 def _apply_camera(state, pos, target, roll_rad):
     yaw, pitch = _yaw_pitch_to(pos, target)
     state.rig.freecam.pos = np.asarray(pos, dtype=np.float64)
@@ -310,6 +353,13 @@ def _frames_for_spec(spec: dict, cluster) -> list[tuple[np.ndarray, np.ndarray, 
             pos = start * (1.0 - u) + end * u
             target = _resolve_look(segment["look"], pos, velocity, cluster,
                                    f"segments[{idx}].look")
+            if float(np.linalg.norm(target - pos)) < 1e-6:
+                vn = float(np.linalg.norm(velocity))
+                if vn > 1e-6:
+                    target = pos + velocity / vn * 1000.0
+                else:
+                    target = pos + np.array([0.0, 0.0, 1000.0],
+                                            dtype=np.float64)
             roll = math.radians(roll0 + (roll1 - roll0) * u0)
             frames.append((pos, target, roll))
         previous_end = end
@@ -358,6 +408,28 @@ def render_spec(state, spec: dict, cluster) -> None:
         peak, (dx, dy) = _coherence_pair(grays[0], grays[idx])
         print(f"[flight] {name}: coherence 0-{idx} peak {peak:.3f} "
               f"offset ({dx},{dy}) px")
+
+    mask_stats = [_cloud_mask_stats(arr) for arr in arrs]
+    counts = np.array([c for c, _ in mask_stats], dtype=np.int32)
+    fracs = np.array([f for _, f in mask_stats], dtype=np.float32)
+    if len(counts) > 1:
+        count_d = np.diff(counts)
+        frac_d = np.diff(fracs)
+        max_comp_jump = int(np.max(count_d))
+        worst_frac_drop = float(max(0.0, -np.min(frac_d)))
+        worst_frac_step = float(np.max(np.abs(frac_d)))
+    else:
+        max_comp_jump = 0
+        worst_frac_drop = 0.0
+        worst_frac_step = 0.0
+    print(f"[flight] {name}: structure max_comp_jump {max_comp_jump}, "
+          f"worst_mask_drop {worst_frac_drop:.4f}, "
+          f"worst_mask_step {worst_frac_step:.4f}, "
+          f"mask_start {fracs[0]:.4f}, mask_end {fracs[-1]:.4f}")
+    print(f"[flight] {name}: structure components "
+          + ",".join(str(int(c)) for c in counts))
+    print(f"[flight] {name}: structure mask_frac "
+          + ",".join(f"{float(f):.4f}" for f in fracs))
 
     pil = [Image.fromarray(pygame.surfarray.array3d(fr).swapaxes(0, 1))
            for fr in frames]

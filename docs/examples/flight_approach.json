@@ -1,0 +1,15 @@
+{
+  "seed": 7,
+  "fps": 15,
+  "name": "approach",
+  "segments": [
+    {
+      "sec": 20.0,
+      "from": {"cluster_offset": [-12000.0, 0.0, -12000.0]},
+      "to": {"cluster_offset": [0.0, 0.0, 0.0]},
+      "ease": "linear",
+      "look": "cluster",
+      "roll_deg": [0.0, 0.0]
+    }
+  ]
+}

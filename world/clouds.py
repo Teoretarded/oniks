@@ -32,8 +32,12 @@ GPU density anti-wallpaper formulas (W-P6 must mirror these on CPU):
 * Two-scale base samples ``base`` at the warped ``cs`` position over
   ``BASE_TILE_M`` and ``BASE_TILE_M * 2.618``, then blends
   ``base = mix(b1, b2, 0.38)`` before the density remap.
-* Detail samples use the same ``cs`` drift, including the near-field fine
-  octave.  There is no differential detail drift.
+* Detail samples use the same ``cs`` drift.  There is no differential
+  detail drift.
+* Camera distance may only change texture LOD/resolution.  Density
+  structure itself is view-independent: erosion is always active, far
+  flattening is absent, and close-range opacity is controlled by global
+  extinction rather than camera-distance density boosts.
 """
 
 from __future__ import annotations
@@ -302,8 +306,8 @@ const float SUN_COARSE_EXTRA_M = 1800.0;
 const float SUN_COARSE_DIST_M = SUN_STEP_M * float(SUN_STEPS + 1)
                                 + SUN_COARSE_EXTRA_M;
 const float SUN_COARSE_WEIGHT_M = 1800.0;
-const float SIGMA         = 0.016;    // extinction per density per metre
-                                      // (0.022 stippled: speckle amplitude
+const float SIGMA         = 0.018;    // extinction per density per metre
+                                      // (kept below 0.019; speckle amplitude
                                       // tracks sigma*d*dt per step)
 const float WEATHER_TILE  = 300000.0;
 const float BASE_TILE     = 6000.0;
@@ -313,10 +317,6 @@ const float BASE_RATIO    = 2.618;
 const float BASE_BLEND    = 0.38;
 const float WARP_WEATHER_SCALE = 0.37;
 const float WARP_OFFSET_M = 5000.0;
-const float DETAIL_FADE0_M = 8000.0;
-const float DETAIL_FADE1_M = 25000.0;
-const float FAR_FLAT0_M    = 120000.0;
-const float FAR_FLAT1_M    = 400000.0;
 
 float remap(float x, float a, float b, float c, float d){
     return c + (x - a) / max(b - a, 1e-5) * (d - c);
@@ -366,7 +366,6 @@ float density_at(vec3 wp, float view_t, float dt_step){
     if (coverage <= 0.01) return 0.0;
     float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
     if (prof <= 0.0) return 0.0;
-    float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t) * 0.6;
     vec2 warp_uv = cs.xz / (WEATHER_TILE * WARP_WEATHER_SCALE) + vec2(0.618);
     vec2 base_warp = (textureLod(u_weather, warp_uv, lod_w).gb - vec2(0.5))
                      * WARP_OFFSET_M;
@@ -376,28 +375,12 @@ float density_at(vec3 wp, float view_t, float dt_step){
     float b2 = textureLod(u_base_noise, base_wp / (BASE_TILE * BASE_RATIO),
                           max(lod_b - 1.4, 0.0)).r;   // 2.618x coarser tile
     float base = mix(b1, b2, BASE_BLEND);
-    base = mix(base, 0.5, far_flat);
     base = remap(base, 0.30, 0.90, 0.0, 1.0);  // texture band -> full range
     float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
-    d = mix(d, coverage * prof, far_flat);
     if (d <= 0.0) return 0.0;
     float det = textureLod(u_detail_noise, cs / DETAIL_TILE, lod_d).r;
-    float eroded = remap(d, det * 0.5, 1.0, 0.0, 1.0);
-    float detail_amt = 1.0 - smoothstep(DETAIL_FADE0_M, DETAIL_FADE1_M,
-                                        view_t);
-    d = mix(d, eroded, detail_amt);             // erode near edges only
-    // CLOSE RANGE (flight probe, round 4): within ~3 km the 37 m detail
-    // voxels magnify into glassy smoothness and the eroded fringe reads
-    // as see-through mush.  A second, 3.2x finer detail octave carves
-    // billows, and a mild density boost makes near cloud go honestly
-    // opaque instead of X-ray.
-    float near_amt = 1.0 - smoothstep(1500.0, 4000.0, view_t);
-    if (near_amt > 0.0){
-        float det2 = textureLod(u_detail_noise,
-                                cs / (DETAIL_TILE * 0.31), 0.0).r;
-        d = mix(d, remap(d, det2 * 0.38, 1.0, 0.0, 1.0), near_amt);
-        d *= 1.0 + 0.35 * near_amt;
-    }
+    d = remap(d, det * 0.5, 1.0, 0.0, 1.0);
+    if (d <= 0.0) return 0.0;
     // Ragged undersides: real cumulus bases are wispy, not a flat slab
     // (flight probe: the mass base read as one featureless plate).
     float hcol = hfrac / max(wm.b, 0.12);
