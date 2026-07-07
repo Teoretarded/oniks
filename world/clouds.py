@@ -22,12 +22,18 @@ Determinism guard (LOCKED): no sim module imports this file
 (tests/test_cloud_bake.py greps for offenders).
 
 GPU density anti-wallpaper formulas (W-P6 must mirror these on CPU):
+* Define one cloud-space coordinate ``cs = wp + drift``.  Weather,
+  domain-warp, base, and detail lookups all derive from ``cs`` so the
+  volume translates coherently; only the vertical height profile uses
+  world ``wp.y``.
 * Base lookup domain warp samples ``weather`` at
-  ``wp.xz / (WEATHER_TILE_M * 0.37) + 0.618`` and uses
+  ``cs.xz / (WEATHER_TILE_M * 0.37) + 0.618`` and uses
   ``(gb - 0.5) * 5000 m`` as an x/z offset, applied only to base noise.
-* Two-scale base samples ``base`` at the warped ``(wp + drift)`` position
-  over ``BASE_TILE_M`` and ``BASE_TILE_M * 2.618``, then blends
+* Two-scale base samples ``base`` at the warped ``cs`` position over
+  ``BASE_TILE_M`` and ``BASE_TILE_M * 2.618``, then blends
   ``base = mix(b1, b2, 0.38)`` before the density remap.
+* Detail samples use the same ``cs`` drift, including the near-field fine
+  octave.  There is no differential detail drift.
 """
 
 from __future__ import annotations
@@ -353,17 +359,18 @@ float density_at(vec3 wp, float view_t, float dt_step){
     float lod_d = clamp(log2(dt_step / 37.5), 0.0, 4.0) * lod_gate;
     float lod_w = clamp(log2(dt_step / 586.0), 0.0, 5.0) * lod_gate;
     vec3 drift = vec3(u_time * WIND_MS, 0.0, u_time * WIND_MS * 0.35);
-    vec2 wuv = (wp.xz + drift.xz) / WEATHER_TILE;
+    vec3 cs = wp + drift;
+    vec2 wuv = cs.xz / WEATHER_TILE;
     vec3 wm = textureLod(u_weather, wuv, lod_w).rgb;   // coverage/type/top
     float coverage = clamp(wm.r + u_coverage_bias, 0.0, 1.0);
     if (coverage <= 0.01) return 0.0;
     float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
     if (prof <= 0.0) return 0.0;
     float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t) * 0.6;
-    vec2 warp_uv = wp.xz / (WEATHER_TILE * WARP_WEATHER_SCALE) + vec2(0.618);
+    vec2 warp_uv = cs.xz / (WEATHER_TILE * WARP_WEATHER_SCALE) + vec2(0.618);
     vec2 base_warp = (textureLod(u_weather, warp_uv, lod_w).gb - vec2(0.5))
                      * WARP_OFFSET_M;
-    vec3 base_wp = wp + drift;
+    vec3 base_wp = cs;
     base_wp.xz += base_warp;
     float b1 = textureLod(u_base_noise, base_wp / BASE_TILE, lod_b).r;
     float b2 = textureLod(u_base_noise, base_wp / (BASE_TILE * BASE_RATIO),
@@ -374,8 +381,7 @@ float density_at(vec3 wp, float view_t, float dt_step){
     float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
     d = mix(d, coverage * prof, far_flat);
     if (d <= 0.0) return 0.0;
-    float det = textureLod(u_detail_noise, (wp + drift * 1.6) / DETAIL_TILE,
-                           lod_d).r;
+    float det = textureLod(u_detail_noise, cs / DETAIL_TILE, lod_d).r;
     float eroded = remap(d, det * 0.5, 1.0, 0.0, 1.0);
     float detail_amt = 1.0 - smoothstep(DETAIL_FADE0_M, DETAIL_FADE1_M,
                                         view_t);
@@ -388,8 +394,7 @@ float density_at(vec3 wp, float view_t, float dt_step){
     float near_amt = 1.0 - smoothstep(1500.0, 4000.0, view_t);
     if (near_amt > 0.0){
         float det2 = textureLod(u_detail_noise,
-                                (wp + drift * 2.3) / (DETAIL_TILE * 0.31),
-                                0.0).r;
+                                cs / (DETAIL_TILE * 0.31), 0.0).r;
         d = mix(d, remap(d, det2 * 0.38, 1.0, 0.0, 1.0), near_amt);
         d *= 1.0 + 0.35 * near_amt;
     }

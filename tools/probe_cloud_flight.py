@@ -13,6 +13,7 @@ Outputs per shot:
 * renders/flight_{name}_sheet1.png
 * renders/flight_{name}_sheet2.png
 * stdout per-frame center-crop mean absolute diff metrics
+* stdout center-crop FFT coherence metrics against frame 0
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ DEFAULT_SEC = 5.0
 START_DIST_M = 9_000.0
 END_DIST_M = 2_000.0
 TILE_W, TILE_H = 500, 281
+COHERENCE_PAIRS = (37, 75, 150, 299)
 
 
 class SpecError(ValueError):
@@ -255,6 +257,24 @@ def _grab(window):
     return pygame.image.frombytes(buf, (w, h), "RGB", True)
 
 
+def _coherence_pair(a: np.ndarray, b: np.ndarray) -> tuple[float, tuple[int, int]]:
+    a0 = a.astype(np.float32) - float(a.mean())
+    b0 = b.astype(np.float32) - float(b.mean())
+    norm = float(np.linalg.norm(a0) * np.linalg.norm(b0))
+    if norm <= 1e-6:
+        return 0.0, (0, 0)
+    corr = np.fft.ifft2(np.fft.fft2(a0) * np.conj(np.fft.fft2(b0))).real
+    corr /= norm
+    peak_idx = np.unravel_index(int(np.argmax(corr)), corr.shape)
+    peak = max(0.0, min(1.0, float(corr[peak_idx])))
+    dx, dy = int(peak_idx[0]), int(peak_idx[1])
+    if dx > corr.shape[0] // 2:
+        dx -= corr.shape[0]
+    if dy > corr.shape[1] // 2:
+        dy -= corr.shape[1]
+    return peak, (dx, dy)
+
+
 def _apply_camera(state, pos, target, roll_rad):
     yaw, pitch = _yaw_pitch_to(pos, target)
     state.rig.freecam.pos = np.asarray(pos, dtype=np.float64)
@@ -331,6 +351,14 @@ def render_spec(state, spec: dict, cluster) -> None:
     else:
         print(f"[flight] {name}: one frame, no diff metric")
 
+    grays = [arr[crop].astype(np.float32).mean(axis=2) for arr in arrs]
+    for idx in COHERENCE_PAIRS:
+        if idx >= len(grays):
+            continue
+        peak, (dx, dy) = _coherence_pair(grays[0], grays[idx])
+        print(f"[flight] {name}: coherence 0-{idx} peak {peak:.3f} "
+              f"offset ({dx},{dy}) px")
+
     pil = [Image.fromarray(pygame.surfarray.array3d(fr).swapaxes(0, 1))
            for fr in frames]
     gif = f"renders/flight_{name}_seed{seed}.gif"
@@ -353,10 +381,22 @@ def render_spec(state, spec: dict, cluster) -> None:
         print(f"[flight] wrote {path}")
 
 
-def _prepare_state(seed: int):
+def _apply_wind0_patch():
+    import world.clouds as clouds_mod
+    old = "const float WIND_MS       = 18.0;"
+    new = "const float WIND_MS       = 0.0;"
+    if old not in clouds_mod.CLOUD_FRAG:
+        raise SpecError("wind0 patch target not found in CLOUD_FRAG")
+    clouds_mod.CLOUD_FRAG = clouds_mod.CLOUD_FRAG.replace(old, new)
+    print("[flight] WIND_MS patched to 0.0 for this run")
+
+
+def _prepare_state(seed: int, wind0: bool = False):
     from main import App, PHYS_DT
     from world.clouds import Clouds
 
+    if wind0:
+        _apply_wind0_patch()
     app = App(hidden=True)
     app.start_sandbox()
     state = app.state
@@ -376,6 +416,8 @@ def parse_args(argv):
                    help="seed for the built-in default shots")
     p.add_argument("--spec", type=Path,
                    help="JSON choreography spec")
+    p.add_argument("--wind0", action="store_true",
+                   help="patch CLOUD_FRAG WIND_MS to 0.0 for this run")
     return p.parse_args(argv)
 
 
@@ -393,7 +435,7 @@ def main(argv=None) -> int:
         if specs is None:
             specs = default_specs(seed, cluster)
         os.makedirs("renders", exist_ok=True)
-        app, state = _prepare_state(seed)
+        app, state = _prepare_state(seed, wind0=args.wind0)
         try:
             for spec in specs:
                 render_spec(state, spec, cluster)
