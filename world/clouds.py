@@ -436,8 +436,8 @@ void main(){
     // Ambient gradient: TOPS bright (they see the whole sky), bases
     // gray-blue.  v5 gate: this was inverted and clouds read as dark
     // charcoal masses from above.
-    vec3 amb_lo = vec3(0.46, 0.51, 0.60) * 0.60;   // cloud-base ambient
-    vec3 amb_hi = vec3(0.84, 0.89, 0.97) * 0.60;   // cloud-top ambient
+    vec3 amb_lo = vec3(0.58, 0.66, 0.78) * 0.78;   // cloud-base ambient
+    vec3 amb_hi = vec3(0.88, 0.92, 1.00) * 0.68;   // cloud-top ambient
 
     // Single jittered march.  Sun transmittance is cached every other lit
     // sample, and long low-density mist runs skip ahead without violating
@@ -492,20 +492,26 @@ void main(){
                 }
                 if (t_hit < 0.0) t_hit = t;
                 if ((lit_step % 2) == 0){
-                    cached_sun_T = sun_transmittance(wp, u_sun_dir, t);
+                    float measured_sun_T = sun_transmittance(wp, u_sun_dir,
+                                                             t);
+                    if (lit_step == 0) cached_sun_T = measured_sun_T;
+                    else cached_sun_T = mix(cached_sun_T, measured_sun_T,
+                                            0.45);
                 }
                 lit_step += 1;
                 float sun_T = cached_sun_T;
                 float ext = d * SIGMA * dt;
                 // Powder: local-density form (the step-size form blew
                 // out — huge grazing steps saturated it to 1 everywhere).
-                float powder = 1.0 - exp(-4.0 * d);
+                float powder = max(0.18, 1.0 - exp(-6.0 * d));
+                powder = mix(powder, 1.0, sun_T * 0.25);
                 float hfrac = clamp((wp.y - u_cloud_base)
                                     / (u_cloud_top - u_cloud_base),
                                     0.0, 1.0);
                 vec3 amb = mix(amb_lo, amb_hi, hfrac);
-                amb = mix(amb * vec3(0.62, 0.70, 0.85), amb, sun_T);
-                amb *= 0.50 + 0.50 * sun_T;
+                amb = mix(amb * vec3(0.68, 0.76, 0.92), amb,
+                          smoothstep(0.05, 0.85, sun_T));
+                amb *= 0.78 + 0.22 * sun_T;
                 // phase*10 alone is near-black at anti-solar view angles;
                 // the +0.5 isotropic multiple-scattering floor keeps
                 // sunlit cloud WHITE from every direction.  Powder gates
