@@ -180,10 +180,20 @@ class SamDef:
     k_induced: float = 0.0    # induced-drag factor K
     cl_max: float = 0.0       # max lift coeff on ref_area (q-limits available g)
     autopilot_tau: float = 0.0  # s, achieved-accel first-order lag
+    # --- R-P1 terminal seeker physics (spec PART 2 §10.2) -------------------
+    # guidance: "arh" (active radar homing — own seeker, fire-and-forget:
+    # 40N6, SM-6), "sarh" (semi-active/TVM — needs a live illuminator ON
+    # SECTOR through terminal: 48N6, SM-2, 9M317), or "command" (the FCR
+    # steers the round; no onboard seeker cone: 9M338, 57E6).  The seeker
+    # cone gates terminal HANDOVER under radar_model="scanned" only; the
+    # legacy functional suite keeps the pure range-gate handover.
+    seeker_half_angle_deg: float = 30.0
+    guidance: str = "arh"
 
 
 S300 = SamDef(
     weapon_id="s300", display_name="S-300 48N6",
+    guidance="sarh",   # TVM: the 30N6-class engagement radar must illuminate
     length=7.5, diameter=0.515, launch_mass=1900.0, propellant_mass=1020.0,
     # Task LC true cold launch (s300_reference.md §1): catapult exit, pure
     # ballistic hang to near-zero vertical speed ~20-25 m above ground,
@@ -222,6 +232,7 @@ S300 = SamDef(
 #     the deck ejector is a brief gas pulse, not a ballistic free-flight).
 SM2 = SamDef(
     weapon_id="sm2", display_name="SM-2 Block IIIB",
+    guidance="sarh",   # the launching ship's illuminator (already wired)
     length=6.55, diameter=0.343, launch_mass=1340.0, propellant_mass=830.0,
     # VLS cold-gas eject: ~20 m/s deck-clear in 0.5 s, motor lights instantly.
     eject_speed=20.0, eject_time=0.5,
@@ -624,6 +635,7 @@ KH31P = StrikeDef(
 #   20 km SARH terminal gate).
 N40N6 = SamDef(
     weapon_id="40n6", display_name="S-300VM 40N6",
+    guidance="arh",    # active terminal seeker — survives station death
     length=8.0, diameter=0.515, launch_mass=4_000.0, propellant_mass=2_142.0,
     # Same catapult cold-launch sequence as the 48N6 (same TEL family, same
     # delay unit: 1.5 s hang before ignition).
@@ -735,6 +747,7 @@ N40N6_TEL = LauncherDef("40n6_tel", "5P85 TEL (40N6)", ("40n6",), 12.0,
 #     burnout floor of 100 m/s is conservative (it will still be supersonic).
 PANTSIR_57E6 = SamDef(
     weapon_id="pantsir_57e6", display_name="57E6 (Pantsir-S1)",
+    guidance="command",   # radio-command off the mount's tracking channel
     length=3.17, diameter=0.076,
     launch_mass=90.0,           # kg total (see derivation above)
     propellant_mass=27.0,       # kg solid propellant (see derivation above)
@@ -814,6 +827,7 @@ PANTSIR_57E6 = SamDef(
 #     gate' lesson — handing over at apogee wallows).  terminal_range 12 km.
 BUK_LONG = SamDef(
     weapon_id="buk_9m317", display_name="9M317 (Buk-M2)",
+    guidance="sarh",   # the TEL's 9S36 must illuminate through terminal
     length=5.55, diameter=0.40, launch_mass=715.0, propellant_mass=460.0,
     # Rail-eject off the elevated TEL arm: a brief rail-clear kick, motor lights
     # almost immediately (like the Pantsir's 0.3 s — NOT the S-300's 1.5 s
@@ -836,6 +850,7 @@ BUK_LONG = SamDef(
 
 BUK_AGILE = SamDef(
     weapon_id="buk_9m338", display_name="9M338 (Buk-M3)",
+    guidance="command",   # Tor-family command guidance off the 9S36 channel
     length=5.08, diameter=0.36, launch_mass=480.0, propellant_mass=290.0,
     # Same hot rail-launch as the 9M317 (one TEL family).
     eject_speed=18.0, eject_time=0.3,
@@ -878,6 +893,7 @@ BUK_TEL = LauncherDef("buk_tel", "9A317 TEL", ("buk_9m317", "buk_9m338"), 8.0,
 # Oniks at distance and counters the Zircon's high profile.
 SM6 = SamDef(
     weapon_id="sm6", display_name="SM-6 (RIM-174)",
+    guidance="arh",    # active seeker — the CEC/engage-on-remote round
     length=6.55, diameter=0.343, launch_mass=1500.0, propellant_mass=1000.0,
     eject_speed=20.0, eject_time=0.5,
     motor_thrust=150_000.0, motor_time=16.0, isp=240.0,
@@ -931,6 +947,7 @@ SM6 = SamDef(
 #   physically cannot arrest, plus the no-cap terminal PN.  MEASURED, not copied.
 BASTION_K = SamDef(
     weapon_id="asbm", display_name="Bastion-K ASBM",
+    guidance="arh",    # (unused: the ASBM flies sim/asbm.py's MaRV machine)
     length=8.0, diameter=0.62, launch_mass=4_200.0, propellant_mass=2_000.0,
     # Cold catapult eject + short hang, then a long high-thrust solid boost.
     eject_speed=18.0, eject_time=1.0,

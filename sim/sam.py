@@ -287,7 +287,8 @@ class SamMissile:
     """
 
     def __init__(self, sam_def, pos_f64, target,
-                 contact_estimate_fn=None, rng=None, illuminator_pos_fn=None):
+                 contact_estimate_fn=None, rng=None, illuminator_pos_fn=None,
+                 illuminator_ok_fn=None):
         self.weapon = sam_def
         self.pos = np.asarray(pos_f64, dtype=np.float64).copy()
         self.prev_pos = self.pos.copy()
@@ -299,6 +300,12 @@ class SamMissile:
         self.contact_estimate_fn = contact_estimate_fn
         self.rng = rng
         self.illuminator_pos_fn = illuminator_pos_fn
+        # R-P1 SARH sector gate: optional () -> bool, re-checked on the LOS
+        # cadence — False means the illuminating FCR is alive but slewed
+        # OFF this round's target (one engagement radar cannot paint two
+        # wedges at once); the lock freezes exactly like a terrain mask.
+        # None (every legacy construction) = no sector dependency.
+        self.illuminator_ok_fn = illuminator_ok_fn
         # Multipath OU error state (m, world axes) — see MULTIPATH_* above.
         self._mp_x = self._mp_y = self._mp_z = 0.0
         # Fire-control position for the multipath range scaling: the launch
@@ -426,6 +433,9 @@ class SamMissile:
         sinking ship stops painting the target); rounds without one check
         from the missile's own seeker. Terrain comes through the world's
         heightfield so stub worlds exercise the same code path."""
+        if self.illuminator_ok_fn is not None \
+                and not self.illuminator_ok_fn():
+            return True     # FCR alive but slewed off-sector: no paint
         if self.illuminator_pos_fn is not None:
             src = self.illuminator_pos_fn()
             if src is None:
@@ -665,8 +675,25 @@ class SamMissile:
             rx = float(tp[0]) - px0
             ry = float(tp[1]) - alt
             rz = float(tp[2]) - pz0
-            if (rx * rx + ry * ry + rz * rz
-                    < w.terminal_range * w.terminal_range):
+            d2 = rx * rx + ry * ry + rz * rz
+            in_range = d2 < w.terminal_range * w.terminal_range
+            # R-P1 seeker cone (scanned model, homing rounds only): the
+            # terminal seeker acquires about the VELOCITY vector — a target
+            # inside the range gate but outside the gimbal cone is not
+            # acquired; midcourse keeps flying and PN geometry brings the
+            # nose around (command-guided rounds have no onboard seeker and
+            # keep the pure range gate; the legacy functional suite keeps
+            # it for every round, byte-identically).
+            if (in_range and speed > 1e-9
+                    and w.guidance in ("arh", "sarh")
+                    and getattr(world, "radar_model",
+                                "functional") == "scanned"):
+                cos_off = (rx * hx + ry * hy + rz * hz) / max(
+                    math.sqrt(d2), 1e-9)
+                if cos_off < math.cos(
+                        math.radians(w.seeker_half_angle_deg)):
+                    in_range = False
+            if in_range:
                 # Seed the frozen guide point from the midcourse estimate
                 # BEFORE the phase flips (an immediately masked lock coasts
                 # on the honest handover picture), then force an LOS check

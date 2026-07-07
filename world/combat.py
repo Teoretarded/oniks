@@ -163,7 +163,8 @@ from sim.enemy_ship_classes import (AirDefenseShip, Flagship, GeneralDestroyer,
 from sim.enemy_strikes import SALVO_PERIOD_S, SALVO_SIZE, EnemyStrikeController
 from sim.missile import Missile
 from sim.pantsir import Pantsir, PantsirDefenseController
-from sim.radar import Radar, RadarNetwork, ScanDef, STARING
+from sim.radar import (Radar, RadarNetwork, ScanDef, STARING,
+                       _ang_diff_deg, _bearing_deg)
 from sim.recon import (ACOUSTIC_FIX_ACTIONABLE_M, AcousticReceiver, DRONE_GONE,
                        DRONE_SPEED_MPS, ELINT_FIX_ACTIONABLE_M,
                        ElintReceiver, ReconDrone, RwrReceiver, SarSensor)
@@ -778,8 +779,12 @@ class CombatWorld(WorldState):
         self.structures.append(
             Structure("radar_station_00", "radar_station",
                       np.array([rx, terrain_height_scalar(rx, rz), rz]),
-                      on_destroyed=lambda _s: setattr(
-                          self.radar_station, "alive", False)))
+                      on_destroyed=lambda _s: (
+                          setattr(self.radar_station, "alive", False),
+                          # R-P1: the co-sited 30N6 engagement radar dies
+                          # with the mast — in-flight 48N6s go blind.
+                          setattr(self.station_engagement, "alive",
+                                  False))))
 
         # ---- Phase 6: Pantsir-S1 point defense (spec §4.2, config-driven) ----
         # Player-side mirror of the destroyers' SM-2/CIWS auto-defense: each
@@ -1412,6 +1417,20 @@ class CombatWorld(WorldState):
             self.player_radars.append(radar)
         self.radar_station = self.player_radars[0]
         self.radar_net = RadarNetwork(list(self.player_radars))
+        # R-P1: the station's 30N6-class ENGAGEMENT radar (X-band sector
+        # FCR).  NOT a search radar — it never joins radar_net (the research
+        # doc's decision); its job is SARH illumination for 48N6-class
+        # rounds.  The wedge slews to the most recent SARH engagement's
+        # target bearing (one FCR = one wedge: rounds whose targets fall
+        # outside it lose illumination — capacity limits EMERGE).  Dies
+        # with the station mast (the structure's on_destroyed chains it).
+        self._eng_boresight_deg = 0.0
+        eng = Radar("station_eng", self.radar_station.pos.copy(),
+                    RADAR_ANTENNA_M, PLAYER_RADAR_RANGES,
+                    height_fn=self._height_fn,
+                    scan=SCAN_ENG_30N6, band="X")
+        eng.boresight_deg = lambda: self._eng_boresight_deg
+        self.station_engagement = eng
         # R-P0: scanned mode gates the picture on real beam paints and
         # drives refresh off the paint schedule; functional mode keeps the
         # legacy visible_fn gate + range-band refresh byte-identically.
@@ -1493,6 +1512,39 @@ class CombatWorld(WorldState):
         drone = getattr(self, "drone", None)
         return (size_class in ("ship", "lcac") and drone is not None
                 and drone.alive and self.sar.detects(drone.pos, pos))
+
+    def _sarh_illuminator_kw(self, weapon_def, target, radar=None):
+        """R-P1 (spec PART 2 §10.2): SARH/TVM rounds get their illuminator
+        closures under the scanned model — the station's 30N6-class wedge
+        for 48N6s (``radar`` None), or a Buk TEL's own 9S36 when passed.
+        The chosen wedge SLEWS to this (most recent) engagement's bearing;
+        earlier rounds whose targets now sit outside it lose illumination —
+        one FCR paints one wedge, so multi-axis raids saturate a single
+        engagement radar (capacity emerges, no dice).  ARH/command rounds
+        and the legacy functional model get an empty dict (byte-identical
+        constructions)."""
+        if (self.radar_model != "scanned"
+                or getattr(weapon_def, "guidance", "arh") != "sarh"):
+            return {}
+        eng = radar if radar is not None else self.station_engagement
+        brg = _bearing_deg(eng.pos, target.pos)
+        if radar is None:
+            self._eng_boresight_deg = brg
+        else:
+            eng.boresight_deg = brg          # per-TEL 9S36 slews itself
+        half = eng.scan.sector_deg * 0.5
+
+        def _pos(_e=eng):
+            if not (_e.alive and _e.emitting):
+                return None
+            return (float(_e.pos[0]), _e.antenna_alt, float(_e.pos[2]))
+
+        def _ok(_e=eng, _t=target):
+            return _ang_diff_deg(
+                _bearing_deg(_e.pos, _t.pos),
+                _e._boresight_now()) <= half
+
+        return dict(illuminator_pos_fn=_pos, illuminator_ok_fn=_ok)
 
     def _player_paint_state(self, pos, size_class: str, now: float,
                             window: float):
@@ -3473,7 +3525,8 @@ class CombatWorld(WorldState):
         if tube is None:
             return None
         m = SamMissile(weapon_def, tube["pos"].copy(), target,
-                       contact_estimate_fn=self._contact_estimate(aircraft_id))
+                       contact_estimate_fn=self._contact_estimate(aircraft_id),
+                       **self._sarh_illuminator_kw(weapon_def, target))
         self.missiles.append(m)
         tube["reload_left"] = self._s300_tube_reload_s
         if round_id == "40n6":
@@ -3525,8 +3578,10 @@ class CombatWorld(WorldState):
             # 6-tube block (the offset tuple is only a cosmetic muzzle point).
             for k in range(BUK_TEL.tubes):
                 mouth = mouths[k % len(mouths)]
+                # "tel": which TEL this tube rides — R-P1 maps a launched
+                # 9M317 onto ITS OWN 9S36 illuminator (additive key).
                 self._buk_tubes.append({"pos": lpos + mouth,
-                                        "reload_left": 0.0})
+                                        "reload_left": 0.0, "tel": i})
             # 9S36 fire-control radar joins the player net (mirror of the
             # Pantsir radar): coverage is immediate, and the paired Buk
             # Structure's on_destroyed drops it on death.
@@ -3739,8 +3794,16 @@ class CombatWorld(WorldState):
                      and not self._launcher_committed(t)), None)
         if tube is None:
             return None
+        # R-P1: a 9M317 rides ITS OWN TEL's 9S36 wedge (per-TEL slew); the
+        # command-guided 9M338 gets no illuminator closure (empty dict).
+        tel_i = int(tube.get("tel", 0))
+        tel_radar = (self._buk_radars[tel_i]
+                     if tel_i < len(self._buk_radars) else None)
         m = SamMissile(weapon_def, tube["pos"].copy(), target,
-                       contact_estimate_fn=self._contact_estimate(aircraft_id))
+                       contact_estimate_fn=self._contact_estimate(aircraft_id),
+                       **(self._sarh_illuminator_kw(weapon_def, target,
+                                                    radar=tel_radar)
+                          if tel_radar is not None else {}))
         self.missiles.append(m)
         tube["reload_left"] = self._buk_tube_reload_s
         if round_id == "9m338":
