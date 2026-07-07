@@ -118,6 +118,45 @@ modal switching quantizes at coarse boundaries (blocky patches).
   10-signature checklist — white domed tops, shaded bases, unique shapes
   (no motif at any scale), clouds to the horizon, ground shadow patches.
 
+## Playtest v6 (round 2+3, 2026-07-07 night — 7 confirmed + close-range shading)
+
+Plan: v6 section of `docs/plans/clouds_v5_fix_plan_2026-07-07.md` (P1–P7).
+Implementer: Codex GPT-5.5 xhigh (same thread), orchestrator reviewed/gated.
+
+**The perf gate was blind.** The `clouds` timer measured CPU submission
+(~0.1 ms) while the GPU raymarch cost hid in the fence-paced swap — v5
+"PASS 0.14 ms" while the playtest FPS collapsed. `tools/perf_clouds.py`
+now wraps the pass in GL_TIME_ELAPSED (true GPU time) and gained an
+in-mist scene (`--mist`). TRUE pre-v6 cost in-mist: **13.38 avg /
+16.00 p95 ms**. Post-v6: **2.93 / 3.24 ms** (budget 3.0/5.0 PASS);
+horizon 2.76/3.20. Frame-total still over on a loaded machine — sim_step
+noise, swap wait now 0.05 ms; quiet re-run owed.
+
+Fixes (per plan P1–P7 + sweep iterations):
+- P1 topo-plate slicing: step never crosses >250 m altitude (dy clamp).
+- P2 CRT stripes: IGN's diagonal signature — white-noise hash12 restored.
+- P3 FPS: single march (dual removed), sun march every 2nd lit sample,
+  early-out 0.03, mist skip-ahead (capped 8x, FULL reset on hit —
+  unbounded doubling + gradual halving = obsidian-cloud bug).
+- P4 overlap dark sides: coarse sun tap moved OUTSIDE the fine range;
+  SUN_STEPS 6→4.
+- P5 lone puffs: independent coverage term (probed 3 seeds).
+- P6 far plateaus: far-flatten relaxed (120→400 km, max 60 %).
+- P7 particles: clouds draw BEFORE particles (plumes no longer erased;
+  tradeoff: behind-cloud plume shines through faintly — rare).
+- Deck RINGS (360° sweep catch): first-hit depth quantized to the step
+  grid — 4-probe entry bisection restarts stepping FROM the surface.
+- Step-matched textureLod GATED to 8–25 km+: ungated it blurred view
+  density against the fine sun march — crevices shaded as deep interior
+  = black marbling (isolated by forcing lod 0). Sun taps always fine.
+- Close-range shading (WT reference): ambient floor 0.50→0.78 (+brighter
+  pair), sun_T cache low-passed, powder floored 0.18 — blue-gray
+  crevices, zero black cavities at the 4 km deck-skim.
+
+New gates: `tools/probe_cloud_sweep.py` — 360° contact sheets at
+2/4/10/30/50 km (4 headings + up + down); the 5-view probe missed every
+oblique-angle artifact the user found in minutes.
+
 ## Nits / next
 
 - Residual fine grain on cloud edges in stills (halved from v4 level);
