@@ -16,6 +16,7 @@ coverage. ``RadarNetwork.visible`` is the ``ContactBoard`` gate
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -31,6 +32,42 @@ LOS_STEP_M = 2_000.0    # terrain sight-line sample spacing (long range)
 # behaviour byte-identical + bounded cost at 600 km).
 LOS_FINE_STEP_M = 400.0
 LOS_FINE_RANGE_M = 6_000.0
+
+
+@dataclass(frozen=True)
+class ScanDef:
+    """HOW a radar searches (R-P0, spec PART 2 §9). The paint layer sits
+    ABOVE ``detects`` — detects() stays the instantaneous range/horizon/
+    terrain gate; ScanDef decides WHEN the beam is actually on a bearing.
+
+    kind:
+      * "staring"  — continuous coverage (fixed phased-array faces, SPY-1):
+                     every bearing is always painted.
+      * "rotating" — mechanical sweep; the beam crosses a bearing once per
+                     ``period_s`` and dwells beamwidth/360 of the period.
+      * "sector"   — electronically revisited wedge ``sector_deg`` wide
+                     about the radar's ``boresight_deg``; bearings inside
+                     revisit every ``period_s``, outside are NEVER painted.
+    """
+    kind: str
+    period_s: float
+    beamwidth_deg: float
+    sector_deg: float
+
+
+STARING = ScanDef("staring", 0.0, 360.0, 360.0)
+
+
+def _bearing_deg(from_pos, to_pos) -> float:
+    """Bearing 0 = +Z (north), increasing clockwise (LOCKED convention)."""
+    return math.degrees(math.atan2(float(to_pos[0]) - float(from_pos[0]),
+                                   float(to_pos[2]) - float(from_pos[2]))) \
+        % 360.0
+
+
+def _ang_diff_deg(a: float, b: float) -> float:
+    """Smallest absolute angular difference, degrees, in [0, 180]."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
 
 
 def radar_horizon_m(h_radar_m: float, h_target_m: float) -> float:
@@ -68,13 +105,24 @@ class Radar:
     (a silent radar sees nothing — and can't be passively located later)."""
 
     def __init__(self, radar_id: str, pos, antenna_m: float, ranges: dict,
-                 height_fn=terrain_height_scalar):
+                 height_fn=terrain_height_scalar, scan: ScanDef = STARING,
+                 band: str = "S", phase0_s: float = 0.0):
         self.radar_id = radar_id
         self.pos = np.asarray(pos, dtype=np.float64)
         self.antenna_m = float(antenna_m)
         self.ranges = dict(ranges)      # size class -> max range (m)
         self.alive = True
         self.emitting = True
+        # R-P0 scan model (spec PART 2 §9): defaults (STARING) keep every
+        # existing construction byte-identical — a staring radar is always
+        # painting, which IS the legacy functional behavior. ``band`` is
+        # the frequency band tag consumed by W-P10 rain attenuation.
+        # ``boresight_deg`` is the sector center: a float for fixed sectors
+        # or a zero-arg callable for slewed/body-fixed ones (fighter nose).
+        self.scan = scan
+        self.band = band
+        self.phase0_s = float(phase0_s)
+        self.boresight_deg = 0.0
         # M3-terrain F3: the terrain height function for this radar's LOS
         # check. Default == the module shim terrain_height_scalar, so existing
         # callers stay byte-identical; world/combat.py threads the active
@@ -84,6 +132,45 @@ class Radar:
     @property
     def antenna_alt(self) -> float:
         return float(self.pos[1]) + self.antenna_m
+
+    # --- R-P0 paint scheduling (closed-form — no per-tick sweeping) ---------
+
+    def _boresight_now(self) -> float:
+        b = self.boresight_deg
+        return float(b()) if callable(b) else float(b)
+
+    def next_paint_t(self, target_pos, now: float) -> float:
+        """Earliest t >= now at which the search beam is on the target's
+        bearing. STARING: now (continuous). SECTOR: next revisit tick when
+        the bearing is inside the wedge, math.inf when outside. ROTATING:
+        the next crossing of boresight(t) = 360*(t - phase0)/period."""
+        s = self.scan
+        if s.kind == "staring":
+            return now
+        if s.kind == "sector":
+            if _ang_diff_deg(_bearing_deg(self.pos, target_pos),
+                             self._boresight_now()) > s.sector_deg * 0.5:
+                return math.inf
+            k = math.ceil((now - self.phase0_s) / s.period_s - 1e-9)
+            return self.phase0_s + max(k, 0) * s.period_s
+        # rotating
+        brg = _bearing_deg(self.pos, target_pos)
+        t_first = self.phase0_s + brg / 360.0 * s.period_s
+        k = math.ceil((now - t_first) / s.period_s - 1e-9)
+        return t_first + max(k, 0) * s.period_s
+
+    def painted(self, target_pos, now: float, window: float) -> bool:
+        """True when a paint occurred inside [now - window, now] (rotating
+        beams additionally count their dwell time across the bearing)."""
+        s = self.scan
+        if s.kind == "staring":
+            return True
+        nxt = self.next_paint_t(target_pos, now - window)
+        if nxt == math.inf:
+            return False
+        dwell = (s.beamwidth_deg / 360.0 * s.period_s
+                 if s.kind == "rotating" else 0.0)
+        return nxt <= now + dwell
 
     def detects(self, target_pos, size_class: str, jammers=()) -> bool:
         if not (self.alive and self.emitting):
