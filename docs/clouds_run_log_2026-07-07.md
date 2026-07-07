@@ -232,3 +232,27 @@ restructure is KEPT: camera-anchored morphing was the user's primary
 complaint and structure-vs-resolution is the correct invariant. Owed on
 a QUIET machine: the mist gate re-run; if genuinely over 3.0/5.0 the
 knobs are MARCH_STEPS 224->192, then the half-res FBO phase.
+
+## Round 7 — the LAST morphing source, diagnosed (orchestrator, eyes-on)
+
+12-frame strip (0.5 s apart, renders/approach_strip.png) from the
+approach GIF shows lobes MIGRATING/re-forming between 8-25 km and
+liquid-glass swirls at contact. Mechanism: the step-matched textureLod
+gate (8-25 km) is the one remaining view-distance term, and it is NOT
+shape-safe because density_at pipes the blurred samples through
+NONLINEAR remaps (coverage remap, erosion remap) — mip-mean in,
+different structure out. Lobes merge/split as the camera sweeps the
+LOD transition band; a ~600 m/s approach sweeps it fast = churn.
+
+Fix path for the next session (in order):
+1. Cap lod_b/lod_d at ~2.0 (not 6/4) — shrinks the fine-vs-blurred
+   structural delta at moderate cost in far moire (dy-clamp + entry
+   bisection already carry most of the anti-artifact load). Cheap, try
+   first, judge with flight_approach.json + the 12-frame strip.
+2. Soften the nonlinearity: replace the hard remap knees in density_at
+   with smoothstep ramps so mip-blur approximately commutes.
+3. The endgame (also fixes the perf ceiling): half-res cloud FBO +
+   temporal reprojection — the War Thunder architecture. Design notes in
+   the v5/v6 plan escape hatches.
+Also: re-run perf_clouds --mist on a QUIET machine before/after (all
+round-6/7 numbers were load-polluted).
