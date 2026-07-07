@@ -282,14 +282,18 @@ uniform vec3 u_sun_color;
 out vec4 frag;
 """ + "__HAZE__" + """
 
-const int   MARCH_STEPS   = 128;
+const int   MARCH_STEPS   = 224;   // perf headroom is ~12x (0.24/3.0 ms);
+                                   // spend it on mid-range step density —
+                                   // coarse mid steps + jitter = stipple
 const int   SUN_STEPS     = 6;
 const float DT_MIN_M      = 60.0;     // near-field step
 const float DT_MAX_M      = 6000.0;   // far-field stride with mip'd noise
 const float MARCH_DIST_CAP = 450000.0;
 const float SUN_STEP_M    = 350.0;
 const float SUN_COARSE_STEP_M = 1800.0;
-const float SIGMA         = 0.022;    // extinction per density per metre
+const float SIGMA         = 0.016;    // extinction per density per metre
+                                      // (0.022 stippled: speckle amplitude
+                                      // tracks sigma*d*dt per step)
 const float WEATHER_TILE  = 300000.0;
 const float BASE_TILE     = 6000.0;
 const float DETAIL_TILE   = 1200.0;
@@ -308,7 +312,9 @@ float remap(float x, float a, float b, float c, float d){
 }
 
 float march_dt(float t){
-    return clamp(t * 0.055, DT_MIN_M, DT_MAX_M);
+    // 3% growth: 224 steps reach 450+ km while 10 km out still steps
+    // ~300 m (0.055 stepped ~550 m there and stippled - v5 gate).
+    return clamp(t * 0.03, DT_MIN_M, DT_MAX_M);
 }
 
 // Per-type vertical profile (PART 2 §12): type 0 stratus (thin, low flat),
@@ -398,43 +404,64 @@ void main(){
     }
     if (t1 <= t0) discard;
 
-    // Distance-proportional march: near detail stays fine, horizon reaches
-    // 450 km with mipmapped noise carrying the far field.
-    float dt = march_dt(max(t0, DT_MIN_M));
-    float t = t0 + dt * ign(gl_FragCoord.xy);      // dithered one-step start
     float ct = dot(rd, u_sun_dir);
     float phase = mix(hg(ct, 0.55), hg(ct, -0.25), 0.3);  // dual lobe
-    vec3 amb_lo = vec3(0.70, 0.78, 0.86) * 0.55;   // sky gradient pair
-    vec3 amb_hi = vec3(0.35, 0.45, 0.62) * 0.55;
+    // Ambient gradient: TOPS bright (they see the whole sky), bases
+    // gray-blue.  v5 gate: this was inverted and clouds read as dark
+    // charcoal masses from above.
+    vec3 amb_lo = vec3(0.46, 0.51, 0.60) * 0.60;   // cloud-base ambient
+    vec3 amb_hi = vec3(0.84, 0.89, 0.97) * 0.60;   // cloud-top ambient
 
-    float T = 1.0;
-    vec3 acc = vec3(0.0);
+    // TWO stratified jittered marches, averaged.  One march forces a
+    // choice between marching bands (no jitter) and stipple (jitter);
+    // averaging two phase-shifted starts halves the noise with the bands
+    // still decorrelated (v5 gate iterations 2-8).  Perf headroom covers
+    // the 2x cost (0.24 ms single-march vs 3.0 ms budget).
+    float noise0 = ign(gl_FragCoord.xy);
+    vec3 acc_sum = vec3(0.0);
+    float alpha_sum = 0.0;
     float t_hit = -1.0;                            // first real cloud hit
-    for (int i = 0; i < MARCH_STEPS; i++){
-        if (t > t1) break;
-        vec3 wp = u_cam_pos + rd * t;
-        float d = density_at(wp, t);
-        if (d > 0.003){
-            if (t_hit < 0.0) t_hit = t;
-            float sun_T = sun_transmittance(wp, u_sun_dir, t);
-            float ext = d * SIGMA * dt;
-            // Powder: local-density form (the step-size form blew out —
-            // huge grazing steps saturated it to 1 everywhere).
-            float powder = 1.0 - exp(-4.0 * d);
-            float hfrac = clamp((wp.y - u_cloud_base)
-                                / (u_cloud_top - u_cloud_base), 0.0, 1.0);
-            vec3 amb = mix(amb_lo, amb_hi, hfrac);
-            amb = mix(amb * vec3(0.62, 0.70, 0.85), amb, sun_T);
-            amb *= 0.35 + 0.65 * sun_T;
-            vec3 s = u_sun_color * sun_T * phase * 10.0 * powder + amb;
-            acc += T * s * (1.0 - exp(-ext));
-            T *= exp(-ext);
-            if (T < 0.01) break;
+    for (int p = 0; p < 2; p++){
+        float dt = march_dt(max(t0, DT_MIN_M));
+        float t = t0 + min(dt, 90.0) * fract(noise0 + 0.5 * float(p));
+        float T = 1.0;
+        vec3 acc = vec3(0.0);
+        for (int i = 0; i < MARCH_STEPS; i++){
+            if (t > t1) break;
+            vec3 wp = u_cam_pos + rd * t;
+            float d = density_at(wp, t);
+            if (d > 0.003){
+                if (t_hit < 0.0 || t < t_hit) t_hit = t;
+                float sun_T = sun_transmittance(wp, u_sun_dir, t);
+                float ext = d * SIGMA * dt;
+                // Powder: local-density form (the step-size form blew
+                // out — huge grazing steps saturated it to 1 everywhere).
+                float powder = 1.0 - exp(-4.0 * d);
+                float hfrac = clamp((wp.y - u_cloud_base)
+                                    / (u_cloud_top - u_cloud_base),
+                                    0.0, 1.0);
+                vec3 amb = mix(amb_lo, amb_hi, hfrac);
+                amb = mix(amb * vec3(0.62, 0.70, 0.85), amb, sun_T);
+                amb *= 0.50 + 0.50 * sun_T;
+                // phase*10 alone is near-black at anti-solar view angles;
+                // the +0.5 isotropic multiple-scattering floor keeps
+                // sunlit cloud WHITE from every direction.  Powder gates
+                // only the phase term - on the iso term it grayed every
+                // thin top/edge (v5 gate iterations 1-2).
+                vec3 s = u_sun_color * sun_T
+                         * (phase * 10.0 * powder + 0.50) + amb;
+                acc += T * s * (1.0 - exp(-ext));
+                T *= exp(-ext);
+                if (T < 0.01) break;
+            }
+            t += dt;
+            dt = march_dt(t);
         }
-        t += dt;
-        dt = march_dt(t);
+        acc_sum += acc;
+        alpha_sum += 1.0 - T;
     }
-    float alpha = 1.0 - T;
+    vec3 acc = acc_sum * 0.5;
+    float alpha = alpha_sum * 0.5;
     if (alpha < 0.003) discard;
     // Depth at the FIRST CLOUD HIT (locked log-depth formula).  The slab
     // ENTRY point was wrong: a camera INSIDE the slab has its entry AT
