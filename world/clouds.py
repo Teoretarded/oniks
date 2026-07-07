@@ -11,8 +11,9 @@ TWO HALVES, one module:
 
 * The GL half (``Clouds``) defers every GL import to ``__init__``
   (sky.py pattern; never imported by unit tests): uploads the baked
-  textures, draws one fullscreen raymarch pass LAST into the default
-  framebuffer — depth TEST on (terrain/ships occlude clouds via the
+  textures, draws one fullscreen raymarch pass after opaque geometry and
+  before particles into the default framebuffer — depth TEST on
+  (terrain/ships occlude clouds via the
   slab-entry log depth), depth WRITE off, premultiplied blend,
   ``apply_haze`` on the result.  Animation clock = SIM time (replays
   identical), never wall clock.
@@ -39,7 +40,7 @@ import numpy as np
 BASE_N = 128          # base Perlin-Worley texture, voxels per axis
 DETAIL_N = 32         # detail Worley texture
 WEATHER_N = 512       # weathermap texels per axis
-CACHE_VERSION = "v5"  # bump when the bake recipe changes (invalidates caches)
+CACHE_VERSION = "v6"  # bump when the bake recipe changes (invalidates caches)
 
 # World-space scales (metres) — consumed by the shader AND (W-P6) the CPU
 # density query, so they live here as the single source of truth.
@@ -211,7 +212,7 @@ def build_noise(seed: int, cache_dir=Path("cache")) -> dict:
               + _worley(rng, DETAIL_N, 8, 3) * 0.2).astype(np.float32)
 
     # Weathermap: coverage / type / top-height (FAIR/PARTLY default mix).
-    # TWO-SCALE coverage (v5, playtest 2026-07-07 "zero variation"):
+    # TWO-SCALE coverage (v6, playtest 2026-07-07 "zero variation"):
     # large weather MASSES (freq 3 — tens of km) modulate a small PUFF
     # field (freq 9) — clusters, lone puffs and honest clear lanes emerge
     # instead of one same-size blob wallpaper.
@@ -219,10 +220,12 @@ def build_noise(seed: int, cache_dir=Path("cache")) -> dict:
     puff_n = _fbm(_perlin2, rng, WEATHER_N, 9, 3)
     mass = np.clip(_remap(mass_n, 0.50, 0.70, 0.0, 1.0), 0.0, 1.0)
     puff = np.clip(_remap(puff_n, 0.44, 0.62, 0.0, 1.0), 0.0, 1.0)
-    # Probed 2026-07-07 across seeds 7/0/1337: clear(<0.1) ~0.69-0.73,
-    # dense(>0.4) ~0.09 — FAIR ~3 okta with big honest blue lanes.
-    coverage = np.clip(mass * (0.30 + 1.00 * puff) + 0.40 * mass * mass,
-                       0.0, 1.0)
+    lone = (0.55 * np.clip(_remap(puff_n, 0.68, 0.80, 0.0, 1.0), 0.0, 1.0)
+            * (1.0 - mass))
+    # Probed 2026-07-07 across seeds 7/0/1337: clear(<0.1) 0.6866-0.7291,
+    # dense(>0.4) 0.0905-0.0964 — FAIR ~3 okta with lone puffs intact.
+    coverage = np.clip(mass * (0.30 + 1.00 * puff) + 0.40 * mass * mass
+                       + lone, 0.0, 1.0)
     type_n = _fbm(_perlin2, rng, WEATHER_N, 3, 2)      # low-freq type bands
     top_n = _fbm(_perlin2, rng, WEATHER_N, 4, 3)
     # Type channel (PART 2 §12): fair cumulus baseline, TALLER/denser
@@ -257,10 +260,10 @@ void main(){
 
 # The raymarcher (locked F3 conventions + PART 2 §12 taxonomy):
 #  * slab [u_cloud_base, u_cloud_top], march <= MARCH_STEPS with early-out,
-#    march distance capped, dithered start offset (screen-space IGN);
+#    march distance capped, dithered start offset (screen-space hash);
 #  * density = base Perlin-Worley remapped by weathermap coverage, shaped
 #    by a per-type vertical profile, eroded by detail Worley;
-#  * lighting = Beer-Lambert x powder x dual-lobe-ish HG, 6-step sun cone,
+#  * lighting = Beer-Lambert x powder x dual-lobe-ish HG, 4-step sun cone,
 #    ambient from the sky gradient pair;
 #  * depth: gl_FragDepth at the SLAB ENTRY point via the exact locked
 #    log-depth formula log2(1 + w) * fcoef * 0.5 (terrain occludes);
@@ -282,15 +285,17 @@ uniform vec3 u_sun_color;
 out vec4 frag;
 """ + "__HAZE__" + """
 
-const int   MARCH_STEPS   = 224;   // perf headroom is ~12x (0.24/3.0 ms);
-                                   // spend it on mid-range step density —
-                                   // coarse mid steps + jitter = stipple
-const int   SUN_STEPS     = 6;
+const int   MARCH_STEPS   = 224;   // single march; v6 saves sun taps instead
+const int   SUN_STEPS     = 4;
 const float DT_MIN_M      = 60.0;     // near-field step
 const float DT_MAX_M      = 6000.0;   // far-field stride with mip'd noise
+const float DY_MAX_M      = 250.0;    // no >250 m vertical slice per sample
 const float MARCH_DIST_CAP = 450000.0;
 const float SUN_STEP_M    = 350.0;
-const float SUN_COARSE_STEP_M = 1800.0;
+const float SUN_COARSE_EXTRA_M = 1800.0;
+const float SUN_COARSE_DIST_M = SUN_STEP_M * float(SUN_STEPS + 1)
+                                + SUN_COARSE_EXTRA_M;
+const float SUN_COARSE_WEIGHT_M = 1800.0;
 const float SIGMA         = 0.016;    // extinction per density per metre
                                       // (0.022 stippled: speckle amplitude
                                       // tracks sigma*d*dt per step)
@@ -304,17 +309,19 @@ const float WARP_WEATHER_SCALE = 0.37;
 const float WARP_OFFSET_M = 5000.0;
 const float DETAIL_FADE0_M = 8000.0;
 const float DETAIL_FADE1_M = 25000.0;
-const float FAR_FLAT0_M    = 60000.0;
-const float FAR_FLAT1_M    = 160000.0;
+const float FAR_FLAT0_M    = 120000.0;
+const float FAR_FLAT1_M    = 400000.0;
 
 float remap(float x, float a, float b, float c, float d){
     return c + (x - a) / max(b - a, 1e-5) * (d - c);
 }
 
-float march_dt(float t){
+float march_dt(float t, vec3 rd, float skip_mul){
     // 3% growth: 224 steps reach 450+ km while 10 km out still steps
     // ~300 m (0.055 stepped ~550 m there and stippled - v5 gate).
-    return clamp(t * 0.03, DT_MIN_M, DT_MAX_M);
+    float dt_prop = clamp(t * 0.03, DT_MIN_M, DT_MAX_M) * skip_mul;
+    float dt_dy = DY_MAX_M / max(abs(rd.y), 0.02);
+    return min(dt_prop, dt_dy);
 }
 
 // Per-type vertical profile (PART 2 §12): type 0 stratus (thin, low flat),
@@ -339,7 +346,7 @@ float density_at(vec3 wp, float view_t){
     if (coverage <= 0.01) return 0.0;
     float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
     if (prof <= 0.0) return 0.0;
-    float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t);
+    float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t) * 0.6;
     vec2 warp_uv = wp.xz / (WEATHER_TILE * WARP_WEATHER_SCALE) + vec2(0.618);
     vec2 base_warp = (texture(u_weather, warp_uv).gb - vec2(0.5))
                      * WARP_OFFSET_M;
@@ -367,8 +374,8 @@ float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t){
         tau_m += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t)
                  * SUN_STEP_M;
     }
-    tau_m += density_at(wp + sun_dir * SUN_COARSE_STEP_M, view_t)
-             * SUN_COARSE_STEP_M;
+    tau_m += density_at(wp + sun_dir * SUN_COARSE_DIST_M, view_t)
+             * SUN_COARSE_WEIGHT_M;
     return exp(-tau_m * SIGMA * 1.6);
 }
 
@@ -377,8 +384,10 @@ float hg(float ct, float g){
     return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * ct, 1.5) * 0.0796;
 }
 
-float ign(vec2 p){
-    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+float hash12(vec2 p){
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 void main(){
@@ -412,27 +421,37 @@ void main(){
     vec3 amb_lo = vec3(0.46, 0.51, 0.60) * 0.60;   // cloud-base ambient
     vec3 amb_hi = vec3(0.84, 0.89, 0.97) * 0.60;   // cloud-top ambient
 
-    // TWO stratified jittered marches, averaged.  One march forces a
-    // choice between marching bands (no jitter) and stipple (jitter);
-    // averaging two phase-shifted starts halves the noise with the bands
-    // still decorrelated (v5 gate iterations 2-8).  Perf headroom covers
-    // the 2x cost (0.24 ms single-march vs 3.0 ms budget).
-    float noise0 = ign(gl_FragCoord.xy);
-    vec3 acc_sum = vec3(0.0);
-    float alpha_sum = 0.0;
+    // Single jittered march.  Sun transmittance is cached every other lit
+    // sample, and long low-density mist runs skip ahead without violating
+    // the vertical dy clamp.
+    float noise0 = hash12(gl_FragCoord.xy);
+    float skip_mul = 1.0;
+    float dt = march_dt(max(t0, DT_MIN_M), rd, skip_mul);
+    float t = t0 + min(dt, 90.0) * noise0;
+    float T = 1.0;
+    vec3 acc = vec3(0.0);
+    float cached_sun_T = 1.0;
+    int lit_step = 0;
+    int mist_run = 0;
     float t_hit = -1.0;                            // first real cloud hit
-    for (int p = 0; p < 2; p++){
-        float dt = march_dt(max(t0, DT_MIN_M));
-        float t = t0 + min(dt, 90.0) * fract(noise0 + 0.5 * float(p));
-        float T = 1.0;
-        vec3 acc = vec3(0.0);
-        for (int i = 0; i < MARCH_STEPS; i++){
+    for (int i = 0; i < MARCH_STEPS; i++){
             if (t > t1) break;
             vec3 wp = u_cam_pos + rd * t;
             float d = density_at(wp, t);
+            if (d > 0.02){
+                mist_run = 0;
+                skip_mul = max(1.0, skip_mul * 0.5);
+            } else {
+                mist_run += 1;
+                if (mist_run >= 8) skip_mul *= 2.0;
+            }
             if (d > 0.003){
-                if (t_hit < 0.0 || t < t_hit) t_hit = t;
-                float sun_T = sun_transmittance(wp, u_sun_dir, t);
+                if (t_hit < 0.0) t_hit = t;
+                if ((lit_step % 2) == 0){
+                    cached_sun_T = sun_transmittance(wp, u_sun_dir, t);
+                }
+                lit_step += 1;
+                float sun_T = cached_sun_T;
                 float ext = d * SIGMA * dt;
                 // Powder: local-density form (the step-size form blew
                 // out — huge grazing steps saturated it to 1 everywhere).
@@ -452,16 +471,12 @@ void main(){
                          * (phase * 10.0 * powder + 0.50) + amb;
                 acc += T * s * (1.0 - exp(-ext));
                 T *= exp(-ext);
-                if (T < 0.01) break;
+                if (T < 0.03) break;
             }
             t += dt;
-            dt = march_dt(t);
+            dt = march_dt(t, rd, skip_mul);
         }
-        acc_sum += acc;
-        alpha_sum += 1.0 - T;
-    }
-    vec3 acc = acc_sum * 0.5;
-    float alpha = alpha_sum * 0.5;
+    float alpha = 1.0 - T;
     if (alpha < 0.003) discard;
     // Depth at the FIRST CLOUD HIT (locked log-depth formula).  The slab
     // ENTRY point was wrong: a camera INSIDE the slab has its entry AT
@@ -481,9 +496,9 @@ void main(){
 
 class Clouds:
     """GL wrapper: bakes/loads the noise (one npz per seed), uploads the
-    three REPEAT textures, draws the fullscreen raymarch pass.  Draw LAST
-    (after every opaque + particle draw, before the HUD): depth TEST on,
-    depth WRITE off, premultiplied blend."""
+    three REPEAT textures, draws the fullscreen raymarch pass after opaque
+    geometry and before particles: depth TEST on, depth WRITE off,
+    premultiplied blend."""
 
     def __init__(self, seed: int, cache_dir=Path("cache")):
         from OpenGL.GL import (GL_CLAMP_TO_EDGE, GL_LINEAR,

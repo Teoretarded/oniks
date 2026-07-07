@@ -1678,11 +1678,12 @@ class SandboxState(GameState):
         self._draw_aircraft()
         self._draw_tel()
         self._draw_missiles()
-        self.particles.draw(self.renderer, self.effects)
-        # F3-P4 volumetric clouds: drawn LAST into the default framebuffer
-        # (depth test culls them behind terrain/hulls; the locked v1 order).
+        # F3-P4 volumetric clouds: after opaque geometry, before particles.
+        # Tradeoff: rare behind-cloud plumes may shine through faintly; common
+        # missile/exhaust particles no longer vanish behind later cloud draws.
         if self.clouds is not None:
             self.clouds.draw(self.renderer, self.camera, self.world.sim_time)
+        self.particles.draw(self.renderer, self.effects)
 
     def _bind_cloud_shadows(self) -> None:
         clouds = self.clouds
