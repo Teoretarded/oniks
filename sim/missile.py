@@ -23,6 +23,7 @@ from sim.guidance import (STEER_GAIN, STEER_MAX_A, altitude_hold_accel,
                           pn_accel, waypoint_reached)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar, speed_of_sound_scalar)
+from sim.radar import radar_horizon_m, terrain_blocks
 from world.generation import TERRAIN_MAX_HEIGHT
 
 # --- Phase enum (locked convention) ------------------------------------------
@@ -184,6 +185,19 @@ CLOSE_HILO_FACTOR = 1.25
 # Inside this range the seeker (or the unguided aim point) gets full 3D PN —
 # the final dive out of the sea-skim onto the hull/aim point.
 FINAL_PN_RANGE = 800.0     # m
+
+# --- R-P1 seeker honesty (spec PART 2 §10.1) -----------------------------------
+# The active-radar terminal seeker IS a radar: under radar_model="scanned"
+# (getattr'd off the world — the game layer always plays scanned; the legacy
+# "functional" suite keeps the old truth-in-cone seeker byte-identically) an
+# acquisition or a held lock additionally requires the target inside the
+# seeker's radar horizon and not terrain-masked.  SHIP_MAST_M is the radar-
+# return height of a warship superstructure above its pos[1] deck datum
+# (DDG/frigate mast tops sit ~15-20 m over the waterline).  A masked lock is
+# DROPPED and re-acquisition retries on the seeker's scan-frame cadence.
+SHIP_MAST_M = 18.0
+SEEKER_RECHECK_S = 0.5     # s: held-lock LOS re-check cadence (sam.py pattern)
+SEEKER_RESCAN_S = 0.5      # s: retry cadence after an all-masked scan
 
 # In-flight route edits (Task RTG) share the tactical map's planning cap.
 MAX_ROUTE_WAYPOINTS = 8
@@ -414,6 +428,10 @@ class Missile:
         self.locked_ship = None
         self.alive = True
         self.impact_pos = None
+        # R-P1 seeker honesty clocks (see SEEKER_RECHECK_S/SEEKER_RESCAN_S):
+        # 0.0 = the first terminal step checks/scans immediately.
+        self._seeker_check_t = 0.0
+        self._seeker_scan_t = 0.0
         # Speed-proportional descent authority (see DESCENT_BASELINE_MACH):
         # >= 1.0 so a slower-than-Oniks weapon never gets a GENTLER dive. Set
         # before _plan_vertical_profile so the descent-range timing reads it.
@@ -634,9 +652,30 @@ class Missile:
         self.fuel = max(0.0, self.fuel - thrust / (w.isp * GRAVITY) * dt)
         return thrust
 
+    def _seeker_can_see(self, ship, world):
+        """R-P1 honest-seeker gate (scanned model only): the active-radar
+        seeker obeys the radar horizon (seeker alt vs the ship's mast-top
+        return height) and terrain masking — the SAME physics helpers every
+        surveillance radar uses (one horizon, one terrain truth)."""
+        sp = ship.pos
+        px, py, pz = float(self.pos[0]), float(self.pos[1]), float(self.pos[2])
+        mast_alt = float(sp[1]) + SHIP_MAST_M
+        dx = float(sp[0]) - px
+        dz = float(sp[2]) - pz
+        if math.hypot(dx, dz) > radar_horizon_m(py, mast_alt):
+            return False
+        hfn = getattr(world, "terrain_height_at", None)
+        return hfn is None or not terrain_blocks(
+            (px, py, pz), (float(sp[0]), mast_alt, float(sp[2])),
+            height_fn=hfn)
+
     def _acquire_lock(self, world, speed):
-        """Pick the nearest alive ship inside seeker range and gimbal cone."""
+        """Pick the nearest alive ship inside seeker range and gimbal cone —
+        and (scanned radar model) inside the radar horizon / not terrain-
+        masked (_seeker_can_see; the legacy functional model keeps the old
+        truth-in-cone pick byte-identically)."""
         w = self.weapon
+        honest = getattr(world, "radar_model", "functional") == "scanned"
         cos_half = math.cos(math.radians(w.seeker_half_angle_deg))
         best, best_d = None, w.seeker_range
         px, py, pz = self.pos.tolist()
@@ -653,6 +692,11 @@ class Missile:
                 continue
             if speed > 1e-9 and ((rx * vx + ry * vy + rz * vz)
                                  / (d * speed)) < cos_half:
+                continue
+            # Honest gates LAST (horizon is a hypot; terrain_blocks samples
+            # the heightfield — only paid by candidates that pass the cheap
+            # range/cone cuts).
+            if honest and not self._seeker_can_see(ship, world):
                 continue
             best, best_d = ship, d
         if best is not None:
@@ -720,8 +764,28 @@ class Missile:
             if (self.locked_ship is not None
                     and not getattr(self.locked_ship, "alive", True)):
                 self.locked_ship = None
-            if self.locked_ship is None:
+            # R-P1 keep-gate (scanned model): a held lock re-runs the
+            # horizon/terrain check on the SEEKER_RECHECK_S cadence — a
+            # ship dropping below the skimmer's horizon or behind a ridge
+            # BREAKS the lock (re-acquire then runs the same honest gates).
+            if (self.locked_ship is not None
+                    and self.t >= self._seeker_check_t):
+                self._seeker_check_t = self.t + SEEKER_RECHECK_S
+                if (getattr(world, "radar_model", "functional") == "scanned"
+                        and not self._seeker_can_see(self.locked_ship,
+                                                     world)):
+                    self.locked_ship = None
+            if self.locked_ship is None and self.t >= self._seeker_scan_t:
                 self._acquire_lock(world, speed)
+                if (self.locked_ship is None
+                        and getattr(world, "radar_model",
+                                    "functional") == "scanned"):
+                    # All candidates masked/out: retry on the scan-frame
+                    # cadence, not per 120 Hz substep (terrain sampling is
+                    # the cost). LEGACY GUARD: functional mode never sets
+                    # the clock, so it keeps the per-substep rescan and
+                    # stays byte-identical.
+                    self._seeker_scan_t = self.t + SEEKER_RESCAN_S
             tgt = self.locked_ship
             if tgt is not None:
                 tpos = np.asarray(tgt.pos, dtype=np.float64)

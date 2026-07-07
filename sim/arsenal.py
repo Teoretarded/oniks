@@ -58,6 +58,12 @@ class WeaponDef:
     # inside); < SAP_HARDNESS_MIN (0.5) = frag/blast head (shreds topside
     # fittings, never breaches).  Default 1.0 — anti-ship rounds are SAP.
     nose_hardness: float = 1.0
+    # --- R-P1 seeker band (docs/research/radar_scan_and_bands.md) ----------
+    # Frequency-band bucket of the active radar seeker; consumed by the
+    # W-P10 rain-attenuation physics (ITU-R P.838 ladder: Ka > Ku > X > C
+    # > S rain loss).  Anti-ship seekers are Ku-class.  UNUSED until W-P10
+    # lands — declared now so every weapon def carries honest metadata.
+    seeker_band: str = "Ku"
 
 
 ONIKS = WeaponDef(
