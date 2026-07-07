@@ -70,10 +70,16 @@ def render_frame(s, timers=None):
         timers["hud"] += t4 - t3
 
 
-def run(frames: int = FRAMES) -> int:
+def run(frames: int = FRAMES, mist: bool = False) -> int:
     app = App(hidden=True)
     s = setup_scene(app)
     s.rig.freecam.pitch = HORIZON_PITCH     # stare through the slab
+    if mist:
+        # v6 gate: the playtest FPS collapse happened INSIDE the layer —
+        # every pixel marches thin cloud with no early-out. Park the camera
+        # in the fair-cu band staring down its length.
+        s.rig.freecam.pos = np.array([0.0, 1_400.0, 40_000.0])
+        s.rig.freecam.pitch = 0.02
     s.rig.update(0.0, None)
 
     for _ in range(WARMUP_FRAMES):
@@ -137,5 +143,6 @@ def run(frames: int = FRAMES) -> int:
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else FRAMES
-    raise SystemExit(run(n))
+    args = [a for a in sys.argv[1:] if a != "--mist"]
+    n = int(args[0]) if args else FRAMES
+    raise SystemExit(run(n, mist="--mist" in sys.argv))
