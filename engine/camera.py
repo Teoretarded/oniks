@@ -18,6 +18,7 @@ class Camera:
         self.eye = np.zeros(3, dtype=np.float64)  # float64 ALWAYS
         self.forward = np.array([0.0, 0.0, 1.0])
         self.up = np.array([0.0, 1.0, 0.0])
+        self.roll = 0.0
 
     def set_look(self, eye_f64, target_f64):
         """Place the eye and aim at target; recompute forward/right/up."""
@@ -36,7 +37,12 @@ class Camera:
 
     def view_rot(self) -> np.ndarray:
         """(4,4) rotation-only view matrix (eye at origin)."""
-        return math3d.view_rotation(self.right, self.up, self.forward)
+        right = self.right
+        up = self.up
+        if abs(self.roll) > 1e-12:
+            c, s = np.cos(self.roll), np.sin(self.roll)
+            right, up = right * c + up * s, up * c - right * s
+        return math3d.view_rotation(right, up, self.forward)
 
     def proj(self, aspect) -> np.ndarray:
         """(4,4) perspective projection matrix."""

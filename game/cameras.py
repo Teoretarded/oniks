@@ -118,10 +118,12 @@ class FreeCam:
     clockwise seen from above); pitch is radians above the horizon.
     """
 
-    def __init__(self, pos, yaw: float = 0.0, pitch: float = 0.0):
+    def __init__(self, pos, yaw: float = 0.0, pitch: float = 0.0,
+                 roll: float = 0.0):
         self.pos = np.asarray(pos, dtype=np.float64).copy()
         self.yaw = float(yaw)
         self.pitch = float(pitch)
+        self.roll = float(roll)
 
     def look(self, dx_px: float, dy_px: float) -> None:
         """Apply mouse motion in pixels: drag right turns right (clockwise),
@@ -157,6 +159,7 @@ class FreeCam:
         """Write position/orientation into an engine Camera (float64 eye)."""
         camera.eye = self.pos.copy()
         camera.set_orientation(self.forward)
+        camera.roll = self.roll
 
 
 class CameraRig:
@@ -221,6 +224,7 @@ class CameraRig:
             self.freecam.pos = self.camera.eye.copy()
             self.freecam.yaw = float(np.arctan2(f[0], f[2]))
             self.freecam.pitch = float(np.arcsin(np.clip(f[1], -1.0, 1.0)))
+            self.freecam.roll = float(getattr(self.camera, "roll", 0.0))
             self._blend_t = TRANSITION_TIME
         if mode == "chase":
             self._chase_valid = False
@@ -370,6 +374,7 @@ class CameraRig:
             eye = self._clamp(eye + shake)
         self.camera.eye = eye.copy()
         self.camera.set_orientation(fwd)
+        self.camera.roll = self.freecam.roll if self.mode == "free" else 0.0
 
     # ----------------------------------------------------- mode controllers
 
