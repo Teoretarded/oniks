@@ -99,3 +99,75 @@ def test_paint_state_dead_radar_contributes_nothing():
     rot.alive = False
     net = RadarNetwork([rot])
     assert net.paint_state(_tgt(0.0), "fighter", 0.0, 0.5) == (False, math.inf)
+
+
+# --- Task 3: scan-driven ContactBoard refresh ---------------------------------
+
+class _Ship:
+    def __init__(self):
+        # 25.5 km out with a 15 m superstructure: inside the 20 m-antenna
+        # radar horizon (~34 km) — the paint schedule, not the horizon,
+        # must be what gates these tests.
+        self.pos = np.array([18_000.0, 15.0, 18_000.0])
+        self.alive = True
+        self.ship_id = "tgt"
+
+    def velocity(self):
+        return np.zeros(3)
+
+
+def _paint_board(radars):
+    from sim.contacts import ContactBoard
+    from sim.radar import RadarNetwork
+    net = RadarNetwork(radars)
+    return ContactBoard(
+        (0.0, 0.0),
+        paint_fn=lambda p, s, now, win: net.paint_state(p, s, now, win))
+
+
+def _ages(board, ship, t_end=60.0):
+    ages, t = [], 0.0
+    while t < t_end:
+        board.update([ship], 0.1, t)
+        tr = board.tracks.get("tgt")
+        if tr is not None:
+            ages.append(tr["age"])
+        t += 0.1
+    return ages
+
+
+def test_track_staleness_follows_scan_not_range_bands():
+    # Spec PART 2 §9.4: a target covered ONLY by a 10 s rotator goes stale
+    # between paints; add a staring face and it stays fresh. The ship sits
+    # 71 km out — the legacy surface range band would refresh every 20 s
+    # regardless of any radar's real cadence.
+    rot10 = _radar(ScanDef("rotating", 10.0, 2.0, 360.0))
+    ages_rot = _ages(_paint_board([rot10]), _Ship())
+    ages_star = _ages(_paint_board(
+        [_radar(STARING),
+         _radar(ScanDef("rotating", 10.0, 2.0, 360.0))]), _Ship())
+    assert max(ages_rot) > 8.0        # stale between rotations
+    assert max(ages_star) < 1.5       # staring face keeps it fresh
+
+
+def test_paint_mode_track_drops_when_radar_dies():
+    rot = _radar(ScanDef("rotating", 10.0, 2.0, 360.0))
+    board = _paint_board([rot])
+    ship = _Ship()
+    _ages(board, ship, t_end=30.0)                # track formed
+    assert "tgt" in board.tracks
+    rot.alive = False
+    _ages(board, ship, t_end=200.0)               # > TRACK_DROP_S unseen
+    assert "tgt" not in board.tracks
+
+
+def test_legacy_visible_fn_path_untouched():
+    # The range-band tables and the visible_fn path must survive verbatim
+    # (radar_model="functional" identity).
+    import inspect
+    from sim import contacts
+    src = inspect.getsource(contacts)
+    assert "UPDATE_PERIODS" in src
+    assert "AIR_UPDATE_PERIODS" in src
+    board = contacts.ContactBoard((0.0, 0.0))     # no paint_fn: legacy
+    assert board.paint_fn is None

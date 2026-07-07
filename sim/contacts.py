@@ -15,16 +15,26 @@ dead-reckon the full 3D fix, so air tracks carry altitude. Entities whose
 With ``visible_fn`` set (COMBAT fog of war) the board additionally gates tracks on radar visibility — see ContactBoard.
 """
 
+import math
+
 import numpy as np
 
 UPDATE_PERIODS = ((100_000, 20.0), (300_000, 60.0), (1e12, 120.0))     # surface
 AIR_UPDATE_PERIODS = ((100_000, 15.0), (300_000, 30.0), (1e12, 60.0))  # air
 
-# both keyed by range from base
+# both keyed by range from base — LEGACY refresh tables (radar_model
+# "functional" / visible_fn boards). Scanned-mode boards (paint_fn) ignore
+# them: refresh cadence comes from the radars' real paint schedule.
 
 VIS_CHECK_PERIOD = 0.5    # s between cached visibility re-checks per entity
 DETECT_DELAY_S = 2.0      # continuous visibility before a NEW track forms
 TRACK_DROP_S = 90.0       # unseen coasting age at which a track drops
+
+# Scanned-mode refresh clamps (R-P0): a staring radar would otherwise ask
+# for a refresh every check (floor bounds the cost), and a track whose next
+# paint is far off / unknown still re-checks within the ceiling.
+REFRESH_FLOOR_S = 0.5
+REFRESH_CEIL_S = 30.0
 
 # --- Classification ladder (docs/research/classification_spec.md) ------------
 #
@@ -141,12 +151,18 @@ def _kind_of(ent):
 class ContactBoard:
     """contact_id -> dict(pos, vel, age, t_next, is_air), per-range refresh."""
 
-    def __init__(self, base_xz, visible_fn=None):
+    def __init__(self, base_xz, visible_fn=None, paint_fn=None):
         self.base_xz = np.asarray(base_xz, dtype=np.float64)
         self.tracks = {}
         # COMBAT fog of war: visible_fn(pos, size_class) -> bool gates
         # detection/refresh; None = legacy all-seeing sandbox behavior.
         self.visible_fn = visible_fn
+        # R-P0 scanned radar model: paint_fn(pos, size_class, now, window)
+        # -> (painted_now, next_paint_t). When set it REPLACES visible_fn
+        # as the gate AND drives refresh scheduling off the radars' real
+        # paint cadence (REFRESH_FLOOR_S/REFRESH_CEIL_S clamped) instead of
+        # the legacy UPDATE_PERIODS range bands.
+        self.paint_fn = paint_fn
         self._vis = {}    # cid -> dict(t_next, since, seen), cached checks
 
     def _period(self, pos, is_air):
@@ -159,33 +175,62 @@ class ContactBoard:
 
     def _seen(self, ent, cid, sim_time):
         """Cached current visibility (re-checked each VIS_CHECK_PERIOD);
-        always True when ungated."""
-        if self.visible_fn is None:
+        always True when ungated.
+
+        Paint mode (paint_fn set): ``seen`` means PAINTED inside the last
+        check window. ``since`` anchors to the FIRST paint and survives the
+        dark time between sweeps as long as the target stays detectable
+        (next_paint < inf) — real track-while-scan initiation is N paints
+        on consecutive sweeps, not N seconds of continuous illumination
+        (a 10 s rotator dwells ~55 ms per sweep; the legacy continuous rule
+        could never form a track through it)."""
+        if self.visible_fn is None and self.paint_fn is None:
             return True
         st = self._vis.get(cid)
         if st is None:
-            st = self._vis[cid] = dict(t_next=-1.0, since=None, seen=False)
+            st = self._vis[cid] = dict(t_next=-1.0, since=None, seen=False,
+                                       next_paint=math.inf)
         if sim_time >= st["t_next"]:
             # Size class for the radar gate: entities may carry an explicit
             # radar_size (strike missiles: "missile" — sim/strike.py), else
             # air entities rate "fighter" and surface entities "ship".
-            seen = bool(self.visible_fn(ent.pos, _size_of(ent)))
-            if seen and st["since"] is None:
-                st["since"] = sim_time
-            elif not seen:
-                st["since"] = None
+            if self.paint_fn is not None:
+                seen, nxt = self.paint_fn(ent.pos, _size_of(ent),
+                                          sim_time, VIS_CHECK_PERIOD)
+                if seen and st["since"] is None:
+                    st["since"] = sim_time
+                elif nxt == math.inf:
+                    st["since"] = None    # undetectable: initiation resets
+                st["next_paint"] = nxt
+            else:
+                seen = bool(self.visible_fn(ent.pos, _size_of(ent)))
+                if seen and st["since"] is None:
+                    st["since"] = sim_time
+                elif not seen:
+                    st["since"] = None
             st["seen"] = seen
             st["t_next"] = sim_time + VIS_CHECK_PERIOD
         return st["seen"]
 
     def _detected(self, ent, cid, sim_time):
-        """Seen continuously for DETECT_DELAY_S (instant when ungated)."""
+        """Seen continuously for DETECT_DELAY_S (instant when ungated).
+        Paint mode: a paint at least DETECT_DELAY_S after the FIRST paint
+        (i.e. a later sweep confirms the plot — M-of-N initiation)."""
         if not self._seen(ent, cid, sim_time):
             return False
-        if self.visible_fn is None:
+        if self.visible_fn is None and self.paint_fn is None:
             return True
         since = self._vis[cid]["since"]
         return since is not None and sim_time - since >= DETECT_DELAY_S
+
+    def _next_refresh(self, cid, pos, is_air, sim_time):
+        """The track's next refresh time: legacy range-band period, or (paint
+        mode) the next real paint, floor/ceil clamped."""
+        if self.paint_fn is None:
+            return sim_time + self._period(pos, is_air)
+        nxt = self._vis[cid]["next_paint"]
+        return min(max(nxt, sim_time + REFRESH_FLOOR_S),
+                   sim_time + REFRESH_CEIL_S)
 
     def _drop(self, cid):
         self.tracks.pop(cid, None)
@@ -202,7 +247,8 @@ class ContactBoard:
                     continue                      # never seen alive: no track
                 self.tracks[cid] = dict(
                     pos=ent.pos.copy(), vel=ent.velocity().copy(),
-                    age=0.0, t_next=sim_time + self._period(ent.pos, is_air),
+                    age=0.0,
+                    t_next=self._next_refresh(cid, ent.pos, is_air, sim_time),
                     is_air=is_air, kind=_kind_of(ent), size=_size_of(ent),
                     # Classification dwell anchor: when this track FORMED
                     # (spec: type knowledge is earned from here, monotonic).
@@ -215,7 +261,8 @@ class ContactBoard:
                     track["pos"] = ent.pos.copy()
                     track["vel"] = ent.velocity().copy()
                     track["age"] = 0.0
-                    track["t_next"] = sim_time + self._period(ent.pos, is_air)
+                    track["t_next"] = self._next_refresh(
+                        cid, ent.pos, is_air, sim_time)
                 else:                             # unseen: coast, retry, drop
                     track["age"] += dt
                     track["t_next"] = sim_time + VIS_CHECK_PERIOD
