@@ -286,6 +286,10 @@ const float WEATHER_TILE  = 300000.0;
 const float BASE_TILE     = 6000.0;
 const float DETAIL_TILE   = 1200.0;
 const float WIND_MS       = 18.0;     // slab drift, sim-time clocked
+const float DETAIL_FADE0_M = 8000.0;
+const float DETAIL_FADE1_M = 25000.0;
+const float FAR_FLAT0_M    = 60000.0;
+const float FAR_FLAT1_M    = 160000.0;
 
 float remap(float x, float a, float b, float c, float d){
     return c + (x - a) / max(b - a, 1e-5) * (d - c);
@@ -303,7 +307,7 @@ float height_profile(float hfrac, float ctype, float top){
     return mix(bottom * cap, cirrus * 0.35, step(0.9, ctype));
 }
 
-float density_at(vec3 wp){
+float density_at(vec3 wp, float view_t){
     float hfrac = (wp.y - u_cloud_base) / (u_cloud_top - u_cloud_base);
     if (hfrac < 0.0 || hfrac > 1.0) return 0.0;
     vec3 drift = vec3(u_time * WIND_MS, 0.0, u_time * WIND_MS * 0.35);
@@ -313,19 +317,25 @@ float density_at(vec3 wp){
     if (coverage <= 0.01) return 0.0;
     float prof = height_profile(hfrac, wm.g, max(wm.b, 0.12));
     if (prof <= 0.0) return 0.0;
+    float far_flat = smoothstep(FAR_FLAT0_M, FAR_FLAT1_M, view_t);
     float base = texture(u_base_noise, (wp + drift) / BASE_TILE).r;
+    base = mix(base, 0.5, far_flat);
     base = remap(base, 0.30, 0.90, 0.0, 1.0);  // texture band -> full range
     float d = remap(base * prof, 1.0 - coverage * 0.78, 1.0, 0.0, 1.0);
+    d = mix(d, coverage * prof, far_flat);
     if (d <= 0.0) return 0.0;
     float det = texture(u_detail_noise, (wp + drift * 1.6) / DETAIL_TILE).r;
-    d = remap(d, det * 0.5, 1.0, 0.0, 1.0);    // erode edges (crisp, not fuzz)
+    float eroded = remap(d, det * 0.5, 1.0, 0.0, 1.0);
+    float detail_amt = 1.0 - smoothstep(DETAIL_FADE0_M, DETAIL_FADE1_M,
+                                        view_t);
+    d = mix(d, eroded, detail_amt);             // erode near edges only
     return clamp(d * coverage, 0.0, 1.0);
 }
 
-float sun_transmittance(vec3 wp, vec3 sun_dir){
+float sun_transmittance(vec3 wp, vec3 sun_dir, float view_t){
     float tau = 0.0;
     for (int i = 1; i <= SUN_STEPS; i++){
-        tau += density_at(wp + sun_dir * (SUN_STEP_M * float(i)));
+        tau += density_at(wp + sun_dir * (SUN_STEP_M * float(i)), view_t);
     }
     return exp(-tau * SIGMA * SUN_STEP_M * 1.6);
 }
@@ -377,10 +387,10 @@ void main(){
     for (int i = 0; i < MARCH_STEPS; i++){
         if (t > t1) break;
         vec3 wp = u_cam_pos + rd * t;
-        float d = density_at(wp);
+        float d = density_at(wp, t);
         if (d > 0.003){
             if (t_hit < 0.0) t_hit = t;
-            float sun_T = sun_transmittance(wp, u_sun_dir);
+            float sun_T = sun_transmittance(wp, u_sun_dir, t);
             float ext = d * SIGMA * dt;
             // Powder: local-density form (the step-size form blew out —
             // huge grazing steps saturated it to 1 everywhere).
@@ -421,14 +431,15 @@ class Clouds:
     depth WRITE off, premultiplied blend."""
 
     def __init__(self, seed: int, cache_dir=Path("cache")):
-        from OpenGL.GL import (GL_CLAMP_TO_EDGE, GL_LINEAR, GL_R8, GL_RED,
+        from OpenGL.GL import (GL_CLAMP_TO_EDGE, GL_LINEAR,
+                               GL_LINEAR_MIPMAP_LINEAR, GL_R8, GL_RED,
                                GL_REPEAT, GL_RGB, GL_RGB8, GL_TEXTURE_2D,
                                GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER,
                                GL_TEXTURE_MIN_FILTER, GL_TEXTURE_WRAP_R,
                                GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
                                GL_UNSIGNED_BYTE, glBindTexture,
-                               glGenTextures, glTexImage2D, glTexImage3D,
-                               glTexParameteri)
+                               glGenTextures, glGenerateMipmap, glTexImage2D,
+                               glTexImage3D, glTexParameteri)
         from engine.mesh import Mesh          # noqa: F401  (GL context check)
         from engine.shader import Shader
         from engine.shaderlib import HAZE_GLSL
@@ -441,12 +452,14 @@ class Clouds:
             for wrap in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
                          GL_TEXTURE_WRAP_R):
                 glTexParameteri(GL_TEXTURE_3D, wrap, GL_REPEAT)
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER,
+                            GL_LINEAR_MIPMAP_LINEAR)
             glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             b = (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
             n = arr.shape[0]
             glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, n, n, n, 0, GL_RED,
                          GL_UNSIGNED_BYTE, np.ascontiguousarray(b))
+            glGenerateMipmap(GL_TEXTURE_3D)
             return tid
 
         self._t_base = _tex3(noise["base"])
@@ -456,12 +469,14 @@ class Clouds:
         glBindTexture(GL_TEXTURE_2D, tid)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                        GL_LINEAR_MIPMAP_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         wb = (np.clip(noise["weather"], 0.0, 1.0) * 255.0 + 0.5).astype(
             np.uint8)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, WEATHER_N, WEATHER_N, 0,
                      GL_RGB, GL_UNSIGNED_BYTE, np.ascontiguousarray(wb))
+        glGenerateMipmap(GL_TEXTURE_2D)
         self._t_weather = tid
 
         # Fullscreen triangle (3 verts cover the screen; no index buffer).
