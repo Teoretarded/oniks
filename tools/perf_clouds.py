@@ -35,9 +35,26 @@ HORIZON_PITCH = -0.02          # worst case: rays graze the whole slab
 SECTIONS = ("sim_step", "scene", "clouds", "hud", "swap", "other")
 
 
+_GPU_QUERY = None
+
+
+def _cloud_gpu_query():
+    """One GL_TIME_ELAPSED query, lazily created (needs a live context)."""
+    global _GPU_QUERY
+    if _GPU_QUERY is None:
+        from OpenGL.GL import glGenQueries
+        _GPU_QUERY = int(np.atleast_1d(glGenQueries(1))[0])
+    return _GPU_QUERY
+
+
 def render_frame(s, timers=None):
     """Sandbox render order + the clouds slot (after particles, before
-    HUD — the locked 'drawn LAST into the default framebuffer' position)."""
+    HUD — the locked 'drawn LAST into the default framebuffer' position).
+
+    The ``clouds`` section is GPU time via GL_TIME_ELAPSED — the CPU wall
+    clock around the draw call only measures command submission (~0.1 ms)
+    while the actual raymarch cost lands in the fence-paced swap; the v5
+    playtest FPS collapse hid behind that blind spot (2026-07-07)."""
     mark = time.perf_counter
     w, h = s.window.size()
     t0 = mark()
@@ -57,8 +74,16 @@ def render_frame(s, timers=None):
     s.particles.draw(s.renderer, s.effects)
     t2 = mark()
     clouds = getattr(s, "clouds", None)
-    if clouds is not None:
+    gpu_ns = 0
+    if clouds is not None and clouds.enabled:
+        from OpenGL.GL import (GL_QUERY_RESULT, GL_TIME_ELAPSED,
+                               glBeginQuery, glEndQuery,
+                               glGetQueryObjectuiv)
+        q = _cloud_gpu_query()
+        glBeginQuery(GL_TIME_ELAPSED, q)
         clouds.draw(s.renderer, s.camera, s.world.sim_time)
+        glEndQuery(GL_TIME_ELAPSED)
+        gpu_ns = int(glGetQueryObjectuiv(q, GL_QUERY_RESULT))
     t3 = mark()
     if s.hud_visible:
         s.hud.draw(s, w, h)
@@ -66,7 +91,7 @@ def render_frame(s, timers=None):
     if timers is not None:
         timers["other"] += t1 - t0
         timers["scene"] += t2 - t1
-        timers["clouds"] += t3 - t2
+        timers["clouds"] += gpu_ns * 1e-9
         timers["hud"] += t4 - t3
 
 
