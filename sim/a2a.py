@@ -119,6 +119,14 @@ IR_LOCK_RANGE_FRONT_M: float = 4_000.0  # m — front hemisphere, head-on
 # the target before the motor finishes; the shot is refused.
 IR_OBS_LIMIT_RAD: float = math.radians(25.0)  # ~25 deg
 
+# R-P1 in-flight gimbal field of view (spec PART 2 §10.3): the AIM-9X HOBS
+# seeker articulates to ~90 deg off the BODY axis.  A target the geometry
+# swings past that (e.g. a crossing drone the round overshoots) is
+# physically unseeable — lock lost, kinematic self-destruct.  This bounds
+# the old bare 2x-range energy band with a real head-geometry limit.
+IR_GIMBAL_HALF_ANGLE_RAD: float = math.radians(90.0)
+_IR_GIMBAL_COS: float = math.cos(IR_GIMBAL_HALF_ANGLE_RAD)
+
 # Terminal PN handover: already using PN throughout, so no distinct terminal
 # handover range is needed — PN handles the full coast.
 IR_TERMINAL_RANGE_M: float = 4_000.0
@@ -477,3 +485,15 @@ class IrMissile:
                 self.self_destructed = True
                 self._die(self.pos.copy())
                 return
+            # R-P1 gimbal FOV: the LOS swinging past the seeker head's
+            # articulation limit off the BODY axis breaks the lock — a
+            # crossing target the round overshoots is behind the head.
+            # Scanned model only (the legacy functional suite keeps the
+            # loop-back re-attack byte-identically).
+            if d > 1.0 and getattr(world, "radar_model",
+                                   "functional") == "scanned":
+                los_cos = (float((tpos - self.pos) @ self.body_dir)) / d
+                if los_cos < _IR_GIMBAL_COS:
+                    self.self_destructed = True
+                    self._die(self.pos.copy())
+                    return
