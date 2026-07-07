@@ -46,6 +46,29 @@ fence-paced swap (0.05 ms) confirms the GPU absorbs it — the pass is
 genuinely sub-ms on this machine. The Low/Med/High ladder and the FBO
 path stay unbuilt (the plan's escape hatches, not needed).
 
+## Playtest v4 (user reports 2026-07-07 — every one real)
+
+1. **"Clouds cover the missile"** — CONFIRMED BUG: slab-entry depth = the
+   camera when the camera is INSIDE the slab (orbit cam at 13 km) → the
+   pass wrote near-zero depth and stomped every model. Fixed: depth at
+   the FIRST CLOUD HIT; verify shot `renders/clouds_occlusion_check.png`
+   (missile crisp in front of the mass while flying inside the band).
+2. **"Too low"** — base 300 m read as fog. Now 800 m.
+3. **"Static/fuzzy"** — equal ~600 m march steps = per-pixel dither noise
+   as the dominant texture. Now 128 geometric steps (60 m near, ×1.018,
+   220 m cap — uncapped growth sliced the far deck into horizontal bands,
+   caught on the interim shot).
+4. **"Zero variation"** — single-scale weathermap. Now two-scale: freq-3
+   MASSES × freq-9 PUFFS, taller/denser cores inside masses, varying
+   tops — clusters, lone puffs, honest lanes (cache v4).
+
+Perf after v4: clouds 0.19–0.24 avg / ≤0.41 p95 ms (budget 3.0/5.0).
+Frame-total gate runs read 16.04/18.66 ms BUT the A/B control (clouds
+fully disabled, same session) read **19.06 ms** — the machine was under
+external load; the quiet-machine baseline was 13.43. Clouds' controlled
+frame delta ≈ 0. Re-run the gate on a quiet machine before the next
+perf-sensitive phase.
+
 ## Nits / next
 
 - Dither speckle on cloud edges is visible in stills; acceptable in
