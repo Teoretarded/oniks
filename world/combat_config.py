@@ -177,6 +177,16 @@ class CombatConfig:
     # "subsystem" — the new model is the way the game plays; "legacy" is a
     # compatibility flag, not a mode the UI offers.
     damage_model: str = "legacy"
+    # Radar scan model (R-P0, spec: docs/plans/weather_system_design_
+    # 2026-07-07.md PART 2 §9).  DEFAULT "functional" so every existing
+    # CombatConfig() construction keeps the legacy always-painting 360°
+    # radar gate BYTE-IDENTICALLY.  "scanned" arms paint-based detection:
+    # rotating/sector radars (per docs/research/radar_scan_and_bands.md)
+    # only see a bearing when the beam is actually on it, and the contact
+    # picture refreshes at real paint cadence instead of the legacy range
+    # bands.  The GAME layer always passes "scanned" — same pattern as
+    # damage_model: "functional" is a compatibility flag, not a UI mode.
+    radar_model: str = "functional"
 
 
 # --- Clamp ranges for the setup UI (module-level constants, not fields) -------
@@ -348,6 +358,7 @@ def clamp_config(
     n_transports: int = CombatConfig.n_transports,
     beachhead_grace_s: float = CombatConfig.beachhead_grace_s,
     damage_model: str = CombatConfig.damage_model,
+    radar_model: str = CombatConfig.radar_model,
 ) -> CombatConfig:
     """Build a CombatConfig with all count/ammo/reload fields clamped to the
     legal UI ranges.  Intended for the setup screen: pass raw slider values,
@@ -432,6 +443,8 @@ def clamp_config(
         # Not a spinner value: any string other than the exact opt-out flag
         # normalizes to the full model (typo-safe for config dicts).
         damage_model=("legacy" if damage_model == "legacy" else "subsystem"),
+        radar_model=("functional" if radar_model == "functional"
+                     else "scanned"),
     )
 
 

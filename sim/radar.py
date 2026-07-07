@@ -204,3 +204,21 @@ class RadarNetwork:
     def visible(self, target_pos, size_class: str, jammers=()) -> bool:
         return any(r.detects(target_pos, size_class, jammers=jammers)
                    for r in self.radars)
+
+    def paint_state(self, target_pos, size_class: str, now: float,
+                    window: float, jammers=()):
+        """Scanned-mode network answer (R-P0): ``(seen, next_paint)``.
+
+        seen — some live radar both detects (range/horizon/terrain/EW) AND
+        painted the bearing inside [now - window, now].
+        next_paint — earliest upcoming paint among the radars whose
+        ``detects`` passes right now (math.inf when none can see it): the
+        ContactBoard schedules its next refresh on this."""
+        seen, nxt = False, math.inf
+        for r in self.radars:
+            if not r.detects(target_pos, size_class, jammers=jammers):
+                continue
+            nxt = min(nxt, r.next_paint_t(target_pos, now))
+            if r.painted(target_pos, now, window):
+                seen = True
+        return seen, nxt

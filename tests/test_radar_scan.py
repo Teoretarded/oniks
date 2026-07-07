@@ -69,3 +69,33 @@ def test_detects_unchanged_by_scan_fields():
     # a sector radar's detects() ignores the sector (the paint layer owns it).
     r = _radar(ScanDef("sector", 2.0, 2.0, 60.0), boresight=0.0)
     assert r.detects(_tgt(120.0), "fighter")
+
+
+# --- Task 2: radar_model flag + RadarNetwork.paint_state ----------------------
+
+def test_radar_model_default_functional():
+    from world.combat_config import CombatConfig, clamp_config
+    assert CombatConfig().radar_model == "functional"
+    assert clamp_config().radar_model == "functional"       # round-trip safe
+    assert clamp_config(radar_model="scanned").radar_model == "scanned"
+    assert clamp_config(radar_model="typo").radar_model == "scanned"
+
+
+def test_paint_state_min_over_network():
+    from sim.radar import RadarNetwork
+    rot = _radar(ScanDef("rotating", 10.0, 2.0, 360.0))
+    star = _radar(STARING)
+    net = RadarNetwork([rot, star])
+    seen, nxt = net.paint_state(_tgt(0.0), "fighter", now=5.0, window=0.5)
+    assert seen and nxt == 5.0                    # the staring face wins
+    net2 = RadarNetwork([rot])
+    seen2, nxt2 = net2.paint_state(_tgt(90.0), "fighter", now=5.0, window=0.5)
+    assert nxt2 == rot.next_paint_t(_tgt(90.0), 5.0)
+
+
+def test_paint_state_dead_radar_contributes_nothing():
+    from sim.radar import RadarNetwork
+    rot = _radar(ScanDef("rotating", 10.0, 2.0, 360.0))
+    rot.alive = False
+    net = RadarNetwork([rot])
+    assert net.paint_state(_tgt(0.0), "fighter", 0.0, 0.5) == (False, math.inf)
