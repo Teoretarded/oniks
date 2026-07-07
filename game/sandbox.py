@@ -369,6 +369,11 @@ class SandboxState(GameState):
         self.rig = CameraRig(self.camera)
         self.sky = Sky()
         self.ocean = Ocean()
+        # F3-P1: the battle's sea-state amplitude, resolved once (the state
+        # is fixed per battle; scale(3) == 1.0 == the legacy default).
+        from world.ocean import sea_amp_scale
+        self._sea_amp = sea_amp_scale(
+            getattr(getattr(self.world, "_config", None), "sea_state", 3))
         # M3-F4: render the ACTIVE map field so the 3D coast/islands match the
         # field the sim masks LOS with. CombatWorld carries a per-preset
         # height_field; the sandbox WorldState has none (default map).
@@ -1656,7 +1661,8 @@ class SandboxState(GameState):
         self.renderer.begin(self.camera, w / h)
         self.sky.draw(self.renderer)
         self.terrain.draw(self.renderer)
-        self.ocean.draw(self.renderer, self.camera, self.world.sim_time)
+        self.ocean.draw(self.renderer, self.camera, self.world.sim_time,
+                        sea_amp=self._sea_amp)
         for mesh, pos in self._site_draws:
             self.renderer.draw_mesh(mesh, pos)
         self._draw_ships()

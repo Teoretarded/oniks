@@ -31,6 +31,22 @@ RINGS = [  # (outer_radius_m, cell_m, wave_weight)
     (700_000, 12_000, 0.0),
 ]
 
+# F3-P1 Douglas sea state -> wave-amplitude scale (u_sea_amp).  Douglas
+# significant wave heights (mid-band, m): 0/0.03/0.3/0.88/1.88/3.25/5.0/
+# 7.5/11.5/16, normalized to state 3 (0.88 m = today's implicit sea, so
+# scale(3) == 1.0 EXACTLY — the locked identity).  Pure vertical sine
+# displacement cannot self-intersect, so the tall states are honest, just
+# steep.  Visual-only: the sim NEVER reads this (clutter physics lives in
+# sim/clutter.py — the F3 determinism guard).
+_SEA_AMP_TABLE = (0.0, 0.06, 0.34, 1.0, 2.14, 3.69, 5.68, 8.52, 13.07,
+                  18.18)
+
+
+def sea_amp_scale(sea_state: int) -> float:
+    """Gerstner/sine amplitude multiplier for a Douglas sea state 0-9
+    (clamped).  State 3 returns exactly 1.0 (byte-identical default)."""
+    return _SEA_AMP_TABLE[min(max(int(sea_state), 0), 9)]
+
 
 def _build_ring(outer: float, cell: float, hole_half: float,
                 wave_weight: float) -> MeshData:
@@ -80,6 +96,7 @@ layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_nrm; layout(locat
 uniform mat4 u_proj, u_view_rot, u_model;
 uniform vec2 u_world_origin;
 uniform float u_time;
+uniform float u_sea_amp;   // F3-P1: Douglas sea-state amplitude scale (1.0 = state 3)
 out vec3 v_nrm; out vec3 v_view_vec; out float v_flogz;
 void main(){
     vec2 wxz = a_pos.xz + u_world_origin;   // true world xz -> waves don't swim
@@ -96,11 +113,12 @@ void main(){
     float p1 = dot(d1, wxz)*f1 + u_time*s1*f1;
     float p2 = dot(d2, wxz)*f2 + u_time*s2*f2;
     float p3 = dot(d3, wxz)*f3 + u_time*s3*f3;
-    float y = ww * (a0*sin(p0) + a1*sin(p1) + a2*sin(p2) + a3*sin(p3));
+    float y = ww * u_sea_amp * (a0*sin(p0) + a1*sin(p1) + a2*sin(p2) + a3*sin(p3));
     float c0 = a0*f0*cos(p0), c1 = a1*f1*cos(p1), c2 = a2*f2*cos(p2), c3 = a3*f3*cos(p3);
-    v_nrm = normalize(vec3(-ww*(c0*d0.x + c1*d1.x + c2*d2.x + c3*d3.x),
+    float na = ww * u_sea_amp;   // slope terms scale with the amplitude
+    v_nrm = normalize(vec3(-na*(c0*d0.x + c1*d1.x + c2*d2.x + c3*d3.x),
                            1.0,
-                           -ww*(c0*d0.y + c1*d1.y + c2*d2.y + c3*d3.y)));
+                           -na*(c0*d0.y + c1*d1.y + c2*d2.y + c3*d3.y)));
     vec4 world_rel = u_model * vec4(a_pos.x, y, a_pos.z, 1.0);  // camera-relative
     v_view_vec = world_rel.xyz;
     gl_Position = u_proj * u_view_rot * world_rel;
@@ -148,9 +166,12 @@ class Ocean:
         self.meshes = [Mesh(md) for md in build_ocean_rings()]
         self.shader = Shader(OCEAN_VERT, OCEAN_FRAG)
 
-    def draw(self, renderer, camera, time: float) -> None:
+    def draw(self, renderer, camera, time: float,
+             sea_amp: float = 1.0) -> None:
         renderer.set_common(self.shader)
         self.shader.set_float("u_time", float(time) % 3600.0)
+        # F3-P1: default 1.0 keeps every legacy caller byte-identical.
+        self.shader.set_float("u_sea_amp", float(sea_amp))
         for (_outer, cell, _ww), mesh in zip(RINGS, self.meshes):
             sx = np.floor(camera.eye[0] / cell) * cell
             sz = np.floor(camera.eye[2] / cell) * cell

@@ -48,6 +48,7 @@ from world.combat_config import (
     CLAMP_DECOYS, CLAMP_DESTROYERS, CLAMP_DRONES, CLAMP_ENEMY_RADARS,
     CLAMP_FLAGSHIP, CLAMP_GROUND_ATTACK, CLAMP_GUN_AMMO, CLAMP_JAMMERS,
     CLAMP_MAP_PRESET, CLAMP_ONIKS, CLAMP_PANTSIR, CLAMP_PLAYER_JAMMER,
+    CLAMP_SEA_STATE,
     CLAMP_PLAYER_RADARS, CLAMP_RELOAD_S, CLAMP_S300, CLAMP_SONOBUOYS,
     CLAMP_SUB_KALIBR, CLAMP_SUBS, CLAMP_SWARM_CELLS, CLAMP_SWARM_PODS,
     CLAMP_TRANSPORTS, MAP_PRESET_NAMES, clamp_config,
@@ -105,6 +106,14 @@ _WORLD_ROWS = [
     {"kind": "stepper", "label": "MAP",           "field": "map_preset",
      "step": 1, "lo": CLAMP_MAP_PRESET[0], "hi": CLAMP_MAP_PRESET[1],
      "names": MAP_PRESET_NAMES},
+    # F3-P1 Douglas sea state: default 3 SLIGHT is today's sea (identity —
+    # sea_amp_scale(3)==1.0, clutter factor ==1.0).  Higher states raise the
+    # swell AND degrade radar pickup of sea-skimmers (sim/clutter.py).
+    {"kind": "stepper", "label": "SEA STATE",     "field": "sea_state",
+     "step": 1, "lo": CLAMP_SEA_STATE[0],     "hi": CLAMP_SEA_STATE[1],
+     "names": ("0 GLASS", "1 RIPPLED", "2 SMOOTH", "3 SLIGHT",
+               "4 MODERATE", "5 ROUGH", "6 VERY ROUGH", "7 HIGH",
+               "8 VERY HIGH", "9 PHENOMENAL")},
     {"kind": "stepper", "label": "PLAYER RADARS", "field": "n_player_radars",
      "step": 1, "lo": CLAMP_PLAYER_RADARS[0], "hi": CLAMP_PLAYER_RADARS[1]},
     {"kind": "stepper", "label": "RECON DRONES",  "field": "n_drones",
@@ -256,7 +265,7 @@ _PAGES = (_WORLD_ROWS, _ENEMY_ROWS, _ARMORY_ROWS, _DEFENSE_ROWS)
 # threat axis (every ENEMY group), lavender = the deception identity chip.
 # Groups fill the 2-column grid in order (left, right, left, ...).
 _PAGE_GROUPS = (
-    (("WORLD", ACCENT, 2), ("RECON", BELIEF, 3),
+    (("WORLD", ACCENT, 3), ("RECON", BELIEF, 3),
      ("LAUNCHERS", OK_COL, 4), ("DECEPTION", CHIP_DECEPTION, 3)),
     (("FLEET", DANGER, 5), ("AMPHIB + UNDERSEA", DANGER, 3),
      ("AIR + EW", DANGER, 2), ("GROUND SENSORS", DANGER, 1)),
