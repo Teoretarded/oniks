@@ -380,6 +380,24 @@ float density_at(vec3 wp, float view_t, float dt_step){
     float detail_amt = 1.0 - smoothstep(DETAIL_FADE0_M, DETAIL_FADE1_M,
                                         view_t);
     d = mix(d, eroded, detail_amt);             // erode near edges only
+    // CLOSE RANGE (flight probe, round 4): within ~3 km the 37 m detail
+    // voxels magnify into glassy smoothness and the eroded fringe reads
+    // as see-through mush.  A second, 3.2x finer detail octave carves
+    // billows, and a mild density boost makes near cloud go honestly
+    // opaque instead of X-ray.
+    float near_amt = 1.0 - smoothstep(1500.0, 4000.0, view_t);
+    if (near_amt > 0.0){
+        float det2 = textureLod(u_detail_noise,
+                                (wp + drift * 2.3) / (DETAIL_TILE * 0.31),
+                                0.0).r;
+        d = mix(d, remap(d, det2 * 0.38, 1.0, 0.0, 1.0), near_amt);
+        d *= 1.0 + 0.35 * near_amt;
+    }
+    // Ragged undersides: real cumulus bases are wispy, not a flat slab
+    // (flight probe: the mass base read as one featureless plate).
+    float hcol = hfrac / max(wm.b, 0.12);
+    float rag = clamp(remap(det, 0.25, 0.75, 0.55, 1.25), 0.4, 1.3);
+    d *= mix(rag, 1.0, smoothstep(0.10, 0.35, hcol));
     return clamp(d * coverage, 0.0, 1.0);
 }
 
