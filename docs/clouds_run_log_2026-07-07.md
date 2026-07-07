@@ -69,15 +69,67 @@ external load; the quiet-machine baseline was 13.43. Clouds' controlled
 frame delta ≈ 0. Re-run the gate on a quiet machine before the next
 perf-sensitive phase.
 
+## Playtest v5 (user reports 2026-07-07 evening — every one confirmed)
+
+Plan: `docs/plans/clouds_v5_fix_plan_2026-07-07.md` (diagnosis table R1–R6).
+Implementation: Codex GPT-5.5 xhigh from the plan (T1–T7), reviewed +
+committed by the orchestrator; lighting/march quality then iterated 8
+rounds against the screenshot gate.
+
+1. **"Repeating pattern"** — base noise tiled every 6 km. Fixed: second
+   base sample at ×2.618 scale (periods never align) + weathermap-derived
+   domain warp (±2.5 km, 300 km period). Formulas in the module docstring
+   for the W-P6 CPU mirror.
+2. **"CRT lines as you fly away"** — no mipmaps on the noise textures =
+   minification moiré. Fixed: GL_LINEAR_MIPMAP_LINEAR + glGenerateMipmap,
+   detail erosion faded 8→25 km, base flattened past 60 km.
+3. **"Clouds shrink/disappear as I move"** — march reach was ~21 km
+   (and 30 km hard cap sideways). Fixed: distance-proportional stepping
+   (3 %/step, 224 steps) reaching 450 km; weathermap drift 4× → 1×.
+4. **"Ghosts, no shadows"** — fixed in two parts: (a) in-cloud lighting —
+   ambient gradient was INVERTED (tops darker than bases); isotropic
+   multi-scatter floor added (phase-only sun term is near-black at
+   anti-solar angles); sun cone gets a 1.8 km coarse tap; (b) cloud
+   shadows on terrain + ocean via CLOUD_SHADOW_GLSL (weathermap projected
+   along the sun; ocean dims surface + glint).
+5. **"Clouds everywhere"** — bake v5 coverage probed across seeds
+   7/0/1337: ~70 % clear sky, ~9 % dense cores, big honest lanes; test
+   contract updated per FAIR ≈ 3 okta (spec-driven change, argued in the
+   commit).
+
+### The stipple/banding war (8 screenshot-gate iterations)
+
+Speckle amplitude tracks σ·d·dt per step. One march forces a choice:
+no jitter → marching bands on near-horizontal views; full-step jitter at
+6 km far strides → heavy stipple. Landed on: σ 0.022 → 0.016, 224 steps,
+and TWO stratified 90 m-jittered marches averaged (bands decorrelated,
+noise halved). An adaptive coarse/fine march was tried and REVERTED —
+modal switching quantizes at coarse boundaries (blocky patches).
+
+### Gates
+
+- Bake tests: 5/5 green (new coverage contract included).
+- Perf: clouds **0.12 avg / 0.16 p95 ms** (budget 3.0/5.0) WITH the dual
+  march. Frame total 16.79 vs 16.0 FAILED but the A/B control (clouds
+  disabled, same session) read 16.96 — the overage is sim_step/swap
+  machine load, cloud-controlled delta ≈ 0 (same pattern as the v4 run).
+  Quiet-machine re-run still owed before the next perf-sensitive phase.
+- Screenshots: 5 views in renders/clouds_*.png judged against the plan's
+  10-signature checklist — white domed tops, shaded bases, unique shapes
+  (no motif at any scale), clouds to the horizon, ground shadow patches.
+
 ## Nits / next
 
-- Dither speckle on cloud edges is visible in stills; acceptable in
-  motion at 1600×900. A blue-noise texture or 2-tap average is the first
-  polish knob if the playtest objects.
-- v1 taxonomy renders the FAIR/PARTLY mix only (type channel biased to
-  fair-cu/towering); stratus decks, supercells and cirrus arrive with the
-  W-P6 atmosphere presets driving `u_coverage_bias` + the type channel.
-- Cloud shadows on the sea/terrain: not modeled (v2 candidate with the
-  day/night pass — sample the weathermap in the lit shader).
-- First battle on a new seed pays the 5.2 s bake under BUILDING WORLD;
-  cached after. Acceptable; a boot-thread bake is the fix if it annoys.
+- Residual fine grain on cloud edges in stills (halved from v4 level);
+  the honest next knob is a half-res FBO or temporal pass — NOT more
+  jitter tuning (both single-march failure modes are documented above).
+- Far decks (>60 km) render as smooth plateaus (base noise flattened) —
+  acceptable at horizon distances; a far-detail octave is a polish knob.
+- v1 taxonomy renders the FAIR/PARTLY mix only; stratus decks, supercells
+  and cirrus arrive with W-P6 presets (`u_coverage_bias` + type channel).
+- Night lighting + launch-flash illumination: needs the day/night pass
+  (backlogged in the v5 plan).
+- Sensor/seeker weather occlusion (TV/EO lock gating): W-P6 CPU mirror of
+  `density_at` — the v5 plan documents the exact formulas to mirror.
+- First battle on a new seed pays the ~5 s bake under BUILDING WORLD;
+  cached after. A boot-thread bake is the fix if it annoys.
