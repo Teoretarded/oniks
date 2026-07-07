@@ -37,6 +37,27 @@ Task 3 gate covers both. Noted as a deviation from the per-commit rule.)
   (own SPY-class array stays staring — correct per doc). `"scanned"`
   forced at the 4 game-layer sites + SANDBOX_CONFIG.
 
+- **T5 Oniks/Zircon seeker honesty** (`f0e81b7`): `_seeker_can_see` =
+  `radar_horizon_m` + `terrain_blocks` (one physics, reused); held-lock
+  re-check 0.5 s cadence drops masked locks; dry rescans throttled to
+  seeker frame time under scanned ONLY (legacy keeps per-substep rescan).
+  KEY DECISION: seeker honesty arms under the SAME `radar_model="scanned"`
+  flag — unconditional gates would have changed every legacy digest (a
+  12 m skimmer really does lose a 40 km ship below the horizon).
+- **T6 SAM cone + ARH/SARH**: SamDef gains `guidance`
+  (48N6/SM-2/9M317 = sarh, 40N6/SM-6 = arh, 57E6/9M338 = command) +
+  `seeker_half_angle_deg` (30°). Terminal handover requires the target
+  inside the cone about the velocity vector (homing rounds, scanned only) —
+  midcourse simply continues until PN brings the nose around. SARH rounds
+  get `illuminator_ok_fn`: the station's NEW 30N6-class engagement radar
+  (station_engagement, X-band 60° wedge, dies with the mast structure)
+  slews to the most recent 48N6 engagement; a 9M317 rides its own TEL's
+  9S36 (per-TEL slew, tube dicts carry "tel"). One FCR = one wedge:
+  multi-axis raids saturate illumination capacity — EMERGENT, no dice.
+- **T7 AIM-9X gimbal**: ±90° HOBS head limit off the body axis; LOS past
+  it = lock lost, self-destruct (scanned only — legacy keeps the loop-back
+  re-attack). Bounds the old bare 2×-range energy band.
+
 ## Measured (probe_radar_scan, JASSM inbound 100 km north, 240 s window)
 
 | mode | missile track age p50/p95/max | ship p50/p95/max |
@@ -48,6 +69,15 @@ Max staleness now IS the rotation period (~11.5 s < 12 s incl. dwell) —
 staleness became physical. Note the honest model gives FRESHER mid-range
 ship tracks than the legacy 60 s band; the price is paint-based (slightly
 later) track formation and true blindness outside sector radars' wedges.
+
+## Measured (probe_seeker_honesty — Oniks max acquisition, km)
+
+| geometry | legacy | honest (scanned) |
+|---|---|---|
+| 12 m skim, open water | 49.5 | **37.5** (horizon-true; theory 37.9) |
+| 60 m lo-cruise, open water | 49.5 | 49.5 (horizon 55.6 km — unaffected) |
+| 15 km dive, open water | 47.5 | 47.5 (looks down past the horizon) |
+| 12 m skim, 140 m ridge at 7–10 km | 49.5 | **9.0** (ship must be in front of it) |
 
 ## Honest nit list
 
@@ -62,4 +92,19 @@ later) track formation and true blindness outside sector radars' wedges.
   attenuation consumers).
 - Station ENGAGEMENT radar (30N6-class sector FCR) is declared in the
   research doc + SCAN_ENG_30N6 constant but the OBJECT lands with Task 6
-  (SARH illuminator) — it has no search role.
+  (SARH illuminator) — it has no search role. LANDED with T6.
+- SARH wedge-slew doctrine is "newest engagement wins": firing a second
+  48N6 at a target far off the first one's bearing strands the FIRST
+  round (its lock freezes when its target leaves the wedge). Honest but
+  currently silent — a launch-time HUD hint ("30N6 SLEWING — ROUND N
+  GOES BLIND") is a good UX follow-up.
+- Buk 9S36 slewing to its engagement also slews its SEARCH wedge in
+  radar_net (realistic — the FCR looks where it fights — but worth
+  knowing when reading picture gaps).
+- Enemy SM-2s keep illuminator liveness (existed) but no sector gate on
+  the ship's staring array (correct: SPY-1 illuminators are slaved
+  directional dishes — modeling their 3-channel capacity limit is a
+  future honesty pass).
+- 57E6/9M338 "command" rounds: no cone, no illuminator dependency wired
+  (their mounts' tracking-channel death mid-flight is not yet a lock
+  break — future pass alongside the Pantsir/Tor FCR model).
