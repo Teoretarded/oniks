@@ -169,6 +169,23 @@ aerial photography. Ten signatures:
   supercell, cirrus) — W-P6/P8.
 - Boot-thread bake (first-seed 5 s stall under BUILDING WORLD).
 
+## v6 — playtest round 2 (2026-07-07 night, all reports confirmed on screenshots)
+
+| # | Report | Mechanism |
+|---|--------|-----------|
+| P1 | Clouds "sliced into plates/topo-map rings" from above | At range, dt (3–6 km) crosses the whole vertical layer in 1–2 samples. Fix: clamp step so it never crosses > 250 m of altitude: `dt = min(dt_prop, DY_MAX_M / max(abs(rd.y), 0.02))`, `DY_MAX_M = 250.0`. |
+| P2 | Diagonal "CRT" stripes on cloud bodies | IGN dither's diagonal correlation shows through. Fix: white-noise `hash12` jitter (restore the old function) — grain, not scanlines. |
+| P3 | FPS collapses near/inside clouds | Per lit sample: 7-tap sun march, ×2 marches. Fix: SINGLE march (delete the dual-pass average); sun march only every 2nd lit step (reuse cached `sun_T` between); early-out `T < 0.03`; mist skip: after 8 consecutive samples with `d < 0.02`, double dt until d > 0.02 again (halve back on hit). |
+| P4 | Overlapping clouds get dark gray sides; thin cloud in front of big cloud shows a dark veil | The 1.8 km coarse sun tap lies INSIDE the 6×350 m fine range — shadow double-count. Fix: coarse tap at `SUN_STEP_M*(SUN_STEPS+1) + 1800` (≈ 4.25 km), weight 1800 m, and SUN_STEPS 6 → 4 (weight 350 each). |
+| P5 | No small/lone clouds; small puffs fade in/out with distance | v5 coverage multiplies puffs by mass (zero outside masses), and far base-flattening erases sub-texel puffs. Fix (bake v6): `lone = 0.55*clip(remap(puff_n, 0.68, 0.80, 0, 1))*(1-mass)`; `coverage = clip(mass*(0.30+1.00*puff) + 0.40*mass² + lone)`; CACHE_VERSION "v6". Probe seeds 7/0/1337 first: clear(<0.1) must stay > 0.30, dense(>0.4) in (0.08, 0.45) — adjust the lone thresholds if not, do NOT touch the test. |
+| P6 | Far clouds too smooth/plateau-like | far_flat was too aggressive now that mips exist. Fix: FAR_FLAT0/1 60→120 km / 160→400 km and flatten at most 60 % (`far_flat *= 0.6`). |
+| P7 | Missile exhaust particles hidden by clouds behind them | Particles draw before clouds; clouds depth-test only vs opaque. Fix: in `game/sandbox.py._draw_scene` draw clouds BEFORE `self.particles.draw(...)`. Documented tradeoff: a plume behind a distant cloud shines through faintly (rare) — plumes vanishing entirely (common) is worse. |
+
+Gate additions: 360° screenshot sweep tool (orchestrator builds) at 2/10/30/50 km:
+4 headings + straight up + straight down each; perf gate gains an inside-mist
+camera. WT parity note: full smoothness at this budget ultimately means
+half-res FBO + temporal reprojection — that stays the documented escape hatch.
+
 ## Environment facts (for the implementer)
 
 - Windows 11, Python 3.11, run tests `pytest -q -n auto` (xdist installed).
