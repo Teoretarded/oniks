@@ -31,6 +31,7 @@ from engine.camera import Camera
 from engine import math3d
 import engine.renderer as renderer_mod
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
+from game.cinematic_icbm import ICBM_BY_ID, ICBMS, IcbmLaunch
 from game.cinematic_missiles import (
     CinematicEffects,
     ScriptedLaunch,
@@ -119,6 +120,13 @@ MOODS = (
 SKIES = ((0, "CLEAR"), (1, "FAIR"), (2, "BROKEN"), (3, "OVERCAST"),
          (6, "STORM"))
 
+# Launcher roster: the S-300 pad plus one ICBM silo per weapon (the silo
+# model at the surveyed site swaps with the selection).
+LAUNCHERS = (("s300", "S-300 PAD", "THE COLD-LAUNCH CLASSIC"),) + tuple(
+    (s.id, f"{s.label} SILO", s.blurb) for s in ICBMS)
+# Coast time-warp ladder while an ICBM flies ('.' cycles).
+WARPS = (1.0, 8.0, 30.0)
+
 
 class CinematicState(GameState):
     """Walkable 1:1 real-world location viewer (see module docstring)."""
@@ -176,6 +184,18 @@ class CinematicState(GameState):
         self._shake_queue = []       # (due_t, amplitude)
         self.weapons = WeaponRig()   # F1: shoulder-fired weapons (GL-free)
 
+        # ICBM battery (docs/plans/icbm_cinematic_plan_2026-07-17.md).
+        self.launcher_i = 0          # LAUNCHERS index (0 = S-300 pad)
+        self.icbm_target = None      # np (3,) designated ground point
+        self.follow = False          # C: chase cam on the newest round
+        self.warp_i = 0              # WARPS index (ICBM flight only)
+        self._silo_site = None       # np (3,) surveyed compound center
+        self._silo_yaw = 0.0         # rails/door slide away from spawn
+        self._door_anim = {s.id: 0.0 for s in ICBMS}
+        self.silo_meshes = {}        # id -> (compound, door) GL meshes
+        self.icbm_meshes = {}        # id -> missile mesh
+        self._chase_eye = None       # smoothed chase-cam position
+
     # ------------------------------------------------------------ lifecycle
 
     def enter(self) -> None:
@@ -225,6 +245,19 @@ class CinematicState(GameState):
                               if len(tel_md.vertices) else 9.1)
             self.tel_mesh = Mesh(tel_md)
             self.missile_mesh = Mesh(build_s300_missile())
+            from models.icbm import (build_minuteman_iii,
+                                     build_minuteman_lf,
+                                     build_minuteman_lf_door,
+                                     build_sarmat, build_sarmat_silo,
+                                     build_sarmat_silo_lid)
+            self.silo_meshes = {
+                "mm3": (Mesh(build_minuteman_lf()),
+                        Mesh(build_minuteman_lf_door())),
+                "sarmat": (Mesh(build_sarmat_silo()),
+                           Mesh(build_sarmat_silo_lid())),
+            }
+            self.icbm_meshes = {"mm3": Mesh(build_minuteman_iii()),
+                                "sarmat": Mesh(build_sarmat())}
 
             self._start_shadow_bakes()
             (sx, sz), yaw = self.scene.spawn_pos_yaw()
@@ -237,6 +270,13 @@ class CinematicState(GameState):
             # Missiles lean AWAY from the spawn: the plume unveils toward
             # the valley instead of dumping the smoke column onto the lens.
             self._pad_yaw = math.atan2(px - sx, pz - sz)
+            # ICBM silo: deterministic survey (flat, clear, LOS, watching
+            # distance) — the compound door slides AWAY from the spawn.
+            from world.cinematic_scene import survey_silo_site
+            cx, cz = survey_silo_site(self.scene)
+            self._silo_site = np.array(
+                [cx, self.scene.ground_h(cx, cz), cz], dtype=np.float64)
+            self._silo_yaw = math.atan2(cx - sx, cz - sz)
             self._apply_mood()
         pygame.event.set_grab(True)
         pygame.mouse.set_visible(False)
@@ -267,6 +307,10 @@ class CinematicState(GameState):
                 fn()
 
     def effective_time_scale(self) -> float:
+        """1x always — except the '.' coast warp while an ICBM flies."""
+        if self.warp_i > 0 and any(isinstance(m, IcbmLaunch) and not m.done
+                                   for m in self.launches):
+            return WARPS[self.warp_i]
         return 1.0
 
     # ------------------------------------------------------------ lighting
@@ -443,6 +487,18 @@ class CinematicState(GameState):
                 self.spot = not self.spot
                 self._say("SPOTTER ON - TRACKS WHILE ZOOMED"
                           if self.spot else "SPOTTER OFF")
+            elif ev.key == pygame.K_t:
+                self._designate_target()
+            elif ev.key == pygame.K_c:
+                self.follow = not self.follow
+                self._say("CHASE CAM" if self.follow else "CHASE CAM OFF")
+            elif ev.key == pygame.K_PERIOD:
+                if any(isinstance(m, IcbmLaunch) and not m.done
+                       for m in self.launches):
+                    self.warp_i = (self.warp_i + 1) % len(WARPS)
+                    self._say(f"TIME X{WARPS[self.warp_i]:.0f}")
+                else:
+                    self._say("TIME WARP NEEDS A BIRD IN FLIGHT")
         elif ev.type == pygame.MOUSEMOTION:
             rx, ry = getattr(ev, "rel", (0, 0))
             sens = MOUSE_SENS * (self._fov() / BASE_FOV)
@@ -480,11 +536,11 @@ class CinematicState(GameState):
 
     # ------------------------------------------------------------ teleport
 
-    def _teleport_to_view(self) -> None:
-        """March the view ray onto the bare-earth field; drop the walker
-        there and hand control back to the boots."""
+    def _view_ground_hit(self, p: np.ndarray):
+        """March the view ray from ``p`` onto the bare-earth field.
+        Returns the clamped hit point or None (shared by the freecam
+        teleport and T target designation)."""
         d = np.array(self.walker.forward(), dtype=np.float64)
-        p = self.fc_pos.copy()
         hit = None
         t, step = 0.0, 8.0
         # The walkable world spans the full SURROUND extent (16 x 16 km on
@@ -521,6 +577,11 @@ class CinematicState(GameState):
             q = p + d * hi
             if math.hypot(q[0] - hit[0], q[2] - hit[2]) > step + 1.0:
                 hit = None
+        return hit
+
+    def _teleport_to_view(self) -> None:
+        """Drop the walker onto the terrain under the freecam marker."""
+        hit = self._view_ground_hit(self.fc_pos.copy())
         if hit is None:
             self._say("NO GROUND THERE")
             return
@@ -531,6 +592,22 @@ class CinematicState(GameState):
         w.on_ground = True
         self.freecam = False
         self._say("TELEPORTED")
+
+    def _designate_target(self) -> None:
+        """T: mark the ground point under the view ray for the ICBMs."""
+        hit = self._view_ground_hit(
+            np.array(self._eye(), dtype=np.float64))
+        if hit is None:
+            self._say("NO GROUND UNDER THE MARK")
+            return
+        hit[1] = self.scene.ground_h(float(hit[0]), float(hit[2]))
+        self.icbm_target = hit
+        if self._silo_site is not None:
+            rng = math.hypot(hit[0] - self._silo_site[0],
+                             hit[2] - self._silo_site[2])
+            self._say(f"TARGET SET - {rng / 1000.0:.1f} KM FROM SILO")
+        else:
+            self._say("TARGET SET")
 
     # ----------------------------------------------------------- launching
 
@@ -543,9 +620,17 @@ class CinematicState(GameState):
         return None
 
     def _fire(self) -> None:
-        """Salvo-friendly: a new round leaves as soon as the tube has
-        cycled (~2.5 s); everything already flying keeps flying."""
-        last = self.launches[-1] if self.launches else None
+        """L: the selected launcher fires — S-300 salvo rules on the pad,
+        one-bird-per-silo rules for the ICBMs."""
+        lid = LAUNCHERS[self.launcher_i][0]
+        if lid != "s300":
+            self._fire_icbm(lid)
+            return
+        last = None
+        for m in reversed(self.launches):
+            if isinstance(m, ScriptedLaunch):
+                last = m
+                break
         if (last is not None and not last.done
                 and last.t < self._min_relaunch_s):
             self._say(f"TUBE CYCLING - "
@@ -557,6 +642,29 @@ class CinematicState(GameState):
         mouth = self._pad + np.array([0.0, self._tube_top, 0.0])
         m.eject_fx(self.effects, mouth, float(self._pad[1]))
         self._queue_sound("pop", mouth, gain=0.5)
+
+    def _fire_icbm(self, lid: str) -> None:
+        """One bird per silo; needs a designated target (T)."""
+        if self._silo_site is None:
+            self._say("NO SILO SURVEYED")
+            return
+        if self.icbm_target is None:
+            self._say("NO TARGET - AIM AND PRESS T")
+            return
+        for m in self.launches:
+            if isinstance(m, IcbmLaunch) and not m.done \
+                    and m.spec.id == lid:
+                self._say("BIRD IN FLIGHT - SILO EMPTY")
+                return
+        spec = ICBM_BY_ID[lid]
+        m = IcbmLaunch(spec, silo=tuple(self._silo_site),
+                       target=tuple(self.icbm_target),
+                       ground_h=self.scene.ground_h,
+                       door_open=self._door_anim.get(lid, 0.0) >= 0.99)
+        self.launches.append(m)
+        rng = math.hypot(self.icbm_target[0] - self._silo_site[0],
+                         self.icbm_target[2] - self._silo_site[2])
+        self._say(f"{spec.label} AWAY - {rng / 1000.0:.1f} KM SHOT")
 
     # ------------------------------------------------------------------ sim
 
@@ -610,6 +718,27 @@ class CinematicState(GameState):
                     m.pad_blast_fx(self.effects, pos)
                 elif kind == "pad_roll":
                     m.pad_roll_fx(self.effects, pos)
+                elif kind == "door":
+                    self._queue_sound("pop", pos, gain=0.35)
+                elif kind == "eject":
+                    m.eject_fx(self.effects, pos)
+                    self._queue_sound("pop", pos, gain=0.9)
+                elif kind == "pallet":
+                    m.pallet_fx(self.effects, pos)
+                elif kind == "smoke_ring":
+                    m.smoke_ring_fx(self.effects, pos)
+                elif kind == "stage":
+                    m.stage_fx(self.effects, pos)
+                elif kind == "cutoff":
+                    self._say("PBV CUTOFF - BALLISTIC")
+                elif kind == "impact":
+                    m.impact_fx(self.effects, pos)
+                    self._queue_sound("boom", pos)
+                    eye = np.asarray(self._eye(), dtype=np.float64)
+                    delay = float(np.linalg.norm(pos - eye)) \
+                        / SPEED_OF_SOUND
+                    self._shake_queue.append((self.t + delay, 2.2))
+                    self._say("IMPACT")
             m.emit(self.effects, dt)
         # Shoulder weapons fly AFTER the targets moved (their rounds home
         # on the fresh positions; a kill marks the launch done for the
@@ -619,6 +748,20 @@ class CinematicState(GameState):
         # per-meter smoke column IS the trail.  Spent rounds are pruned;
         # their smoke lives on in the pools.
         self.launches = [m for m in self.launches if not m.done]
+        # Silo doors: ride an active bird's own door clock open, then
+        # walk shut a while after the silo goes quiet.
+        for sid in self._door_anim:
+            live = next((m for m in self.launches
+                         if isinstance(m, IcbmLaunch)
+                         and m.spec.id == sid), None)
+            if live is not None:
+                self._door_anim[sid] = max(self._door_anim[sid],
+                                           live.door_frac)
+            else:
+                self._door_anim[sid] = max(
+                    0.0, self._door_anim[sid] - dt / 8.0)
+        if not any(isinstance(m, IcbmLaunch) for m in self.launches):
+            self.warp_i = 0          # warp is an ICBM-flight tool only
         if self.effects is not None:
             self.effects.update(dt)
         if self.fog is not None:
@@ -723,6 +866,31 @@ class CinematicState(GameState):
         self.camera.fov_y = math.radians(self._fov())
         self.camera.set_orientation(np.array(
             [math.sin(yaw) * cp, math.sin(pitch), math.cos(yaw) * cp]))
+        # C: chase cam — ride just behind/beside the newest round and
+        # WATCH it fly (smoothed so staging kicks don't snap the view).
+        if self.follow and self.launch is not None and not self.launch.done:
+            m = self.launch
+            spec_len = getattr(getattr(m, "spec", None), "length_m", 8.0)
+            dist = max(45.0, spec_len * 4.0)
+            hd = m.heading()
+            side = np.cross(hd, np.array([0.0, 1.0, 0.0]))
+            ns = float(np.linalg.norm(side))
+            side = side / ns if ns > 1e-6 else np.array([1.0, 0.0, 0.0])
+            want = (m.pos - hd * dist + side * dist * 0.38
+                    + np.array([0.0, dist * 0.22, 0.0]))
+            if self._chase_eye is None:
+                self._chase_eye = want.copy()
+            blend = min(1.0, dt_real * 3.0)
+            self._chase_eye += (want - self._chase_eye) * blend
+            eye = self._chase_eye
+            look = m.pos + hd * spec_len * 0.5 - eye
+            n = float(np.linalg.norm(look))
+            if n > 1e-6:
+                self.camera.fov_y = math.radians(BASE_FOV)
+                self.camera.set_orientation(look / n)
+            self.camera.eye = eye
+        else:
+            self._chase_eye = None
 
         self.terrain.update(eye)
         self.app.renderer.alt_offset = self.scene.origin_alt
@@ -742,11 +910,19 @@ class CinematicState(GameState):
             np.array([math.sin(self._pad_yaw + math.pi), 0.0,
                       math.cos(self._pad_yaw + math.pi)]))
         self.app.renderer.draw_mesh(self.tel_mesh, self._pad, yaw_rot)
+        self._draw_silo()
         for m in self.launches:
             if m.done:
                 continue
             fwd_v = m.axis if m.ignited else np.array([0.0, 1.0, 0.0])
             rot = math3d.rotation_from_forward(fwd_v)
+            if isinstance(m, IcbmLaunch):
+                if not m.rv_only:      # post-boost bus is metres long and
+                    mesh = self.icbm_meshes.get(m.spec.id)   # tens of km up
+                    if mesh is not None:
+                        mid = m.pos + m.axis * (m.spec.length_m * 0.5)
+                        self.app.renderer.draw_mesh(mesh, mid, rot)
+                continue
             self.app.renderer.draw_mesh(self.missile_mesh, m.pos, rot)
         self.weapons.draw_world(self)
         if self.clouds is not None:
@@ -761,6 +937,39 @@ class CinematicState(GameState):
         self.overlay.draw(w / max(h, 1), self._zoom_fade)
 
         self._draw_hud(w, h)
+
+    def _silo_draw_id(self):
+        """Which compound stands at the surveyed site: an active bird's
+        own silo wins (never yank the ground out from under the smoke),
+        else the selected launcher's."""
+        for m in self.launches:
+            if isinstance(m, IcbmLaunch) and not m.done:
+                return m.spec.id
+        lid = LAUNCHERS[self.launcher_i][0]
+        return lid if lid != "s300" else None
+
+    def _draw_silo(self) -> None:
+        sid = self._silo_draw_id()
+        if sid is None or self._silo_site is None \
+                or sid not in self.silo_meshes:
+            return
+        from models.icbm import (LF_DOOR_CLOSED_Z, LF_DOOR_OPEN_DZ,
+                                 LF_DOOR_SIZE, LF_DOOR_Y,
+                                 SAR_LID_H, SAR_LID_OPEN_DZ)
+        fwd = np.array([math.sin(self._silo_yaw), 0.0,
+                        math.cos(self._silo_yaw)])
+        rot = math3d.rotation_from_forward(fwd)
+        compound, door = self.silo_meshes[sid]
+        self.app.renderer.draw_mesh(compound, self._silo_site, rot)
+        frac = self._door_anim.get(sid, 0.0)
+        if sid == "mm3":
+            local = np.array([0.0, LF_DOOR_Y + LF_DOOR_SIZE[1] * 0.5,
+                              LF_DOOR_CLOSED_Z + frac * LF_DOOR_OPEN_DZ])
+        else:
+            local = np.array([0.0, 1.5 + SAR_LID_H * 0.5,
+                              frac * SAR_LID_OPEN_DZ])
+        self.app.renderer.draw_mesh(door, self._silo_site + rot @ local,
+                                    rot)
 
     # ------------------------------------------------------------- overlay
 
@@ -808,9 +1017,35 @@ class CinematicState(GameState):
         text.draw_text(x + 14, y - 8, label, (*UI_ACC, 0.9), SMALL_SIZE)
         return True
 
+    def _draw_target_marker(self, w: int, h: int) -> None:
+        """The designated ICBM aim point: a warm diamond + range tag."""
+        if self.icbm_target is None:
+            return
+        sp = self._screen_pos(w, h, self.icbm_target
+                              + np.array([0.0, 2.0, 0.0]))
+        if sp is None:
+            return
+        x, y = sp
+        text = self.text
+        col = (1.0, 0.62, 0.30)
+        s = 7.0
+        text.draw_lines([(x, y - s), (x + s, y), (x, y + s), (x - s, y),
+                         (x, y - s)], (*col, 0.95), 1.0)
+        text.draw_lines([(x, y - s - 6), (x, y - s - 14)], (*col, 0.7), 1.0)
+        rng_km = float(np.linalg.norm(
+            self.icbm_target - np.asarray(self._eye()))) / 1000.0
+        text.draw_text(x + 12, y + 6, f"TGT {rng_km:.1f} KM",
+                       (*col, 0.9), SMALL_SIZE)
+
     def _draw_hud(self, w: int, h: int) -> None:
         text = self.text
         drew = self._draw_spotter(w, h)
+        self._draw_target_marker(w, h)
+        if LAUNCHERS[self.launcher_i][0] != "s300" and not self.ui_open:
+            hint = ("AIM + T SETS TARGET   L LAUNCHES"
+                    if self.icbm_target is None else
+                    "L LAUNCHES   C CHASE CAM   . TIME WARP")
+            text.draw_text(28, h - 30, hint, (*UI_DIM, 0.85), SMALL_SIZE)
         fade = 1.0 - max(0.0, min(1.0, (self.t - 5.0) / 2.0))
         if fade > 0.0:
             title = self.scene.title
@@ -869,6 +1104,9 @@ class CinematicState(GameState):
             rows.append(("scene", i, title, "",
                          sdir.replace("\\", "/") ==
                          self.scene_dir.replace("\\", "/")))
+        for i, (lid, label, blurb) in enumerate(LAUNCHERS):
+            rows.append(("launcher", i, label, blurb,
+                         i == self.launcher_i))
         for i, v in enumerate(VARIANTS):
             rows.append(("round", i, v.label, v.blurb,
                          v.id == self.variant.id))
@@ -895,8 +1133,8 @@ class CinematicState(GameState):
         text.draw_text(x, y0 + 52, self.scene.title, UI_ACC, SMALL_SIZE)
         text.draw_rect(x, y0 + 76, pw - 52, 1, UI_HAIR)
 
-        headers = {"scene": "LOCATION", "round": "ROUND",
-                   "light": "LIGHT", "sky": "SKY"}
+        headers = {"scene": "LOCATION", "launcher": "LAUNCHER",
+                   "round": "ROUND", "light": "LIGHT", "sky": "SKY"}
         self._ui_rects = []
         y = y0 + 92
         last_kind = None
@@ -936,7 +1174,14 @@ class CinematicState(GameState):
             if not (rect[0] <= pos[0] <= rect[2]
                     and rect[1] <= pos[1] <= rect[3]):
                 continue
-            if kind == "round":
+            if kind == "launcher":
+                self.launcher_i = i
+                lid, label, _b = LAUNCHERS[i]
+                if lid != "s300" and self.icbm_target is None:
+                    self._say(f"{label} - AIM + T TO SET A TARGET")
+                else:
+                    self._say(label)
+            elif kind == "round":
                 self.variant = VARIANTS[i]
                 self._say(f"ROUND {self.variant.label}")
             elif kind == "light":

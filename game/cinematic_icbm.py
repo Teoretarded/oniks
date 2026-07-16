@@ -84,6 +84,14 @@ class IcbmSpec:
     spin_hz: float           # GEMS orthogonal rotation rate
     shake_amp: float         # observer shake at the acoustic hit
     cutoff_event: bool       # liquids report engine shutdown
+    # Visual identity (research doc 1.5 / 2.5 plume phenomenology).
+    flame_core: tuple = (1.0, 0.98, 0.88)
+    flame_edge: tuple = (1.0, 0.57, 0.14)
+    flame_len_x: float = 1.4    # flame length as a multiple of body length
+    smoke_fresh: tuple = (0.93, 0.92, 0.87)
+    smoke_old: tuple = (0.70, 0.72, 0.72)
+    smoke_per_m: float = 3.0    # column density (48N6 = 2.0 for scale)
+    width_mult: float = 2.2     # column width vs the S-300 family
     eject_exit_v: float = 0.0   # cold: tube-exit speed
     hang_s: float = 0.0         # cold: unlit coast after tube exit
 
@@ -105,7 +113,12 @@ MINUTEMAN_III = IcbmSpec(
     door_s=1.5,              # 110 t door on gas actuators, ~35 mph
     base_depth_m=22.0,       # 80 ft tube, 18.3 m missile: nose near mouth
     toa_s=340.0, gate_agl_m=1500.0, spin_hz=0.06,
-    shake_amp=1.4, cutoff_event=False)
+    shake_amp=1.4, cutoff_event=False,
+    # Aluminized solid: brilliant white-orange flame, DENSE white pillar.
+    flame_core=(1.0, 0.99, 0.90), flame_edge=(1.0, 0.62, 0.16),
+    flame_len_x=1.6,
+    smoke_fresh=(0.94, 0.93, 0.88), smoke_old=(0.71, 0.73, 0.73),
+    smoke_per_m=3.4, width_mult=2.2)
 
 SARMAT = IcbmSpec(
     id="sarmat", label="SARMAT", nation="RUSSIA",
@@ -121,6 +134,12 @@ SARMAT = IcbmSpec(
     base_depth_m=33.0,       # ~39 m silo, TPK; tail rides near the bottom
     toa_s=560.0, gate_agl_m=1800.0, spin_hz=0.05,
     shake_amp=1.8, cutoff_event=True,
+    # Hypergolic N2O4/UDMH: hard orange flame, thin brown-grey haze —
+    # the mortar puff at the silo is the dirtiest moment of the launch.
+    flame_core=(1.0, 0.88, 0.62), flame_edge=(1.0, 0.48, 0.12),
+    flame_len_x=1.0,
+    smoke_fresh=(0.56, 0.53, 0.49), smoke_old=(0.46, 0.45, 0.44),
+    smoke_per_m=0.9, width_mult=1.6,
     eject_exit_v=22.0, hang_s=1.45)
 
 ICBMS = (MINUTEMAN_III, SARMAT)
@@ -136,7 +155,8 @@ class IcbmLaunch:
     door / eject / pallet / smoke_ring / stage / cutoff / impact.
     """
 
-    def __init__(self, spec: IcbmSpec, silo, target, ground_h):
+    def __init__(self, spec: IcbmSpec, silo, target, ground_h,
+                 door_open: bool = False):
         self.spec = spec
         self.variant = spec              # .shake_amp / .label for sim_step
         self.ground_h = ground_h
@@ -178,6 +198,20 @@ class IcbmLaunch:
         self._spin_e2 = None
         # Subsequent-stage delta-v capability, precomputed once.
         self._dv_after = self._dv_after_table()
+        if door_open:                    # silo door already stands open
+            self._door_done = True
+            self.t = spec.door_s
+
+    @property
+    def ignited(self) -> bool:
+        return self._ignited
+
+    @property
+    def door_frac(self) -> float:
+        """0..1 door/lid slide for the draw layer."""
+        if self._door_done and self.spec.door_s > 0.0:
+            return min(1.0, self.t / self.spec.door_s)
+        return 1.0 if self._door_done else 0.0
 
     # ------------------------------------------------------------ capability
 
@@ -418,16 +452,308 @@ class IcbmLaunch:
     def burning(self) -> bool:
         return bool(getattr(self, "_thrusting", False))
 
-    # ------------------------------------------------- fx hooks (P3 fills)
+    # ---------------------------------------------------------------- fx
+    # Visual layer only — fx.rng never touches the trajectory.  Layered
+    # emission follows cinematic_missiles.ScriptedLaunch (jet / clumped
+    # billows / veil + flame), scaled to ICBM class and with two extra
+    # regimes the S-300 never reaches: vacuum BLOOM above ~9 km and the
+    # REENTRY streak on the way back down.
+
+    BLOOM_ALT = 9000.0
 
     def emit(self, fx, dt: float) -> None:
-        pass
+        if self.done or not self._ignited:
+            return
+        spec = self.spec
+        r = fx.rng
+        h = self.axis
+        tail = self.pos
+        rel_alt = max(0.0, float(tail[1]) - float(self._silo[1]))
+        from game.cinematic_missiles import _wind
+        wind = _wind(fx, float(tail[1]))
+        flame_len = spec.length_m * spec.flame_len_x
+        if self.burning():
+            # Flame: stretched additive core + the far-visible glow dot.
+            slow = 1.0 + 0.2 * math.sin(self.t * 2.0 * math.pi * 8.0)
+            self._flame_carry = getattr(self, "_flame_carry", 0.0) \
+                + dt * 150.0 * slow
+            n_flame = int(self._flame_carry)
+            self._flame_carry -= n_flame
+            for _ in range(min(n_flame, 4)):
+                back = r.uniform(0.0, flame_len)
+                frac = back / max(flame_len, 1e-6)
+                col = tuple(np.array(spec.flame_core) * (1 - frac)
+                            + np.array(spec.flame_edge) * frac)
+                size = (1.0 - 0.5 * frac) * (0.11 * flame_len)
+                fx.fire.emit(1, tail - h * back, 0.4, -h * 130.0, 8.0,
+                             (0.08, 0.26), (size * 0.5, size * 1.6),
+                             (col, col), r, stretch=0.025)
+            fx.fire.emit(1, tail - h * flame_len * 0.3, 0.1,
+                         (0.0, 0.0, 0.0), 0.0, (0.05, 0.09),
+                         (flame_len * 1.6, flame_len * 2.0),
+                         ((0.50, 0.44, 0.33), (0.44, 0.35, 0.24)), r)
+            if rel_alt > self.BLOOM_ALT:
+                # Vacuum bloom: the plume widens into a huge faint cone.
+                self._bloom_carry = getattr(self, "_bloom_carry", 0.0) \
+                    + dt * 3.0
+                nb = int(self._bloom_carry)
+                self._bloom_carry -= nb
+                if nb:
+                    w_bloom = 14.0 + (rel_alt - self.BLOOM_ALT) * 0.004
+                    fx.fire.emit(nb, tail - h * flame_len * 0.8,
+                                 w_bloom * 0.3, -h * 60.0, 12.0,
+                                 (0.8, 1.6),
+                                 (w_bloom, w_bloom * 2.6),
+                                 ((0.14, 0.12, 0.10), (0.05, 0.045, 0.04)),
+                                 r)
+        # Reentry streak: the RV coming back down hot.
+        if (self.rv_only and self.vel[1] < -200.0
+                and 300.0 < rel_alt < 15000.0
+                and float(np.linalg.norm(self.vel)) > 450.0):
+            self._rv_carry = getattr(self, "_rv_carry", 0.0) + dt * 26.0
+            nrv = int(self._rv_carry)
+            self._rv_carry -= nrv
+            hd = self.heading()
+            for _ in range(min(nrv, 3)):
+                fx.fire.emit(1, tail - hd * r.uniform(0.0, 14.0), 0.5,
+                             -hd * 90.0, 10.0, (0.10, 0.30), (1.2, 3.4),
+                             ((1.0, 0.82, 0.55), (1.0, 0.45, 0.15)), r,
+                             stretch=0.03)
+            return
+        # --- smoke column (dies into the bloom regime) -------------------
+        tb = self.t - self.ignite_t
+        outgassing = self.burning() or (self.burnout_t is not None
+                                        and self.t - self.burnout_t < 0.6)
+        if not outgassing or rel_alt > self.BLOOM_ALT:
+            self._last_smoke_pos = None
+            return
+        if getattr(self, "_last_smoke_pos", None) is None:
+            self._last_smoke_pos = tail.copy()
+            return
+        seg = tail - self._last_smoke_pos
+        dist = float(np.linalg.norm(seg))
+        if dist <= 1e-6:
+            return
+        seg_dir = seg / dist
+        # The first ~5 km of pillar carries the scene (research: dense to
+        # high altitude, but the budget must live inside SMOKE_CAP).
+        ls = 1.0 / (1.0 + (rel_alt / 2600.0) ** 1.6)
+        taper = 1.0 / (1.0 + (rel_alt / 1800.0) ** 2)
+        wm = spec.width_mult * (1.0 + 0.9 * math.exp(-rel_alt / 400.0))
+        dia = spec.diameter_m
+        # JET off the nozzle.
+        self._jet_carry = getattr(self, "_jet_carry", 0.0) \
+            + dist * 0.5 * taper * (spec.smoke_per_m / 1.8)
+        n_jet = int(self._jet_carry)
+        self._jet_carry -= n_jet
+        for _ in range(n_jet):
+            radial = np.cross(h, r.standard_normal(3))
+            rn = float(np.linalg.norm(radial))
+            radial = radial / rn * r.uniform(10.0, 16.0) if rn > 1e-6 \
+                else 0.0
+            jl = max(ls, 0.35)
+            fx.smoke.emit(1, tail - h * r.uniform(1.0, 2.0), 0.8,
+                          wind - h * 55.0 + radial, 3.0,
+                          (6.0 * jl, 11.0 * jl),
+                          (0.5 * dia * wm, 5.5 * dia * wm),
+                          (spec.smoke_fresh, spec.smoke_old), r,
+                          alpha01=(0.80, 0.08), fade_in=0.06, stretch=0.02)
+        # BILLOW clumps along the flown path.
+        self._path_m = getattr(self, "_path_m", 0.0) + dist
+        self._next_clump = getattr(self, "_next_clump", 0.0)
+        gap_scale = 1.8 / max(spec.smoke_per_m, 0.1)
+        while self._path_m >= self._next_clump:
+            t_along = 1.0 - (self._path_m - self._next_clump) / dist
+            t_along = min(max(t_along, 0.0), 1.0)
+            center = (self._last_smoke_pos + seg * t_along
+                      + np.cross(seg_dir, r.standard_normal(3)) * 1.2)
+            eddy = r.normal(0.0, 0.7, 3).astype(np.float64)
+            for _ in range(int(r.integers(3, 6))):
+                fx.smoke.emit(
+                    1, center, 1.8,
+                    wind + eddy + np.array([0.0, 0.2, 0.0]), 0.5,
+                    (max(8.0, 42.0 * ls), max(12.0, 65.0 * ls)),
+                    (1.6 * dia * wm, 15.0 * dia * wm),
+                    (spec.smoke_fresh, spec.smoke_old), r,
+                    alpha01=(0.55, 0.03), fade_in=0.14)
+            self._next_clump += (r.uniform(3.5, 6.5) * gap_scale / taper
+                                 if taper > 1e-3 else 1e9)
+        # VEIL: the minutes-long pad-level hang.
+        self._veil_carry = getattr(self, "_veil_carry", 0.0) \
+            + dist * 0.14 * (spec.smoke_per_m / 1.8) * taper
+        n_veil = int(self._veil_carry)
+        self._veil_carry -= n_veil
+        vp = max(12.0, 320.0 * ls * ls)
+        for k in range(n_veil):
+            p = self._last_smoke_pos + seg * ((k + 0.5) / max(n_veil, 1))
+            fx.smoke.emit(1, p, 3.5,
+                          wind + np.array([0.0, 0.18, 0.0]), 0.7,
+                          (vp * 0.7, vp),
+                          (2.2 * dia * wm, 15.0 * dia * wm),
+                          (spec.smoke_old, spec.smoke_old), r,
+                          alpha01=(0.20, 0.02), fade_in=0.20)
+        self._last_smoke_pos = tail.copy()
+
+    # ------------------------------------------------------ event effects
 
     def ignition_fx(self, fx, pos) -> None:
-        pass
+        """Light-off.  Hot: fire-in-the-hole — flame + smoke erupt in a
+        DONUT around the emerging airframe at the tube mouth.  Cold:
+        hard hypergolic flash in mid-air (research 2.5)."""
+        spec = self.spec
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64)
+        d_fb = spec.diameter_m * 2.6
+        fx.fire.emit(3, p, 0.4, (0.0, 0.0, 0.0), 0.0, (0.10, 0.18),
+                     (d_fb * 1.6, d_fb * 2.2),
+                     (spec.flame_core, (1.0, 0.9, 0.6)), r)
+        fx.fire.emit(int(26), p, d_fb * 0.30, (0.0, 3.0, 0.0), 6.0,
+                     (0.22, 0.5), (d_fb * 0.5, d_fb * 1.3),
+                     ((1.0, 0.85, 0.45), spec.flame_edge), r)
+        if spec.launch_mode == "hot":
+            # The annulus eruption: flame + smoke ring blasting UP out of
+            # the gap between airframe and tube wall.
+            idx = fx.fire.emit(30, p + np.array([0.0, 0.6, 0.0]), 1.2,
+                               (0.0, 26.0, 0.0), 6.0, (0.3, 0.7),
+                               (0.8, 2.6),
+                               (spec.flame_core, spec.flame_edge), r)
+            ring_r = 1.35
+            if len(idx):
+                ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+                fx.fire.pos[idx, 0] += (np.sin(ang) * ring_r) \
+                    .astype(np.float32)
+                fx.fire.pos[idx, 2] += (np.cos(ang) * ring_r) \
+                    .astype(np.float32)
+            from game.cinematic_missiles import _wind
+            fx.smoke.emit(46, p + np.array([0.0, 1.0, 0.0]), 2.2,
+                          _wind(fx, float(p[1])) + np.array([0., 14., 0.]),
+                          5.0, (8.0, 16.0), (2.0, 20.0),
+                          (spec.smoke_fresh, spec.smoke_old), r,
+                          alpha01=(0.85, 0.06), fade_in=0.05)
+        else:
+            # Reddish NTO tint on the ignition transient.
+            fx.smoke.emit(18, p, 2.0, (0.0, 1.0, 0.0), 2.5, (2.0, 5.0),
+                          (2.0, 9.0),
+                          ((0.55, 0.36, 0.26), spec.smoke_old), r,
+                          alpha01=(0.6, 0.05), fade_in=0.05)
 
-    def pad_blast_fx(self, fx, pos) -> None:
-        pass
+    def smoke_ring_fx(self, fx, pos) -> None:
+        """THE Minuteman smoke ring (research 1.4): pressurized silo air
+        forced through the circular tube mouth rolls a vortex ring that
+        climbs hundreds of feet and lingers as a halo."""
+        spec = self.spec
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64) + np.array([0.0, 2.0, 0.0])
+        n = 46
+        idx = fx.smoke.emit(n, p, 0.5, (0.0, 10.5, 0.0), 0.8,
+                            (22.0, 38.0), (2.6, 15.0),
+                            (spec.smoke_fresh, spec.smoke_old), r,
+                            alpha01=(0.62, 0.03), fade_in=0.10)
+        if len(idx):
+            ang = np.linspace(0.0, 2.0 * np.pi, len(idx), endpoint=False)
+            ring_r = 2.6
+            fx.smoke.pos[idx, 0] += (np.sin(ang) * ring_r).astype(np.float32)
+            fx.smoke.pos[idx, 2] += (np.cos(ang) * ring_r).astype(np.float32)
+            sp = fx.rng.uniform(3.0, 4.6, len(idx))
+            fx.smoke.vel[idx, 0] += (np.sin(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 2] += (np.cos(ang) * sp).astype(np.float32)
 
-    def pad_roll_fx(self, fx, pos) -> None:
+    def eject_fx(self, fx, pos) -> None:
+        """Cold mortar exit: the huge dark PAD-gas puff venting from the
+        tube mouth as 208 t climbs out unlit (research 2.4/2.5-3)."""
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64)
+        mouth = np.array([self._silo[0], self._silo[1] + 1.5,
+                          self._silo[2]])
+        from game.cinematic_missiles import _wind
+        w = _wind(fx, float(mouth[1]))
+        fx.smoke.emit(70, mouth, 3.0, w + np.array([0.0, 9.0, 0.0]), 4.0,
+                      (16.0, 34.0), (3.0, 24.0),
+                      ((0.42, 0.38, 0.34), (0.31, 0.30, 0.29)), r,
+                      alpha01=(0.8, 0.05), fade_in=0.06)
+        idx = fx.smoke.emit(50, mouth, 2.0, (0.0, 1.8, 0.0), 0.8,
+                            (10.0, 22.0), (2.5, 16.0),
+                            ((0.48, 0.44, 0.39), (0.36, 0.35, 0.33)), r,
+                            alpha01=(0.7, 0.05), fade_in=0.05,
+                            stretch=0.03)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            sp = r.uniform(14.0, 30.0, len(idx))
+            fx.smoke.vel[idx, 0] = (np.sin(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 2] = (np.cos(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 1] = r.uniform(0.5, 2.5, len(idx)) \
+                .astype(np.float32)
+        # Thin dark wake clinging to the rising airframe.
+        fx.smoke.emit(10, p, 1.2, (0.0, 6.0, 0.0), 2.0, (4.0, 8.0),
+                      (1.5, 6.0), ((0.40, 0.37, 0.34), (0.32, 0.31, 0.30)),
+                      r, alpha01=(0.5, 0.05), fade_in=0.05)
+
+    def pallet_fx(self, fx, pos) -> None:
+        """The spent pressure pallet kicked sideways off the tail just
+        before light-off — a smoking slug (research 2.6-5)."""
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64)
+        side = np.array([math.sin(1.1), 0.0, math.cos(1.1)])
+        fx.fire.emit(5, p, 0.4, side * 16.0 - UP * 2.0, 4.0, (0.3, 0.7),
+                     (0.5, 1.4), ((1.0, 0.75, 0.4), (1.0, 0.45, 0.12)), r)
+        fx.smoke.emit(10, p, 0.6, side * 14.0 - UP * 1.0, 3.0,
+                      (2.5, 5.0), (0.8, 4.0),
+                      ((0.45, 0.42, 0.38), (0.35, 0.34, 0.32)), r,
+                      alpha01=(0.6, 0.06), fade_in=0.03)
+
+    def stage_fx(self, fx, pos) -> None:
+        """Separation: a hanging puff + brief flash; the spent stage's
+        tumble reads through the puff at long range."""
+        spec = self.spec
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64)
+        rel_alt = max(0.0, float(p[1]) - float(self._silo[1]))
+        ls = 1.0 / (1.0 + (rel_alt / 2600.0) ** 1.6)
+        fx.fire.emit(8, p, spec.diameter_m * 1.5, (0.0, 0.0, 0.0), 8.0,
+                     (0.15, 0.4),
+                     (spec.diameter_m * 1.2, spec.diameter_m * 3.0),
+                     (spec.flame_core, spec.flame_edge), r)
+        fx.smoke.emit(16, p, spec.diameter_m * 2.0, (0.0, 0.0, 0.0), 4.0,
+                      (max(6.0, 30.0 * ls), max(10.0, 55.0 * ls)),
+                      (spec.diameter_m * 2.0, spec.diameter_m * 14.0),
+                      (spec.smoke_fresh, spec.smoke_old), r,
+                      alpha01=(0.4, 0.02), fade_in=0.15)
+
+    def impact_fx(self, fx, pos) -> None:
+        """RV ground impact: dust sheet, flash, rising column, lingering
+        skirt (conventional-scale placeholder — plan open question 1)."""
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64) + np.array([0.0, 1.0, 0.0])
+        from game.cinematic_missiles import _wind
+        w = _wind(fx, float(p[1]))
+        fx.fire.emit(4, p, 1.0, (0.0, 0.0, 0.0), 0.0, (0.12, 0.22),
+                     (16.0, 26.0), ((1.0, 0.97, 0.85), (1.0, 0.8, 0.4)), r)
+        fx.fire.emit(48, p, 3.0, (0.0, 14.0, 0.0), 9.0, (0.3, 0.9),
+                     (2.0, 7.0), ((1.0, 0.85, 0.5), (1.0, 0.45, 0.1)), r)
+        idx = fx.smoke.emit(120, p, 3.0, (0.0, 1.5, 0.0), 0.8,
+                            (3.0, 7.0), (3.0, 22.0),
+                            ((0.52, 0.47, 0.40), (0.42, 0.39, 0.35)), r,
+                            alpha01=(0.8, 0.06), fade_in=0.04,
+                            stretch=0.035)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            sp = r.uniform(40.0, 70.0, len(idx))
+            fx.smoke.vel[idx, 0] = (np.sin(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 2] = (np.cos(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 1] = r.uniform(1.0, 4.0, len(idx)) \
+                .astype(np.float32)
+        fx.smoke.emit(60, p + np.array([0.0, 4.0, 0.0]), 5.0,
+                      w + np.array([0.0, 7.0, 0.0]), 3.0,
+                      (20.0, 45.0), (6.0, 42.0),
+                      ((0.50, 0.46, 0.41), (0.40, 0.39, 0.37)), r,
+                      alpha01=(0.6, 0.04), fade_in=0.10)
+        fx.smoke.emit(40, p, 9.0, w + np.array([0.0, 1.0, 0.0]), 1.2,
+                      (35.0, 60.0), (14.0, 50.0),
+                      ((0.55, 0.52, 0.48), (0.46, 0.45, 0.43)), r,
+                      alpha01=(0.32, 0.02), fade_in=0.2)
+
+    def pad_blast_fx(self, fx, pos) -> None:   # S-300 event names never
+        pass                                   # fire for ICBMs; kept for
+
+    def pad_roll_fx(self, fx, pos) -> None:    # duck-type safety.
         pass

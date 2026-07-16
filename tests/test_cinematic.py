@@ -963,3 +963,89 @@ def test_cinematic_sound_arrives_at_speed_of_sound():
     for _ in range(int(0.2 * 120)):
         st.sim_step(1 / 120.0)
     assert app.audio.played == ["boom_far"]
+
+
+# ------------------------------------------------------------ ICBM battery
+
+def _icbm_state(with_fx: bool = False):
+    """Headless state with just enough scene for the silo/target flow."""
+    st = CinematicState(_App(), "x")
+    st.walker = Walker(lambda x, z: 0.0, pos=(0.0, 0.0))
+    st.scene = SimpleNamespace(ground_h=lambda x, z: 0.0)
+    st._silo_site = np.array([0.0, 0.0, 0.0])
+    if with_fx:
+        from game.cinematic_missiles import CinematicEffects
+        st.effects = CinematicEffects(seed=1)
+    return st
+
+
+def test_icbm_fire_requires_target_then_one_bird_per_silo():
+    from game.cinematic import LAUNCHERS
+    from game.cinematic_icbm import IcbmLaunch
+    st = _icbm_state()
+    st.launcher_i = 1                       # MINUTEMAN III SILO
+    assert LAUNCHERS[1][0] == "mm3"
+    st._fire()
+    assert not st.launches                  # no target -> refused
+    st.icbm_target = np.array([5000.0, 0.0, 2000.0])
+    st._fire()
+    assert len(st.launches) == 1
+    assert isinstance(st.launches[0], IcbmLaunch)
+    st._fire()
+    assert len(st.launches) == 1            # silo empty while in flight
+
+
+def test_icbm_warp_only_while_a_bird_flies():
+    from game.cinematic import WARPS
+    st = _icbm_state()
+    st.warp_i = 2
+    assert st.effective_time_scale() == 1.0     # no ICBM in the air
+    st.launcher_i = 2                            # SARMAT
+    st.icbm_target = np.array([-4000.0, 0.0, 3000.0])
+    st._fire()
+    assert st.effective_time_scale() == WARPS[2]
+
+
+def test_icbm_launcher_rows_and_s300_salvo_untouched():
+    st = _icbm_state(with_fx=True)
+    kinds = [k for k, *_ in st._rows()]
+    assert kinds.count("launcher") == 3
+    st.launcher_i = 0                       # the S-300 pad still salvos
+    st._pad = np.array([0.0, 0.0, 0.0])
+    st._fire()
+    assert len(st.launches) == 1
+    assert isinstance(st.launches[0], ScriptedLaunch)
+
+
+def test_designate_target_marks_ground_point(tiny_scene):
+    st = CinematicState(_App(), str(tiny_scene))
+    st.scene = CinematicScene(str(tiny_scene))
+    st.walker = Walker(st.scene.ground_h, st.scene.blocked, pos=(2.0, 2.0))
+    st.freecam = True
+    st.fc_pos = np.array([1.0, 8.0, 1.0])
+    st.walker.yaw = math.radians(45.0)
+    st.walker.pitch = math.radians(-75.0)
+    st._designate_target()
+    assert st.icbm_target is not None
+    assert 1.0 < st.icbm_target[0] < 8.0
+    assert st.icbm_target[1] == pytest.approx(
+        st.scene.ground_h(float(st.icbm_target[0]),
+                          float(st.icbm_target[2])), abs=0.05)
+
+
+def test_icbm_full_flight_through_state_events_reaches_impact():
+    """The whole battery loop headless: fire, sim_step to impact, prune."""
+    st = _icbm_state(with_fx=True)
+    st.launcher_i = 1
+    st.icbm_target = np.array([4000.0, 0.0, -2500.0])
+    st._fire()
+    m = st.launches[0]
+    for _ in range(120 * 480):
+        if m.done:
+            break
+        st.sim_step(1.0 / 120.0)
+    assert m.done
+    err = math.hypot(m.pos[0] - 4000.0, m.pos[2] + 2500.0)
+    assert err < 150.0
+    st.sim_step(1.0 / 120.0)
+    assert m not in st.launches             # pruned; smoke lives on
