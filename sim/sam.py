@@ -558,14 +558,34 @@ class SamMissile:
         t_go = min(d2 / max(closing, TGO_CLOSING_FLOOR), TGO_MAX)
         return tx + tvx * t_go, ty + tvy * t_go, tz + tvz * t_go
 
-    @staticmethod
-    def _command_direction(px, py, pz, aim, command):
-        """3-D unit path direction from planner gamma plus aim azimuth."""
+    def _command_direction(self, px, py, pz, aim, command):
+        """3-D unit path direction from planner gamma plus aim azimuth.
+
+        AIR-INTERCEPT FLOOR (2026-07-17, pre-existing regression found by
+        the audit): inside the round's loft-fade range the corridor
+        planner's terrain-cruise gamma has no room to matter, and against
+        a HIGH close target it aimed the whole boost tens of degrees UNDER
+        the intercept line — the round entered terminal ~50 deg off the
+        LOS, PN could not remove the error in the remaining kilometres and
+        it zoomed ballistically past (measured: every <=22 km drone shot
+        missed by 4-6 km; the phase-4 kill curve was dead).  The floor
+        clamps the commanded path to AT LEAST the direct line to the led
+        aim point when close — long lofted shots (rg beyond the fade
+        range) and low targets (direct line below the planner's arc) are
+        untouched."""
         ax, ay, az = aim
         gx, gz = ax - px, az - pz
         rg = math.hypot(gx, gz)
+        direct = math.atan2(ay - py, max(rg, 1.0))
         gamma = (command.target_path_gamma_rad if command is not None else
-                 math.atan2(ay - py, max(rg, 1.0)))
+                 direct)
+        # CLIMB geometries only (direct > 0): a round ABOVE its aim keeps
+        # the planner's steeper letdown — clamping a descent to the
+        # shallower direct line broke the 48N6's dive onto high targets
+        # (test_s300_rounds_distinct caught it).
+        if (rg < self.weapon.loft_fade_range and direct > 0.0
+                and direct > gamma):
+            gamma = direct
         if rg < 1e-9:
             return 0.0, (1.0 if gamma >= 0.0 else -1.0), 0.0
         cg = math.cos(gamma)
