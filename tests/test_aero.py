@@ -187,17 +187,23 @@ def test_sam_coast_turn_bleeds_speed():
 
     def coast(aligned, seconds=3.0):
         """Burned-out S-300 at 10 km / 1200 m/s vs a target 150 km north.
-        ``aligned=True`` flies ALONG the loft aim direction (a true straight
-        coast — the loft shaping commands a climb, so a horizontal 'control'
-        would secretly be a 23 g pull); ``aligned=False`` flies
-        PERPENDICULAR to it, forcing the hard midcourse turn."""
+        ``aligned=True`` flies ALONG the live flight computer's commanded
+        path direction (a true straight coast — the planner commands a
+        climb, so a horizontal 'control' would secretly be a hard pull);
+        ``aligned=False`` flies PERPENDICULAR to it, forcing the hard
+        midcourse turn."""
         sam = SamMissile(S300, np.array([0.0, 10_000.0, 0.0]),
                          _Target((0.0, 10_000.0, 150_000.0)))
         sam.phase = SPH_MIDCOURSE
         sam.propellant = 0.0
         sam.vel = np.array([0.0, 0.0, 1200.0])
-        dx, dy, dz = sam._aim_direction(0.0, 10_000.0, 0.0, 0.0, 0.0, 1200.0)
         if aligned:
+            # The production-commanded 3D path direction: one flight-computer
+            # step (the same call update() makes), then _command_direction.
+            cmd = sam._flight_computer_step(
+                DT, w, 0.0, 10_000.0, 0.0, 0.0, 0.0, 1200.0)
+            dx, dy, dz = sam._command_direction(
+                0.0, 10_000.0, 0.0, sam._fc_aim, cmd)
             sam.vel = np.array([dx, dy, dz]) * 1200.0
         else:
             sam.vel = np.array([1200.0, 0.0, 0.0])   # 90 deg off the aim

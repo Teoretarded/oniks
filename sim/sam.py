@@ -27,8 +27,11 @@ import math
 
 import numpy as np
 
-from sim.aero import (ALPHA_TAX, AP_TAU_SAM, CL_MAX_SAM, QS_FLOOR, lag_gain,
+from sim.aero import (ALPHA_TAX, AP_TAU_SAM, CL_MAX_SAM, QS_FLOOR,
+                      autopilot_step_scalar, project_perpendicular_scalar,
                       q_scalar)
+from sim.flight_computer import (AirframeEnvelope, FlightState,
+                                 MissionSnapshot, OnlineFlightComputer)
 from sim.physics import DENSITY_SCALE_HEIGHT, RHO0
 from sim.guidance import pn_accel
 from sim.missile import _surface_at, _swept_surface_hit
@@ -108,19 +111,6 @@ TGO_MAX = 40.0                 # s
 # The baseline default profile (48N6 / SM-2 / SM-6 / Pantsir) is
 # loft_gain=0.55, loft_bias_max=14_000, loft_fade_range=25_000.
 
-# Altitude capture: the commanded flight path closes the gap to the loft
-# profile over this ground run, clamped to sane climb/dive angles (the steep
-# climb cap matters: leaving the dense air fast is what saves the energy).
-LOFT_CAPTURE_RUN = 15_000.0    # m
-CLIMB_MAX_TAN = math.tan(math.radians(55.0))
-# Dive clamp 50 deg (energy re-pin 2026-07-06; was 25): a descent is
-# gravity-POWERED — cheap under the energy model — and the 25-degree glide
-# left a high-loft round physically unable to shed its apogee onto a
-# 20 km target (measured: the 40N6 arrived 13 km HIGH over its crosser
-# with the letdown clamped shallow, then died slow). Climbs stay capped
-# at 55 deg — climbing is what costs energy.
-DIVE_MAX_TAN = math.tan(math.radians(50.0))
-
 # Midcourse steering: lateral accel = MID_GAIN * angle_error * speed,
 # G-limited together with the gravity compensation.
 MID_GAIN = 2.2                 # 1/s of angle error
@@ -144,22 +134,6 @@ MID_MAX_A_G = 4.0              # g of midcourse lateral correction
 # the cost is accepted and its motor re-based for it).
 COAST_CD0 = 0.30               # the supersonic-plateau CD0 the optimum uses
 COAST_OVER_OPT_FRAC = 0.25     # allowance = frac * (loft_bias_max - 14 km)
-
-# Follow-the-fall margin: the plunge is followed only while the round is
-# still this far ABOVE its (biased) aim altitude — below it, the normal
-# clamped glide-slope steering resumes so an air target's altitude plane
-# is levelled onto, never plunged through.
-FALL_FOLLOW_MARGIN_M = 3_000.0
-
-# Midcourse aim-direction filter (energy model 2026-07-06): a stale
-# uplinked track refreshes in JUMPS (the 1 Hz ELINT cadence), and chasing
-# each jump with a 4 g correction pulse was free before induced drag —
-# measured: a 240 km 40N6 coast bled at -9 m/s^2 (3.6x its honest 1-g trim
-# rate) purely on track jitter and died 64 km short. Real command uplinks
-# are filtered; the aim direction is smoothed on this time constant
-# (legitimate intercept geometry changes over tens of seconds pass
-# untouched). Terminal PN is NOT filtered.
-MID_AIM_TAU_S = 2.0
 
 # Terminal PN navigation constant 5 (energy re-tune 2026-07-06; module
 # default is 4): a DECELERATING interceptor carries a standing PN bias
@@ -344,6 +318,95 @@ class SamMissile:
         self._qs_opt_per_lift = math.sqrt(self._k_ind / COAST_CD0)
         self._coast_over_opt = max(
             0.0, (sam_def.loft_bias_max - 14_000.0) * COAST_OVER_OPT_FRAC)
+        # Receding-horizon vertical planner.  SamDef intentionally is not a
+        # WeaponDef, so construct the small numeric envelope explicitly.  The
+        # planner predicts the solid boost from the remaining propellant and
+        # the unpowered coast once it is gone; it never receives ``target`` or
+        # any other world/entity reference.
+        dry_mass = max(1.0, sam_def.launch_mass - sam_def.propellant_mass)
+        ideal_delta_v = (sam_def.isp * GRAVITY
+                         * math.log(sam_def.launch_mass / dry_mass))
+        preferred_mach = min(max(ideal_delta_v / 300.0, 1.0), 6.0)
+        low_mach = min(preferred_mach, max(
+            sam_def.self_destruct_speed / 300.0, 0.5))
+        is_ballistic = str(sam_def.weapon_id) == "asbm"
+        is_high_loft = str(sam_def.weapon_id) == "40n6"
+        preferred_alt = (sam_def.loft_bias_max if is_ballistic else
+                         sam_def.max_intercept_alt
+                         + 0.35 * sam_def.loft_bias_max)
+        envelope = AirframeEnvelope(
+            ref_area_m2=sam_def.ref_area,
+            cl_max=self._cl_max,
+            max_g=sam_def.max_g,
+            k_induced=self._k_ind,
+            dry_mass_kg=dry_mass,
+            fuel_capacity_kg=sam_def.propellant_mass,
+            max_thrust_n=sam_def.motor_thrust,
+            isp_s=sam_def.isp,
+            thrust_tau_s=0.0,
+            preferred_mach=preferred_mach,
+            low_mach=low_mach,
+            preferred_alt_m=preferred_alt,
+            preferred_alt_is_agl=False,
+            deck_agl_m=50.0,
+            # A receding-horizon SAM starts its letdown early; a 50-degree
+            # instantaneous corridor made a ballistic coast wait too long and
+            # then demand an unrecoverable dive.  The MaRV subclass retains
+            # its genuinely ballistic envelope.
+            max_climb_gamma_rad=math.radians(
+                70.0 if is_ballistic else 55.0 if is_high_loft else 35.0),
+            max_descent_gamma_rad=math.radians(
+                70.0 if is_ballistic else 25.0),
+            terminal_speed_min_mps=sam_def.self_destruct_speed,
+            fuel_reserve_kg=0.0,
+            # Interceptors shape a broad loft over tens of kilometres; the
+            # cruise-missile computer's 10 km preview demanded a 35-degree
+            # zoom and carried the unpowered 48N6 above 40 km.  Scale preview
+            # with the selected energy altitude so the online solution keeps
+            # horizontal velocity while still replanning every half-second.
+            control_lookahead_m=(
+                10_000.0 if is_ballistic else
+                9_500.0 if is_high_loft else
+                15_000.0 if str(sam_def.weapon_id) == "s300" else
+                max(30_000.0, 3.0 * preferred_alt)),
+            altitude_preview_m=10_000.0,
+            latch_infeasible_midcourse=is_high_loft,
+            # Long-range 40N6 energy-corridor search (25 tuning + 25 held-out
+            # targets): engage the blend earlier and settle toward a lower,
+            # drag-efficient 35% preferred-altitude fraction at extreme range.
+            # Defaults remain unchanged for every other weapon family.
+            energy_fallback_floor_fraction=(0.35 if is_high_loft else 0.5),
+            # Keep the established visibly-high medium-range 40N6 arc; the
+            # corridor begins at 120 km at its full preferred-altitude end,
+            # so the identity arc is unchanged while 120-140 km shots gain
+            # earlier online energy management.  This was the only expanded
+            # shortlist change to improve the third fresh 49-case matrix.
+            energy_fallback_min_range_m=(
+                120_000.0 if is_high_loft else 100_000.0),
+            energy_fallback_near_scale=(2.0 if is_high_loft else 2.5),
+            energy_fallback_far_scale=(4.0 if is_high_loft else 5.0),
+            # Medium shots retain the visibly high 40N6 arc.  Above 120 km,
+            # blend continuously toward the searched 12 km control horizon;
+            # it becomes fully active at 200 km.  This changes predictor
+            # horizon, never prescribes a launch path.
+            long_range_control_lookahead_m=(
+                12_000.0 if is_high_loft else None),
+            long_range_control_start_m=120_000.0,
+            long_range_control_full_m=200_000.0,
+            # SAM replans run at 2 Hz rather than the cruise families' 4 Hz.
+            # One-second broad-mode dwell therefore filters a single noisy
+            # candidate flip while still allowing two fresh solutions each
+            # second and immediate terminal/feasibility transitions.
+            corridor_min_hold_s=1.0,
+        )
+        self._fc = OnlineFlightComputer(envelope, replan_interval_s=0.5)
+        self._fc_command = None
+        # The target picture is sampled on the same cadence as the bounded
+        # replan.  Holding this immutable numeric aim between replans prevents
+        # a moving track from invalidating the flight-computer cache at 120 Hz.
+        self._fc_aim = None
+        self._fc_preferred_alt = None
+        self._fc_next_sample_t = 0.0
         self._turn_rate = 0.0    # rad/s live path rotation (tilt slew state)
         # Body attitude: dead vertical in the tube; the renderer orients the
         # airframe by this, NOT by the velocity vector.
@@ -383,6 +446,18 @@ class SamMissile:
             return False
         self.target = new_target
         self.contact_estimate_fn = contact_estimate_fn
+        ok_fn = self.illuminator_ok_fn
+        target_ref = getattr(ok_fn, "_target_ref", None)
+        estimate_ref = getattr(ok_fn, "_estimate_ref", None)
+        if target_ref is not None:
+            target_ref[0] = new_target
+        if estimate_ref is not None:
+            estimate_ref[0] = contact_estimate_fn
+        self._fc_aim = None
+        self._fc_preferred_alt = None
+        self._fc_command = None
+        self._fc_next_sample_t = self.t
+        self._fc.invalidate("retarget")
         return True
 
     # --- guidance helpers -------------------------------------------------------
@@ -392,7 +467,12 @@ class SamMissile:
         (when supplied), the true aircraft state otherwise. The multipath
         error rides on the position either way — the noise lives in the
         tracking/illumination chain, not in any one data source."""
-        if self.phase < SPH_TERMINAL and self.contact_estimate_fn is not None:
+        # Command-guided rounds never grow an onboard truth seeker in the
+        # terminal phase: their tighter PN loop still flies the permitted FCR
+        # estimate.  SARH/ARH rounds change to their terminal measurement.
+        if (self.contact_estimate_fn is not None
+                and (self.phase < SPH_TERMINAL
+                     or self.weapon.guidance == "command")):
             tpos, tvel = self.contact_estimate_fn()
             return (float(tpos[0]) + self._mp_x, float(tpos[1]) + self._mp_y,
                     float(tpos[2]) + self._mp_z,
@@ -413,8 +493,15 @@ class SamMissile:
         # Angle-error range scaling (see MULTIPATH_REF_RANGE_M): the sensor
         # is the illuminating ship when one is wired (SARH), else the launch
         # site (the fire-control radar rides the launcher).
-        ill = self.illuminator_pos_fn() if self.illuminator_pos_fn else None
-        fc = ill if ill is not None else self._fc_pos
+        guidance = self.weapon.guidance
+        if self.phase >= SPH_TERMINAL and guidance == "arh":
+            # An active round measures from its own seeker after handover,
+            # regardless of any launcher callback accidentally supplied.
+            fc = self.pos
+        else:
+            ill = (self.illuminator_pos_fn()
+                   if self.illuminator_pos_fn is not None else None)
+            fc = ill if ill is not None else self._fc_pos
         tp0 = self.target.pos
         srng = math.sqrt((float(tp0[0]) - float(fc[0])) ** 2
                          + (float(tp0[1]) - float(fc[1])) ** 2
@@ -433,120 +520,170 @@ class SamMissile:
         sinking ship stops painting the target); rounds without one check
         from the missile's own seeker. Terrain comes through the world's
         heightfield so stub worlds exercise the same code path."""
-        if self.illuminator_ok_fn is not None \
-                and not self.illuminator_ok_fn():
-            return True     # FCR alive but slewed off-sector: no paint
-        if self.illuminator_pos_fn is not None:
-            src = self.illuminator_pos_fn()
-            if src is None:
-                return True
-        else:
+        guidance = self.weapon.guidance
+        if guidance == "arh":
+            # Own seeker: launcher death, sector changes, and a mistakenly
+            # wired illuminator cannot break an established active lock.
             src = self.pos
+        else:
+            # SARH and command guidance remain fire-control dependent.  A
+            # missing callback means a legacy fixed launch-site radar, not an
+            # onboard seeker; an explicit dead/off-sector callback breaks it.
+            if (self.illuminator_ok_fn is not None
+                    and not self.illuminator_ok_fn()):
+                return True
+            if self.illuminator_pos_fn is not None:
+                src = self.illuminator_pos_fn()
+                if src is None:
+                    return True
+            else:
+                src = self._fc_pos
         return terrain_blocks(src, self.target.pos,
                               height_fn=world.terrain_height_at)
 
-    def _aim_direction(self, px, py, pz, vx, vy, vz):
-        """Unit direction toward the loft-shaped predicted intercept point:
-        t_go = |r| / max(closing, 50) capped, aim = tgt + tgt_vel * t_go with
-        one refinement iteration, altitude biased up by the loft profile and
-        captured along a clamped climb/dive slope."""
+    def _predicted_intercept_point(self, px, py, pz, vx, vy, vz):
+        """Led numeric aim built only from the permitted target estimate."""
         tx, ty, tz, tvx, tvy, tvz = self._target_state()
-        rx = tx - px
-        ry = ty - py
-        rz = tz - pz
+        rx, ry, rz = tx - px, ty - py, tz - pz
         d = math.sqrt(rx * rx + ry * ry + rz * rz)
         if d < 1.0:
-            return 0.0, 1.0, 0.0
-        closing = -((tvx - vx) * rx + (tvy - vy) * ry + (tvz - vz) * rz) / d
+            return tx, ty, tz
+        closing = -((tvx - vx) * rx + (tvy - vy) * ry
+                    + (tvz - vz) * rz) / d
         t_go = min(d / max(closing, TGO_CLOSING_FLOOR), TGO_MAX)
-        ax = tx + tvx * t_go
-        ay = ty + tvy * t_go
-        az = tz + tvz * t_go
-        # one refinement iteration on the led point
-        rx = ax - px
-        ry = ay - py
-        rz = az - pz
-        d2 = math.sqrt(rx * rx + ry * ry + rz * rz)
+        ax, ay, az = tx + tvx * t_go, ty + tvy * t_go, tz + tvz * t_go
+        # One deterministic fixed-point refinement, still entirely on the
+        # supplied estimate rather than entity truth.
+        d2 = math.sqrt((ax - px) ** 2 + (ay - py) ** 2 + (az - pz) ** 2)
         t_go = min(d2 / max(closing, TGO_CLOSING_FLOOR), TGO_MAX)
-        ax = tx + tvx * t_go
-        ay = ty + tvy * t_go
-        az = tz + tvz * t_go
-        # loft profile + slope capture
-        gx = ax - px
-        gz = az - pz
+        return tx + tvx * t_go, ty + tvy * t_go, tz + tvz * t_go
+
+    @staticmethod
+    def _command_direction(px, py, pz, aim, command):
+        """3-D unit path direction from planner gamma plus aim azimuth."""
+        ax, ay, az = aim
+        gx, gz = ax - px, az - pz
         rg = math.hypot(gx, gz)
-        w = self.weapon                # per-round loft (48N6 medium / 40N6 high)
-        bias = min(w.loft_gain * max(rg - w.loft_fade_range, 0.0),
-                   w.loft_bias_max)
-        # Energy cruise: never command a coast above the drag-optimal
-        # altitude (+ the per-round allowance) for the CURRENT speed — the
-        # optimum descends as the round slows (see COAST_CD0 note).
-        if bias > 0.0:
-            spd2 = vx * vx + vy * vy + vz * vz
-            if spd2 > 1.0:
+        gamma = (command.target_path_gamma_rad if command is not None else
+                 math.atan2(ay - py, max(rg, 1.0)))
+        if rg < 1e-9:
+            return 0.0, (1.0 if gamma >= 0.0 else -1.0), 0.0
+        cg = math.cos(gamma)
+        return gx / rg * cg, math.sin(gamma), gz / rg * cg
+
+    def _flight_computer_step(self, dt, world, px, py, pz, vx, vy, vz):
+        """Update the bounded online plan from numeric state/track data."""
+        if (self._fc_aim is None
+                or self.t + 1e-12 >= self._fc_next_sample_t):
+            self._fc_aim = self._predicted_intercept_point(
+                px, py, pz, vx, vy, vz)
+            self._fc_next_sample_t = self.t + self._fc.replan_interval_s
+            ax, ay, az = self._fc_aim
+            # Live energy-altitude basket: retain the per-round loft ceiling,
+            # capped at the minimum-drag dynamic-pressure altitude for the
+            # current mass/speed.  Sample it on the same cadence as the track
+            # so the immutable mission signature remains cached between plans.
+            rg = math.hypot(ax - px, az - pz)
+            bias = min(
+                self.weapon.loft_gain * max(
+                    rg - self.weapon.loft_fade_range, 0.0),
+                self.weapon.loft_bias_max)
+            speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+            if bias > 0.0 and speed > 1.0:
                 rho_opt = (2.0 * self._qs_opt_per_lift * self.mass * GRAVITY
-                           / (w.ref_area * spd2))
+                           / (self.weapon.ref_area * speed * speed))
                 if rho_opt < RHO0:
                     h_opt = (-DENSITY_SCALE_HEIGHT
                              * math.log(rho_opt / RHO0)
                              + self._coast_over_opt)
-                    bias = min(bias, max(0.0, h_opt - ty))
-        # Reentry rule (energy model 2026-07-05): a DESCENDING round never
-        # chases the loft bias back UP — the bias shapes the ascent/coast;
-        # fighting gravity on the way down only bleeds the dive (measured:
-        # the ASBM reentry arrived Mach 1.05 instead of ~4 because it spent
-        # the whole fall pulling toward an aim point 90 km overhead). The
-        # cap only bites when the biased aim sits ABOVE a falling missile —
-        # a glide along the profile keeps its aim below and is untouched.
-        if vy < 0.0 and bias > 0.0:
-            bias = min(bias, max(0.0, py - ty))
-        slope = (ay + bias - py) / LOFT_CAPTURE_RUN
-        slope = min(max(slope, -DIVE_MAX_TAN), CLIMB_MAX_TAN)
-        # Follow-the-fall (energy model 2026-07-05): a round plunging
-        # STEEPER than the DIVE_MAX_TAN clamp is in a ballistic reentry the
-        # 25-degree glide command could never represent — arresting it
-        # midcourse is pure energy waste (measured: the ASBM leveled off at
-        # ~8-12 km fighting its own fall, crawled subsonic and
-        # self-destructed 39 km short; reentry Mach 1.05 instead of ~4).
-        # Follow the plunge instead; the terminal PN owns the endgame.
-        # ONLY while still well ABOVE the biased aim: an AIR target's aim
-        # plane must not be plunged through (measured 2026-07-06: the 40N6
-        # rode its fall 8 km below a 20 km crosser and died low) — inside
-        # the margin the normal clamped slope resumes and the round levels
-        # onto the aim. Glides shallower than the clamp steer as before.
-        if vy < 0.0 and py > ay + bias + FALL_FOLLOW_MARGIN_M:
-            hsp = math.hypot(vx, vz)
-            if hsp > 1e-9:
-                cur = vy / hsp
-                if cur < -DIVE_MAX_TAN and cur < slope:
-                    slope = cur
-        if rg < 1e-6:
-            return 0.0, (1.0 if slope >= 0.0 else -1.0), 0.0
-        n = math.sqrt(1.0 + slope * slope) * rg
-        return gx / n, slope * rg / n, gz / n
+                    bias = min(bias, max(0.0, h_opt - ay))
+            if vy < 0.0:
+                bias = min(bias, max(0.0, py - ay))
+            self._fc_preferred_alt = ay + bias
+        ax, ay, az = self._fc_aim
+        # Plan to an energy-preserving handover basket above the estimate;
+        # terminal PN owns the remaining vertical closure.  Supplying that
+        # basket as the numeric mission endpoint lets every corridor be judged
+        # against the same achievable terminal geometry.
+        handover_buffer = min(
+            10_000.0,
+            0.40 * self.weapon.terminal_range,
+            (0.35 * self.weapon.loft_bias_max
+             + 0.25 * max(self.weapon.loft_bias_max - 14_000.0, 0.0)))
+        handover_y = ay + max(500.0, handover_buffer)
+        preferred_alt = (ay if self._fc_preferred_alt is None else
+                         self._fc_preferred_alt)
+        state = FlightState(
+            pos=(px, py, pz), vel=(vx, vy, vz),
+            mass_kg=float(self.mass), fuel_kg=float(self.propellant),
+            thrust_actual_n=(self.weapon.motor_thrust
+                             if self.phase == SPH_BOOST else 0.0),
+            time_s=float(self.t))
+        mission = MissionSnapshot(
+            path_xz=((ax, az),),
+            target_y_m=handover_y,
+            preferred_altitude_m=preferred_alt,
+            terminal_handover_alt_m=handover_y,
+            allow_high=True,
+            # SamMissile retains its seeker range/cone handover.  The flight
+            # computer owns the letdown decision, not terminal phase commit.
+            terminal_armed=False,
+            terminal_latched=False,
+            terminal_commit_max_m=float(self.weapon.terminal_range))
+        self._fc_command = self._fc.update(
+            dt, state, mission,
+            lambda x, z: _surface_at(world, x, z))
+        return self._fc_command
 
-    def _steer_accel(self, hx, hy, hz, speed, dx, dy, dz):
-        """Midcourse coast steering: lateral accel rotating the velocity
-        toward unit (dx,dy,dz), plus gravity compensation, G-limited."""
-        dot = dx * hx + dy * hy + dz * hz
-        ex = dx - dot * hx
-        ey = dy - dot * hy
-        ez = dz - dot * hz
-        en = math.sqrt(ex * ex + ey * ey + ez * ez)
-        gmax = self.weapon.max_g * GRAVITY
-        if en > 1e-9:
-            err = math.atan2(en, dot)
-            a = min(MID_GAIN * err * speed, MID_MAX_A_G * GRAVITY, gmax)
-            s = a / en
-            gx, gy, gz = ex * s, ey * s + GRAVITY, ez * s
+    def _online_midcourse_guidance(self, speed, vx, vy, vz, command):
+        """Inner loop following online vertical energy and horizontal lead."""
+        gx = gy = gz = 0.0
+        hspeed = math.hypot(vx, vz)
+        if self._fc_aim is not None and hspeed > 1e-9:
+            rx = self._fc_aim[0] - float(self.pos[0])
+            rz = self._fc_aim[2] - float(self.pos[2])
+            rr = math.hypot(rx, rz)
+            if rr > 1e-9:
+                dx, dz = rx / rr, rz / rr
+                hx, hz = vx / hspeed, vz / hspeed
+                dot = min(max(dx * hx + dz * hz, -1.0), 1.0)
+                ex, ez = dx - dot * hx, dz - dot * hz
+                en = math.hypot(ex, ez)
+                if en > 1e-9:
+                    a = min(MID_GAIN * math.atan2(en, dot) * speed,
+                            MID_MAX_A_G * GRAVITY,
+                            self.weapon.max_g * GRAVITY)
+                    gx += ex / en * a
+                    gz += ez / en * a
+        if speed > 1e-9 and hspeed > 1e-9:
+            gamma = math.atan2(vy, hspeed)
+            path_a = command.path_normal_accel_mps2
+            # A fuel-empty, prediction-infeasible long shot preserves energy
+            # by following its ballistic vertical arc instead of paying
+            # induced drag to hold a loft altitude.  Re-enter closed-loop
+            # vertical guidance before the per-round loft-fade/terminal zone.
+            energy_coast = (
+                self.propellant <= 0.0
+                and self.t > self.weapon.motor_time
+                # The 40N6's high-loft boost intentionally creates vertical
+                # energy.  Releasing all normal lift after burnout turns its
+                # guided corridor into an 80+ km ballistic lob; keep that
+                # round on the online energy path through coast instead.
+                and str(self.weapon.weapon_id) != "40n6"
+                and not command.prediction.feasible
+                and command.prediction.route_range_m > max(
+                    2.0 * self.weapon.terminal_range,
+                    self.weapon.loft_fade_range))
+            lift_n = (0.0 if energy_coast else
+                      path_a + GRAVITY * math.cos(gamma))
+            nx = -vx * vy / (speed * hspeed)
+            ny = hspeed / speed
+            nz = -vz * vy / (speed * hspeed)
+            gx += nx * lift_n
+            gy += ny * lift_n
+            gz += nz * lift_n
         else:
-            gx, gy, gz = 0.0, GRAVITY, 0.0
-        n2 = gx * gx + gy * gy + gz * gz
-        if n2 > gmax * gmax:
-            s = gmax / math.sqrt(n2)
-            gx *= s
-            gy *= s
-            gz *= s
+            gy = GRAVITY
         return gx, gy, gz
 
     def _apply_energy_model(self, gx, gy, gz, speed, alt, dt):
@@ -556,21 +693,18 @@ class SamMissile:
         Returns (gx, gy, gz, drag). BOOST is thrust-vectored and EJECT is
         ballistic — neither comes through here (locked launch beats)."""
         w = self.weapon
+        vx, vy, vz = self.vel.tolist()
+        gx, gy, gz = project_perpendicular_scalar(
+            gx, gy, gz, vx, vy, vz)
         q = q_scalar(speed, alt)
         qs = q * w.ref_area
-        a_avail = qs * self._cl_max / self.mass
-        n2 = gx * gx + gy * gy + gz * gz
-        if n2 > a_avail * a_avail:
-            s = a_avail / math.sqrt(n2)
-            gx *= s
-            gy *= s
-            gz *= s
-        k = lag_gain(dt, min(self._ap_tau, TERMINAL_AP_TAU)
-                     if self.phase == SPH_TERMINAL else self._ap_tau)
-        self._ap_x += (gx - self._ap_x) * k
-        self._ap_y += (gy - self._ap_y) * k
-        self._ap_z += (gz - self._ap_z) * k
-        gx, gy, gz = self._ap_x, self._ap_y, self._ap_z
+        tau = (min(self._ap_tau, TERMINAL_AP_TAU)
+               if self.phase == SPH_TERMINAL else self._ap_tau)
+        gx, gy, gz = autopilot_step_scalar(
+            gx, gy, gz, self._ap_x, self._ap_y, self._ap_z,
+            dt=dt, tau=tau, q=q, ref_area=w.ref_area, mass=self.mass,
+            cl_max=self._cl_max, structural_limit=w.max_g * GRAVITY)
+        self._ap_x, self._ap_y, self._ap_z = gx, gy, gz
         lift = self.mass * math.sqrt(gx * gx + gy * gy + gz * gz)
         drag = (qs * cd_from_mach_scalar(mach_scalar(speed, alt))
                 + self._k_ind * lift * lift / max(qs, QS_FLOOR))
@@ -652,7 +786,6 @@ class SamMissile:
             self.vel[1] = w.eject_speed        # catapult: straight up
         np.copyto(self.prev_pos, self.pos)
         self.t += dt
-        self._dt_last = dt                     # aim-filter step size
         if self.rng is not None:               # multipath tracking error
             self._update_multipath(dt)
 
@@ -671,10 +804,13 @@ class SamMissile:
         if self.phase == SPH_BOOST and self.propellant <= 0.0:
             self.phase = SPH_MIDCOURSE
         if self.phase == SPH_MIDCOURSE:
-            tp = self.target.pos               # seeker truth at handover
-            rx = float(tp[0]) - px0
-            ry = float(tp[1]) - alt
-            rz = float(tp[2]) - pz0
+            # Range/cone acquisition is judged on the permitted midcourse
+            # picture.  Only after commitment may ARH/SARH terminal homing
+            # consume their own terminal measurement.
+            tx, ty, tz, _, _, _ = self._target_state()
+            rx = tx - px0
+            ry = ty - alt
+            rz = tz - pz0
             d2 = rx * rx + ry * ry + rz * rz
             in_range = d2 < w.terminal_range * w.terminal_range
             # R-P1 seeker cone (scanned model, homing rounds only): the
@@ -698,10 +834,10 @@ class SamMissile:
                 # BEFORE the phase flips (an immediately masked lock coasts
                 # on the honest handover picture), then force an LOS check
                 # on the first terminal step.
-                tx, ty, tz, _, _, _ = self._target_state()
                 self._lock_pos = np.array([tx, ty, tz])
                 self._los_next_t = self.t
                 self.phase = SPH_TERMINAL
+                self._fc.force_terminal()
 
         # --- forces ---
         gx = gy = gz = 0.0                     # guidance accel components
@@ -709,7 +845,10 @@ class SamMissile:
         drag = 0.0
         if self.phase == SPH_BOOST:
             if self.t >= w.eject_time + BOOST_VERTICAL_TIME and speed > 1e-9:
-                dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
+                command = self._flight_computer_step(
+                    dt, world, px0, alt, pz0, vx, vy, vz)
+                dx, dy, dz = self._command_direction(
+                    px0, alt, pz0, self._fc_aim, command)
                 c = min(max(hx * dx + hy * dy + hz * dz, -1.0), 1.0)
                 # Physical path-rate ceiling: sideforce from thrust at the
                 # researched max boost AoA, divided by current speed.
@@ -737,8 +876,10 @@ class SamMissile:
                 speed, alt, cd_from_mach_scalar(mach_scalar(speed, alt)),
                 w.ref_area)
         elif self.phase == SPH_MIDCOURSE:
-            dx, dy, dz = self._aim_direction(px0, alt, pz0, vx, vy, vz)
-            gx, gy, gz = self._steer_accel(hx, hy, hz, speed, dx, dy, dz)
+            command = self._flight_computer_step(
+                dt, world, px0, alt, pz0, vx, vy, vz)
+            gx, gy, gz = self._online_midcourse_guidance(
+                speed, vx, vy, vz, command)
             gx, gy, gz, drag = self._apply_energy_model(
                 gx, gy, gz, speed, alt, dt)
         elif self.phase == SPH_TERMINAL:
@@ -749,11 +890,9 @@ class SamMissile:
                 self._los_next_t = self.t + LOS_CHECK_PERIOD_S
                 self._lock_ok = not self._los_masked(world)
             if self._lock_ok:
-                tp = self.target.pos
-                tpos = np.array([float(tp[0]) + self._mp_x,
-                                 float(tp[1]) + self._mp_y,
-                                 float(tp[2]) + self._mp_z])
-                tvel = np.asarray(self.target.velocity(), dtype=np.float64)
+                tx, ty, tz, tvx, tvy, tvz = self._target_state()
+                tpos = np.array([tx, ty, tz])
+                tvel = np.array([tvx, tvy, tvz])
                 self._lock_pos = tpos          # last estimate: frozen on snap
             else:
                 tpos = self._lock_pos          # coast on the frozen estimate
@@ -790,6 +929,20 @@ class SamMissile:
 
         # --- proximity fuse (truth) ---
         if self._fuse_check():
+            return
+
+        # A spent, unreachable round descending toward the surface late in
+        # its time budget bursts safely in the air.  This is the flight
+        # computer's terminal-energy fail-safe, and avoids carrying a live
+        # area-defense warhead into the terrain after a rejected long shot.
+        if (self.phase == SPH_MIDCOURSE
+                and self.propellant <= 0.0
+                and self.t > 0.75 * w.self_destruct_t
+                and py <= 1_500.0 and vy < 0.0
+                and self._fc_command is not None
+                and not self._fc_command.prediction.feasible):
+            self.self_destructed = True
+            self._die(self.pos.copy())
             return
 
         # --- surface impact (terrain query skipped above the world ceiling;

@@ -47,6 +47,7 @@ class WeaponDef:
     #                                 geometrically too late to duck onto the
     #                                 deck inside its g-limit; measured 151 m
     #                                 overfly)
+    lo_final_pn_range_m: float = 0.0  # optional lo-lo-only hull-dive window
     # --- energy model (sim/aero.py; 0.0 = UNSET -> the class defaults;
     # research: docs/research/missile_energy_autopilot_2026-07-05.md) ------
     k_induced: float = 0.0    # induced-drag factor K (winged airframes ~0.035)
@@ -64,6 +65,11 @@ class WeaponDef:
     # > S rain loss).  Anti-ship seekers are Ku-class.  UNUSED until W-P10
     # lands — declared now so every weapon def carries honest metadata.
     seeker_band: str = "Ku"
+    # Terminal proportional-navigation constant.  Four is the established
+    # cruise-missile default; unusually fast/slow families may tune their own
+    # deceleration/actuator bias without changing every other round.
+    terminal_pn_gain: float = 4.0
+    terminal_weave_g: float = 14.0
 
 
 ONIKS = WeaponDef(
@@ -71,11 +77,11 @@ ONIKS = WeaponDef(
     length=8.9, diameter=0.67, launch_mass=3000.0, fuel_mass=780.0,
     eject_speed=30.0, eject_time=0.35,
     booster_thrust=300_000.0, booster_time=9.5,
-    # isp 1250 s: kerosene-ramjet band (~1000-1500 s). Re-based 2026-07-05
-    # with the energy model: honest trim/turn drag raised the mission burn,
-    # and 1100 s left the design 340 km hi-lo shot arriving DRY (measured:
-    # fuel 0.0 at impact); 1250 s meets the 340-km-with-reserve contract.
-    max_thrust=110_000.0, isp=1250.0,
+    # Effective isp 1475 s: upper kerosene-ramjet band (~1000-1500 s).
+    # Re-based against the online energy computer's honest trim/turn drag:
+    # the design 340 km hi-lo shot captures its low deck near 51 km and
+    # arrives with ~91 kg (~12%) fuel reserve instead of burning dry.
+    max_thrust=110_000.0, isp=1475.0,
     cruise_mach_hi=2.55, cruise_alt_hi=14_000.0, cruise_mach_lo=2.0, lo_alt=60.0,
     skim_alt=12.0, terminal_range=42_000.0,
     seeker_range=50_000.0, seeker_half_angle_deg=32.0,
@@ -126,13 +132,18 @@ ZIRCON = WeaponDef(
     # it flew into the sea 19.6 km short), and the combat-validated profile
     # is a late dive arriving ~Mach 4.5, not a hypersonic sea-skim.
     final_pn_range_m=30_000.0,
-    seeker_range=60_000.0, seeker_half_angle_deg=30.0,
+    lo_final_pn_range_m=1_200.0,
+    seeker_range=70_000.0, seeker_half_angle_deg=30.0,
     max_g=14.0, warhead_mass=300.0,
     ref_area=0.3848,   # pi * (0.70/2)^2
     # Energy model: hypersonic body — 14 g needs only CL 0.85 at its Mach
     # 4.5 sea-level arrival; 2.5 keeps the rating available down to
     # ~890 m/s and fades it honestly below (scramjet-body low-alpha class).
-    cl_max=2.5, thrust_tau=1.0,
+    cl_max=2.5, thrust_tau=1.0, terminal_pn_gain=4.5,
+    # A Mach-4.5+ body cannot fly the Oniks's 14 g/10 s sea-level S-turn
+    # without throwing away the collision solution.  Four g remains a real,
+    # energy-paid terminal jink while measured crossers converge cleanly.
+    terminal_weave_g=4.0,
 )
 
 
@@ -163,9 +174,9 @@ class SamDef:
     self_destruct_speed: float  # m/s, post-burnout minimum speed
     min_intercept_alt: float    # m, engagement envelope floor
     max_intercept_alt: float    # m, engagement envelope ceiling
-    # Loft / energy-management arc shaping — read PER ROUND by
-    # sim.sam._aim_direction so different rounds fly DIFFERENT arcs (the 48N6
-    # medium loft vs the 40N6 high loft).  Commanded midcourse altitude sits
+    # Loft / energy-management arc shaping — read PER ROUND by the loft-bias
+    # math in sim.sam.SamMissile._flight_computer_step so different rounds fly
+    # DIFFERENT arcs (the 48N6 medium loft vs the 40N6 high loft).  Commanded midcourse altitude sits
     # ``loft_gain`` m above the aim point per m of ground range-to-go beyond
     # ``loft_fade_range``, capped at ``loft_bias_max``; inside the fade range
     # the bias is zero, so the dive onto the real target is established before
@@ -526,29 +537,28 @@ HARM = StrikeDef(
 #   Tomahawk / JASSM flight (a regression), so they are LEFT ALONE and the
 #   KH31P envelope is whatever this airframe HONESTLY produces.
 #
-#   The achievable two-sided envelope (NOT the textbook 110 km) — measured by
-#   the probe at seed [1337, 8], stationary EMITTING radar:
-#       range  peak Mach  cruise Mach   closest    result
-#        60 km    2.94       2.80          11 m     HIT
-#        90 km    2.94       2.80          12 m     HIT   <- locked KILL range
-#       110 km    2.97       2.82          11 m     HIT   (also a clean kill)
-#       130 km    2.98       2.84          11 m     HIT
-#       140 km    2.98       2.84        1022 m     MISS  <- locked SHORT range
-#     Cruise Mach >= 2.80 (meets the >= ~2.8 target); a clean two-sided gate:
-#     kills out to 130 km, fuel/range-limited (falls short) at 140 km.  The
-#     classic 110 km figure is exceeded on this glide-heavy machine — the
-#     env test is locked to the MEASURED kill (90 km) and short (140 km).
+#   The achievable two-sided envelope (NOT the textbook 110 km), as re-based
+#   2026-07-06 with the energy model (tools/probe_kh31p_flyoff.py off the
+#   105 m coastal shelf; tests/test_kh31p_arm.py locks it): the 95 kg / 14 kN
+#   powered profile KILLS an emitting radar from 60 out to 140 km and falls
+#   SHORT (fuel/range-limited) at 160 km.  In the env test's flat sea-level
+#   harness the same round glides a bit farther (kills to 160 km, short at
+#   180 km — the lower launch buys a longer glide), which is why the test's
+#   K/S pins differ from the probe table.  Cruise Mach >= 2.80 either way.
 #     (Long ToF — ~200 s at 110 km — is the lofted-glide signature inherent
 #     to the shared flight model; the same applies to the in-game HARM.)
 #
-#   Propulsion model + budget (mirrors the HARM/Oniks fields):
+#   Propulsion model + budget (mirrors the HARM/Oniks fields; energy-model
+#   re-base 2026-07-05/06 — the ORIGINAL 63 kg / 9 kN build could not even
+#   match Mach-3 parasite drag at the 4 km loft and lived off a free-glide
+#   artifact):
 #     booster (solid cartridge): 63,000 N for 3.0 s spikes the round to the
 #       ramjet take-over speed off the rail.  At isp 950 s the booster grain
 #       is mdot = 63,000/(950*9.81) = 6.76 kg/s -> 3 s = ~20 kg of the budget.
-#     ramjet sustain: 9,000 N holds the Mach-3 cruise against drag; the
-#       remaining ~43 kg of the 63 kg fuel budget is the powered-cruise reserve
-#       and the RANGE GATE (kills to 130 km, short at 140 km).  isp 950 s is
-#       the air-breathing ramjet value (cf. Oniks 1100 s) — solid-booster grain
+#     ramjet sustain: 14,000 N holds the Mach ~2.8 cruise against drag; the
+#       remaining ~75 kg of the 95 kg fuel budget is the powered-cruise
+#       reserve and the RANGE GATE (kills to 140 km, short at 160).  isp 950 s
+#       is the air-breathing ramjet value (cf. Oniks) — solid-booster grain
 #       is the small first slice, the kerosene ramjet is the rest.
 KH31P = StrikeDef(
     weapon_id="kh31p", display_name="Kh-31P",
@@ -557,19 +567,19 @@ KH31P = StrikeDef(
     # Energy-model re-base 2026-07-05: the old 63 kg / 9 kN budget only
     # reached 130 km on the free-glide artifact (9 kN cannot even match
     # Mach-3 parasite drag at the 4 km loft, ~12.7 kN). Re-based to the
-    # powered profile the real round flies: ~110 kg of kerosene behind a
-    # 14 kN ramjet sustain — measured to restore the ~110 km book reach.
+    # powered profile the real round flies: 95 kg of kerosene behind a
+    # 14 kN ramjet sustain — measured to restore the book-class reach.
     fuel_mass=95.0,        # kg (booster grain + ramjet kerosene; gates the
-    #                        reach near the ~130 km book figure — measured)
+    #                        measured 140 km kill reach — envelope note above)
     # Solid booster cartridge: high thrust off the rail to ramjet take-over
     # speed in ~3 s, then the ramjet duct sustains.
     booster_thrust=63_000.0,   # N (probe-tuned boost spike)
     booster_time=3.0,          # s booster burn
     eject_speed=0.0,       # air-launched: inherits aircraft release velocity
     eject_time=0.2,        # s brief free-fall before motor ignition
-    # RAMJET sustain: air-breathing, so isp is high (cf. Oniks ramjet 1100 s).
-    # Sustain thrust holds the Mach-3 cruise against drag; the fuel budget is
-    # the range gate (kills to 130 km, falls short at 140 km — see table above).
+    # RAMJET sustain: air-breathing, so isp is high (cf. Oniks ramjet).
+    # Sustain thrust holds the Mach ~2.8 cruise against drag; the fuel budget
+    # is the range gate (kills to 140 km, short at 160 — envelope note above).
     max_thrust=14_000.0,   # N ramjet sustain (energy-model re-base — see
     #                        fuel_mass note; holds the Mach ~2.8 cruise)
     isp=950.0,             # s ramjet-dominated specific impulse (air-breathing)
@@ -963,12 +973,11 @@ BASTION_K = SamDef(
     # 2026-07-05: measured terminal accuracy ~20 m was splashing alongside
     # under the old 20 m point fuse).
     max_g=22.0, fuse_radius=30.0,
-    # Terminal handover partway down the reentry (see note above).
-    # max_range 230 km = the MEASURED honest kill envelope under the energy
-    # model (probe_asbm_flyoff 2026-07-05: kills 100-200 km with 16-20 m
-    # closest, 10+ km short at 250) — the old 300 km label was a
-    # free-energy artifact. Still the longest player anti-ship reach.
-    terminal_range=20_000.0, max_range=230_000.0,
+    # The online planner owns the full depressed reentry; MaRV PN commits in
+    # the final 3 km, already descending ~23 degrees, then steepens past 50.
+    # A 20 km phase handover flattened the new optimizer's dive to ~10 deg.
+    # Measured practical edge is 225 km (230 km times out ~1 km short).
+    terminal_range=3_000.0, max_range=225_000.0,
     self_destruct_t=400.0, self_destruct_speed=200.0,
     # Dives to the SEA: floor 0 (a ship deck), ceiling well above the apogee.
     min_intercept_alt=0.0, max_intercept_alt=95_000.0,
@@ -1032,7 +1041,11 @@ SWARM = WeaponDef(
     # hi/lo are both low so the round flies slow on either profile; lo_alt low
     # so the bundle skims in under the SM-2 horizon (lo-lo is the swarm mode).
     cruise_mach_hi=0.45, cruise_alt_hi=2_000.0, cruise_mach_lo=0.25, lo_alt=60.0,
-    skim_alt=10.0, terminal_range=8_000.0,
+    # Acquire on the 12 km seeker horizon but keep the online deck controller
+    # until 3 km.  The old 8 km terminal handover made this slow airframe
+    # descend through the sea 6-8 km short; separating acquisition from
+    # manoeuvre commitment now tracks crossers early and captures the deck.
+    skim_alt=10.0, terminal_range=3_000.0,
     seeker_range=12_000.0, seeker_half_angle_deg=40.0,
     max_g=6.0, warhead_mass=8.0,
     ref_area=0.0314,   # pi * (0.20/2)^2

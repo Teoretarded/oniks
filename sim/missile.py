@@ -14,13 +14,18 @@ Axes follow the locked conventions: X = east, Y = up, Z = north; heading 0 is
 """
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
 from sim.aero import (ALPHA_TAX, AP_TAU_CRUISE, CL_MAX_CRUISE, QS_FLOOR,
-                      lag_gain, q_scalar)
+                      autopilot_step_scalar, lag_gain,
+                      project_perpendicular_scalar, q_scalar)
 from sim.guidance import (STEER_GAIN, STEER_MAX_A, altitude_hold_accel,
                           pn_accel, waypoint_reached)
+from sim.flight_computer import (AirframeEnvelope, FlightMode, FlightState,
+                                 MissionSnapshot, OnlineFlightComputer,
+                                 route_arc_length_m)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar, speed_of_sound_scalar)
 from sim.radar import radar_horizon_m, terrain_blocks
@@ -101,7 +106,6 @@ BOOST_ELEV_REF_ALT = 8_000.0         # m of commanded cruise alt for full HI
 # Climb: hand over to cruise once this fraction of cruise altitude is reached;
 # the flight-path angle is clamped so the alt-hold's saturated "pull up"
 # command rides a clean cruise-climb instead of zooming vertical.
-CLIMB_TO_CRUISE_FRAC = 0.92
 CLIMB_MAX_TAN = np.tan(np.radians(40.0))   # max climb slope (vy / horiz speed)
 
 # Command honesty (energy model, 2026-07-05): the climb/descent vertical
@@ -168,12 +172,14 @@ DESCENT_BASELINE_MACH = 2.55   # ONIKS.cruise_mach_hi (the calibration Mach)
 # kd/kp * ramp_rate, closed out at the slow pole) at an assumed ground
 # speed, replacing the old geometry-only glide-slope rule.
 SKIM_CAPTURE_RANGE = 60_000.0   # m, tunable 50-75 km (plan-fixed center)
+# Terminal energy basket for a full hi-lo mission.  This is not a scripted
+# descent start: the online computer works backward from this basket using
+# live speed, altitude, fuel, terrain and lift authority.  The 91 km reserve
+# produces a measured ~50-52 km deck capture after controller/airframe lag.
+SKIM_HANDOVER_RANGE = 91_000.0
 DESCENT_RUN_SPEED = 660.0       # m/s assumed ground speed during the letdown
 DESCENT_SETTLE_T = 25.0         # s of PD lag closing onto the skim hold
 #                                 (tuned: full-cruise capture measures ~60 km)
-
-# Terminal phase starts when below this multiple of skim altitude.
-TERMINAL_ALT_FACTOR = 4.0
 
 # Close-range hi-lo handling (Task 22b): a hi-lo shot whose total route ground
 # distance is shorter than descent_range * CLOSE_HILO_FACTOR cannot reach full
@@ -255,15 +261,11 @@ WEAVE_RANGE = 12_000.0       # m range-to-aim at which the jinks start
 WEAVE_RAMP_IN = 1_500.0      # m of range over which the amplitude ramps in
 WEAVE_FULL_RANGE = 4_500.0   # m: full amplitude until here ...
 WEAVE_END_RANGE = 1_500.0    # m: ... then tapered to zero by here
-WEAVE_G = 15.0               # g of COMMANDED cross-track weave authority.
-                             # Deliberately above the q-limit (~14 g at a
-                             # Mach-2 skim): the command rides the fin stops
-                             # like a real terminal S-maneuver and the
-                             # airframe delivers what physics allows.
-                             # PROBE-TUNED (probe_missile_physics 2026-07-06):
-                             # 12 g -> 118 m excursion, 15 g -> 201 m (the
-                             # 150-250 m contract), 20 g -> 446 m; speed
-                             # honestly bleeds 680->657 m/s mid-weave.
+# The commanded weave g is PER WEAPON (WeaponDef.terminal_weave_g; the Oniks
+# default 14 g is deliberately above the q-limit at a Mach-2 skim, so the
+# command rides the fin stops and the airframe delivers what physics allows —
+# probe-tuned to the 150-250 m excursion contract; a Mach-4.5 Zircon flies a
+# gentler 4 g jink, see the arsenal notes).
 WEAVE_OMEGA = 2.0 * math.pi / 10.0  # rad/s: 10 s period — flown against the
                              # steer loop this sweeps ~200 m cross-track
 WEAVE_PHASE_STEP = 2.399963229728653   # rad per salvo ordinal (golden angle)
@@ -447,7 +449,10 @@ class Missile:
             weapon.descent_max_sink if weapon.descent_max_sink > 0.0
             else DESCENT_MAX_SINK * self._descent_scale)
         self._final_pn_range = (
-            weapon.final_pn_range_m if weapon.final_pn_range_m > 0.0
+            weapon.final_pn_range_m
+            if (self.hi and weapon.final_pn_range_m > 0.0)
+            else weapon.lo_final_pn_range_m
+            if (not self.hi and weapon.lo_final_pn_range_m > 0.0)
             else FINAL_PN_RANGE)
         # Per-weapon stall speed (see STALL_SPEED): the lift-fade floor scales
         # to the weapon's own slow-cruise band so a HEALTHY subsonic round keeps
@@ -485,6 +490,24 @@ class Missile:
                                   weapon.eject_time + 0.5 * weapon.booster_time)
         self._boost_end_mach = min(BOOST_END_MACH, weapon.cruise_mach_hi)
         self._plan_vertical_profile()
+        # Online receding-horizon flight computer. The close-shot altitude
+        # computed above is a mission ceiling/policy, not a scripted path.
+        envelope = AirframeEnvelope.from_weapon(weapon, "missile", profile)
+        envelope = replace(
+            envelope,
+            preferred_alt_m=float(self.cruise_alt if self.hi else weapon.lo_alt))
+        self._fc = OnlineFlightComputer(envelope)
+        self._fc_command = None
+        self._terminal_homing = False
+        self._fc_seeker_range = max(float(weapon.seeker_range),
+                                    float(weapon.terminal_range),
+                                    float(self._final_pn_range))
+        self._fc_commit_range = max(float(weapon.terminal_range),
+                                    float(self._final_pn_range))
+        self._fc_track_sample = None
+        self._fc_track_next_t = 0.0
+        initial_route = route_arc_length_m(self.pos, self.route)
+        self._fc_terminal_range = self._terminal_planning_range(initial_route)
         self._descent_alt0 = 0.0
         self._descent_elapsed = 0.0
         self._boost_t0 = 0.0     # t at cap jettison / high-thrust ignition
@@ -532,6 +555,24 @@ class Missile:
     def mass(self):
         return self.weapon.launch_mass - (self.weapon.fuel_mass - self.fuel)
 
+    def _terminal_planning_range(self, route_length: float) -> float:
+        """Mission handover range; the receding-horizon solver owns the path."""
+        configured = self._fc_commit_range
+        full_deck_profile = (
+            self.hi
+            and self._final_pn_range < self.weapon.terminal_range
+            and route_length >= (self.descent_range
+                                 + SKIM_HANDOVER_RANGE))
+        if full_deck_profile:
+            # A sufficiently long hi-lo mission reserves the documented
+            # 50-75 km low run plus the airframe's capture distance.  Shorter
+            # missions retain the seeker-range handover and the computer
+            # compresses the vertical solution online.
+            configured = max(configured, SKIM_HANDOVER_RANGE)
+        return min(
+            configured,
+            max(float(self._final_pn_range), 0.5 * float(route_length)))
+
     @property
     def phase_label(self) -> str:
         """HUD phase text (duck-typed across Missile and SamMissile)."""
@@ -568,6 +609,22 @@ class Missile:
         self.route.append((float(self.target_point[0]),
                            float(self.target_point[2])))
         self._plan_vertical_profile()
+        envelope = replace(
+            self._fc.envelope,
+            preferred_alt_m=float(self.cruise_alt if self.hi
+                                  else self.weapon.lo_alt))
+        self._fc = OnlineFlightComputer(envelope)
+        self._fc_seeker_range = max(float(self.weapon.seeker_range),
+                                    float(self.weapon.terminal_range),
+                                    float(self._final_pn_range))
+        self._fc_commit_range = max(float(self.weapon.terminal_range),
+                                    float(self._final_pn_range))
+        self._fc_track_sample = None
+        self._fc_track_next_t = self.t
+        self._fc_terminal_range = self._terminal_planning_range(
+            route_arc_length_m(self.pos, self.route))
+        self._fc_command = None
+        self._terminal_homing = False
         if self.phase == PH_DESCENT:
             if self._dist_to_target() > self.descent_range:
                 self.phase = PH_CLIMB           # long new leg: climb back out
@@ -585,6 +642,9 @@ class Missile:
         if not self.retargetable or len(self.route) - 1 >= MAX_ROUTE_WAYPOINTS:
             return False
         self.route.insert(len(self.route) - 1, (float(xz[0]), float(xz[1])))
+        self._fc_terminal_range = self._terminal_planning_range(
+            route_arc_length_m(self.pos, self.route))
+        self._fc.invalidate("waypoint-added")
         return True
 
     def clear_route_waypoints(self) -> bool:
@@ -593,6 +653,9 @@ class Missile:
         if not self.retargetable or len(self.route) <= 1:
             return False
         del self.route[:-1]
+        self._fc_terminal_range = self._terminal_planning_range(
+            route_arc_length_m(self.pos, self.route))
+        self._fc.invalidate("waypoints-cleared")
         return True
 
     # --- helpers --------------------------------------------------------------
@@ -603,7 +666,10 @@ class Missile:
         return math.hypot(dx, dz)
 
     def _route_heading(self):
-        wx, wz = self.route[0]
+        if self.locked_ship is not None and self._fc_track_sample is not None:
+            wx, _wy, wz = self._fc_track_sample
+        else:
+            wx, wz = self.route[0]
         return math.atan2(wx - self.pos[0], wz - self.pos[2])
 
     def _climb_dir(self) -> np.ndarray:
@@ -635,9 +701,13 @@ class Missile:
             return 0.0
         w = self.weapon
         if self._commanded_speed is None:
-            target_mach = (w.cruise_mach_hi
-                           if self.hi and self.phase in (PH_CLIMB, PH_CRUISE)
-                           else w.cruise_mach_lo)
+            if self._fc_command is not None and self.phase in (
+                    PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL):
+                target_mach = self._fc_command.target_mach
+            else:
+                target_mach = (w.cruise_mach_hi
+                               if self.hi and self.phase in (PH_CLIMB, PH_CRUISE)
+                               else w.cruise_mach_lo)
         else:
             target_mach = self._commanded_speed / speed_of_sound_scalar(alt)
         thrust = KP_THRUST * (target_mach - m_now) * THRUST_SCALE + drag_ff
@@ -718,6 +788,76 @@ class Missile:
         s1 = _surface_at(world, px + vx * scale, pz + vz * scale)
         return alt - s0, vs - (s1 - s0) / SKIM_LOOKAHEAD * hspeed
 
+    def _flight_computer_step(self, dt, world):
+        """Update the cached online energy plan from numeric state only."""
+        if self.locked_ship is not None:
+            if (self._fc_track_sample is None
+                    or self.t + 1e-12 >= self._fc_track_next_t):
+                tp = self.locked_ship.pos
+                self._fc_track_sample = (
+                    float(tp[0]), float(tp[1]), float(tp[2]))
+                self._fc_track_next_t = self.t + self._fc.replan_interval_s
+            tp = self._fc_track_sample
+            path = ((float(tp[0]), float(tp[2])),)
+            target_y = float(tp[1])
+        else:
+            path = tuple(self.route)
+            target_y = max(
+                float(self.target_point[1]),
+                _surface_at(world, float(self.target_point[0]),
+                            float(self.target_point[2])))
+        state = FlightState(
+            pos=(float(self.pos[0]), float(self.pos[1]), float(self.pos[2])),
+            vel=(float(self.vel[0]), float(self.vel[1]), float(self.vel[2])),
+            mass_kg=float(self.mass), fuel_kg=float(self.fuel),
+            thrust_actual_n=float(self._thrust_act), time_s=float(self.t))
+        current_agl = float(self.pos[1]) - _surface_at(
+            world, float(self.pos[0]), float(self.pos[2]))
+        dive_terminal = self._final_pn_range >= self.weapon.terminal_range
+        handover_range = float(self._fc_terminal_range)
+        commit_range = min(handover_range, float(self._fc_commit_range))
+        handover_alt = (target_y
+                        + (math.tan(math.radians(8.5)) * handover_range
+                           if dive_terminal else float(self.weapon.skim_alt)))
+        terminal_geometry_ready = (dive_terminal or current_agl <= max(
+            4.0 * float(self.weapon.skim_alt),
+            1.5 * float(self.weapon.lo_alt), 50.0))
+        mission = MissionSnapshot(
+            path_xz=path,
+            target_y_m=target_y,
+            terminal_handover_alt_m=handover_alt,
+            terminal_handover_range_m=handover_range,
+            allow_high=self.hi,
+            terminal_armed=len(path) == 1 and terminal_geometry_ready,
+            terminal_latched=(self._terminal_homing
+                              or self.phase == PH_TERMINAL),
+            terminal_commit_max_m=commit_range)
+        self._fc_command = self._fc.update(
+            dt, state, mission,
+            lambda x, z: _surface_at(world, x, z))
+        return self._fc_command
+
+    def _online_midcourse_guidance(self, speed, vx, vy, vz, dt, world):
+        """120 Hz inner-loop command following the cached energy plan."""
+        gx, gz = _steer_heading_scalar(
+            vx, vz, self._route_heading(), self._steer_max_a)
+        gy = 0.0
+        cmd = self._fc_command
+        if cmd is None:
+            cmd = self._flight_computer_step(dt, world)
+        hspeed = math.hypot(vx, vz)
+        if speed > 1e-9 and hspeed > 1e-9:
+            gamma = math.atan2(vy, hspeed)
+            lift_n = (cmd.path_normal_accel_mps2
+                      + GRAVITY * math.cos(gamma))
+            nx = -vx * vy / (speed * hspeed)
+            ny = hspeed / speed
+            nz = -vz * vy / (speed * hspeed)
+            gx += nx * lift_n
+            gy += ny * lift_n
+            gz += nz * lift_n
+        return gx, gy, gz
+
     def _guidance(self, alt, vs, speed, vx, vz, dt, world):
         """Commanded guidance accel components (gx, gy, gz) as plain floats,
         gravity-compensation 'lift' included.
@@ -727,35 +867,10 @@ class Missile:
         steer/PN array allocations are gone); the rarely-hot PN branches
         still call the shared ``pn_accel``."""
         w = self.weapon
-        if self.phase == PH_CLIMB:
-            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
-                                           self._steer_max_a)
-            gy = altitude_hold_accel(alt, vs, self.cruise_alt,
-                                     ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
-            # Command honesty: never command lift past the climb-slope cap
-            # (see VY_CAPTURE_GAIN) — riding the slope costs ~1 g, not 6.
-            vy_room = math.hypot(vx, vz) * CLIMB_MAX_TAN - vs
-            gy = min(gy, vy_room * VY_CAPTURE_GAIN + GRAVITY)
-        elif self.phase == PH_CRUISE:
-            target_alt = self.cruise_alt if self.hi else w.lo_alt
-            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
-                                           self._steer_max_a)
-            gy = altitude_hold_accel(alt, vs, target_alt,
-                                     ALT_KP, ALT_KD, ALT_MAX_A) + GRAVITY
-        elif self.phase == PH_DESCENT:
-            self._descent_elapsed += dt
-            ramp = (self._descent_alt0
-                    - self._descent_ramp_rate * self._descent_elapsed)
-            target_alt = max(w.skim_alt, ramp)
-            gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
-                                           self._steer_max_a)
-            gy = altitude_hold_accel(alt, vs, target_alt,
-                                     DESCENT_KP, DESCENT_KD,
-                                     ALT_MAX_A * self._descent_scale) + GRAVITY
-            # Command honesty: never command push-over past the sink clamp
-            # (the mirror of the CLIMB slope cap — see VY_CAPTURE_GAIN).
-            sink_room = -self._descent_max_sink - vs
-            gy = max(gy, sink_room * VY_CAPTURE_GAIN + GRAVITY)
+        if (self.phase in (PH_CLIMB, PH_CRUISE, PH_DESCENT)
+                and not self._terminal_homing):
+            gx, gy, gz = self._online_midcourse_guidance(
+                speed, vx, vs, vz, dt, world)
         else:   # PH_TERMINAL
             # Re-lock on a dead target: a lead round of the salvo can sink the
             # locked hull mid-flight (ALIVE/BURNING -> SINKING/GONE); the lock
@@ -793,7 +908,9 @@ class Missile:
                 dx = tpos[0] - self.pos[0]
                 dy = tpos[1] - self.pos[1]
                 dz = tpos[2] - self.pos[2]
-                gx, gy, gz = pn_accel(self.pos, self.vel, tpos, tvel).tolist()
+                gx, gy, gz = pn_accel(
+                    self.pos, self.vel, tpos, tvel,
+                    n_gain=float(w.terminal_pn_gain)).tolist()
                 if math.sqrt(dx * dx + dy * dy + dz * dz) < self._final_pn_range:
                     gy += GRAVITY
                 else:
@@ -802,8 +919,9 @@ class Missile:
                                               ALT_KP, ALT_KD, ALT_MAX_A)
                           + GRAVITY)
             elif self._dist_to_target() < self._final_pn_range:
-                gx, gy, gz = pn_accel(self.pos, self.vel, self.target_point,
-                                      np.zeros(3)).tolist()
+                gx, gy, gz = pn_accel(
+                    self.pos, self.vel, self.target_point, np.zeros(3),
+                    n_gain=float(w.terminal_pn_gain)).tolist()
                 gy += GRAVITY
             else:
                 gx, gz = _steer_heading_scalar(vx, vz, self._route_heading(),
@@ -819,8 +937,8 @@ class Missile:
                 self._guid_t0 = None
             else:
                 gx *= r
+                gy *= r
                 gz *= r
-                gy = (gy - GRAVITY) * r + GRAVITY
         # No dynamic pressure -> no control authority (fuel-starved missiles
         # sink). The stall speed is per-weapon (see STALL_SPEED / __init__): an
         # Oniks/Zircon uses the locked 200.0 m/s floor byte-for-byte; a healthy
@@ -831,6 +949,8 @@ class Missile:
             gx *= k
             gy *= k
             gz *= k
+        gx, gy, gz = project_perpendicular_scalar(
+            gx, gy, gz, vx, vs, vz)
         # G-limit the total commanded accel.
         gmax = w.max_g * GRAVITY
         n2 = gx * gx + gy * gy + gz * gz
@@ -886,26 +1006,70 @@ class Missile:
                 or self.t - self._boost_t0 >= w.booster_time):
             self.phase = PH_CLIMB if self.hi else PH_CRUISE
             self._guid_t0 = self.t      # fins ease in over GUID_RAMP_T
-        if self.phase == PH_CLIMB and alt >= CLIMB_TO_CRUISE_FRAC * self.cruise_alt:
-            self.phase = PH_CRUISE
-        if self.phase == PH_CRUISE:
-            down_range = self.descent_range if self.hi else w.terminal_range
-            if self._dist_to_target() < down_range:
-                self.phase = PH_DESCENT
-                self._descent_alt0 = alt
-                self._descent_elapsed = 0.0
-        if self.phase == PH_DESCENT and alt < TERMINAL_ALT_FACTOR * w.skim_alt:
-            self.phase = PH_TERMINAL
-        # Per-weapon-profile rounds hand over by RANGE as well: a fast diver
-        # can reach the target while the ramp-following PD is still kilometres
-        # high (the lag is ~ramp_rate*kd/kp) — the altitude gate alone then
-        # never trips and the round OVERFLIES with the seeker never engaged
-        # (measured: Zircon crossed the ship at 151 m, still in DESCENT).
-        # Legacy weapons (descent_range_m unset) keep the alt-only gate.
-        if (self.phase == PH_DESCENT and w.descent_range_m > 0.0
-                and self._dist_to_target() < w.terminal_range):
-            self.phase = PH_TERMINAL
-
+        if self.phase in (PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_TERMINAL):
+            # The seeker may acquire before terminal manoeuvre commitment.
+            # This is essential for slow rounds against crossing ships: the
+            # flight computer keeps its safe deck/capture solution while its
+            # 4 Hz sampled aim follows the real moving hull.  Acquisition is
+            # still honestly range/cone/horizon/terrain gated by the existing
+            # seeker routine; no target truth is used before a valid lock.
+            if (self.phase != PH_TERMINAL
+                    and self.locked_ship is None
+                    and self.target_ship is not None
+                    and self._dist_to_target() <= self._fc_seeker_range
+                    and self.t + 1e-12 >= self._seeker_scan_t):
+                self._acquire_lock(world, speed)
+                if (self.locked_ship is None
+                        and getattr(world, "radar_model",
+                                    "functional") == "scanned"):
+                    self._seeker_scan_t = self.t + SEEKER_RESCAN_S
+            command = (self._fc_command if self._terminal_homing
+                       and self._fc_command is not None else
+                       self._flight_computer_step(dt, world))
+            if self.phase != PH_TERMINAL:
+                current_agl = alt - _surface_at(
+                    world, float(self.pos[0]), float(self.pos[2]))
+                dive_terminal = (self._final_pn_range >=
+                                 self.weapon.terminal_range)
+                if command.mode is FlightMode.TERMINAL:
+                    # Seeker/homing handover is independent from the public
+                    # sea-skim phase label.  The seeker can begin horizontal
+                    # PN at its computed range while the altitude controller
+                    # is still settling onto the deck.
+                    self._terminal_homing = True
+                if (command.mode is FlightMode.TERMINAL
+                        and not dive_terminal
+                        and current_agl > max(
+                            1.5 * float(self.weapon.skim_alt), 20.0)):
+                    # Latch the computed terminal solution early enough to
+                    # reserve capture room, but keep flying the online descent
+                    # until the sea-skimmer is near its deck.  This avoids a
+                    # misleadingly long TERMINAL phase while retaining the
+                    # flight computer's no-splash flare margin.
+                    self.phase = PH_DESCENT
+                elif command.mode is FlightMode.DESCEND:
+                    # Keep the public CRUISE label during the shallow first
+                    # part of an optimized letdown; DESCENT begins once the
+                    # vehicle has clearly left its cruise band.
+                    self.phase = (PH_CRUISE if self.hi and alt >=
+                                  0.95 * self.cruise_alt else PH_DESCENT)
+                else:
+                    if (self.hi
+                            and command.mode is FlightMode.CRUISE
+                            and self.phase == PH_DESCENT):
+                        # DESCENT is a one-way mission phase.  Once a hi-lo
+                        # round has captured its low deck, the altitude loop
+                        # quite correctly reports CRUISE (level flight), but
+                        # the round is still on its post-letdown sea-skimming
+                        # leg.  Re-labelling that leg as high CRUISE obscures
+                        # the actual profile and breaks phase-based telemetry.
+                        self.phase = PH_DESCENT
+                    else:
+                        self.phase = {
+                            FlightMode.CLIMB: PH_CLIMB,
+                            FlightMode.CRUISE: PH_CRUISE,
+                            FlightMode.TERMINAL: PH_TERMINAL,
+                        }[command.mode]
         # --- forces ---
         gx = gy = gz = 0.0                 # guidance accel components
         thrust = 0.0
@@ -1003,22 +1167,17 @@ class Missile:
             # --- energy model (sim/aero.py; research doc §3-§5) ---
             # 1. q-limit: the airframe can only lift q*S*CLmax — at low
             #    speed or high altitude the rated max_g simply is not there.
-            a_avail = qs * self._cl_max / self.mass
-            n2 = gx * gx + gy * gy + gz * gz
-            if n2 > a_avail * a_avail:
-                s = a_avail / math.sqrt(n2)
-                gx *= s
-                gy *= s
-                gz *= s
+            tau = (min(self._ap_tau, TERMINAL_AP_TAU)
+                   if self.phase == PH_TERMINAL else self._ap_tau)
             # 2. autopilot lag: fins take ~tau to bite — commanded accel is
             #    never achieved in the tick it is commanded. The terminal
             #    stage gain-schedules to its tightest loop (TERMINAL_AP_TAU).
-            k = lag_gain(dt, min(self._ap_tau, TERMINAL_AP_TAU)
-                         if self.phase == PH_TERMINAL else self._ap_tau)
-            self._ap_x += (gx - self._ap_x) * k
-            self._ap_y += (gy - self._ap_y) * k
-            self._ap_z += (gz - self._ap_z) * k
-            gx, gy, gz = self._ap_x, self._ap_y, self._ap_z
+            gx, gy, gz = autopilot_step_scalar(
+                gx, gy, gz, self._ap_x, self._ap_y, self._ap_z,
+                dt=dt, tau=tau, q=q, ref_area=w.ref_area,
+                mass=self.mass, cl_max=self._cl_max,
+                structural_limit=w.max_g * GRAVITY)
+            self._ap_x, self._ap_y, self._ap_z = gx, gy, gz
             # 3. induced drag: the lift that bends the path is paid for in
             #    drag ~ n^2/q — THE fix for "does a 180 without losing
             #    speed" (user feel report 2026-07-05, confirmed in code:
@@ -1101,7 +1260,8 @@ class Missile:
 
     def _weave_accel(self, dt, vx, vz):
         """The evasive S-curve as a cross-track ACCELERATION command:
-        authority ramps in below WEAVE_RANGE, holds WEAVE_G, tapers to zero
+        authority ramps in below WEAVE_RANGE, holds the weapon's
+        terminal_weave_g, tapers to zero
         by WEAVE_END_RANGE so the final run is straight.  Returned raw —
         the caller sums it with the homing command and the shared q-limit /
         autopilot-lag / induced-drag chain makes it physical.  Pure scalar
@@ -1119,7 +1279,7 @@ class Missile:
         env = min((WEAVE_RANGE - d) / WEAVE_RAMP_IN,
                   (d - WEAVE_END_RANGE)
                   / (WEAVE_FULL_RANGE - WEAVE_END_RANGE), 1.0)
-        a = WEAVE_G * GRAVITY * env * math.sin(
+        a = float(self.weapon.terminal_weave_g) * GRAVITY * env * math.sin(
             WEAVE_OMEGA * self._weave_t + self.weave_phi)
         pxh, pzh = vz / hsp, -vx / hsp         # horizontal right-hand perp
         return pxh * a, pzh * a

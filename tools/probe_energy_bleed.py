@@ -84,9 +84,17 @@ def sam_coast(aligned):
                      _Target((0.0, 10_000.0, 150_000.0)))
     sam.phase = SPH_MIDCOURSE
     sam.propellant = 0.0
-    dx, dy, dz = sam._aim_direction(0.0, 10_000.0, 0.0, 0.0, 0.0, 1200.0)
-    sam.vel = (np.array([dx, dy, dz]) if aligned
-               else np.array([1.0, 0.0, 0.0])) * 1200.0
+    sam.vel = np.array([0.0, 0.0, 1200.0])
+    if aligned:
+        # Live flight-computer commanded path direction (the production path;
+        # the old _aim_direction helper was removed 2026-07-17).
+        cmd = sam._flight_computer_step(
+            DT, w, 0.0, 10_000.0, 0.0, 0.0, 0.0, 1200.0)
+        dx, dy, dz = sam._command_direction(
+            0.0, 10_000.0, 0.0, sam._fc_aim, cmd)
+        sam.vel = np.array([dx, dy, dz]) * 1200.0
+    else:
+        sam.vel = np.array([1.0, 0.0, 0.0]) * 1200.0
     sam.body_dir = sam.vel / np.linalg.norm(sam.vel)
     v0 = float(np.linalg.norm(sam.vel))
     for _ in range(int(3.0 / DT)):
