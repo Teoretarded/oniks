@@ -48,10 +48,11 @@ from typing import Optional
 
 import numpy as np
 
-from sim.guidance import pn_accel
+from sim.aero import (ALPHA_TAX, QS_FLOOR, autopilot_step_scalar,
+                      q_scalar)
+from sim.guidance import gravity_compensation_accel, pn_accel
 from sim.missile import _surface_at
-from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
-                         mach_scalar)
+from sim.physics import GRAVITY, cd_from_mach_scalar, mach_scalar
 
 # ---------------------------------------------------------------------------
 # Phase constants (range 30-34 — well clear of sam.py 0-4 and strike.py 20-25)
@@ -78,8 +79,6 @@ IR_DIAMETER_M: float = 0.127    # m (5 in for the AIM-9 family)
 IR_LAUNCH_MASS_KG: float = 85.0 # kg (AIM-9X cited ~85 kg)
 
 # Propellant: solid dual-thrust motor, burn modelled as one 5 s stage.
-IR_PROPELLANT_KG: float = 9.6   # kg solid propellant (AIM-9X motor ~10 kg)
-
 # Motor: produces ~600 m/s delta-v over 5 s from rest (adds ~Mach 1.8 above
 # release speed); with a fighter release at ~Mach 0.8-1.0 the burn-out speed
 # is ~Mach 2.5-2.7.  Thrust sized: F = m*a, a = dV/dt = 600/5 = 120 m/s^2,
@@ -88,12 +87,19 @@ IR_MOTOR_THRUST_N: float = 10_000.0   # N
 IR_MOTOR_BURN_S: float = 5.0          # s (single-stage solid motor)
 IR_ISP_S: float = 200.0               # s (solid propellant Isp, AIM-9 class)
 IR_MDOT: float = IR_MOTOR_THRUST_N / (IR_ISP_S * GRAVITY)  # kg/s
+# Propellant, thrust, Isp and burn duration must describe ONE motor.  Derive
+# the grain mass from the other three instead of carrying the old inconsistent
+# 9.6 kg value (which exhausted this nominal five-second motor in 1.88 s).
+IR_PROPELLANT_KG: float = IR_MDOT * IR_MOTOR_BURN_S
 
 # Aerodynamic reference area (pi*(d/2)^2).
 IR_REF_AREA_M2: float = math.pi * (IR_DIAMETER_M / 2.0) ** 2
 
 # Max lateral acceleration (20 g, sustained).
 IR_MAX_G: float = 20.0
+IR_CL_MAX: float = 4.0
+IR_K_INDUCED: float = ALPHA_TAX / IR_CL_MAX
+IR_AUTOPILOT_TAU_S: float = 0.15
 
 # Proximity fuse.
 IR_FUSE_RADIUS_M: float = 8.0   # m (AIM-9X ~9 m claimed; using 8 m conservatively)
@@ -244,6 +250,7 @@ class IrMissile:
         self.self_destructed = False
         self._fuse_r2 = IR_FUSE_RADIUS_M * IR_FUSE_RADIUS_M
         self._mass = IR_LAUNCH_MASS_KG
+        self._ap_x = self._ap_y = self._ap_z = 0.0
 
     # --- duck-type helpers --------------------------------------------------
 
@@ -402,15 +409,10 @@ class IrMissile:
             tpos = np.asarray(self.target.pos, dtype=np.float64)
             tvel = np.asarray(self.target.velocity(), dtype=np.float64)
             g = pn_accel(self.pos, self.vel, tpos, tvel)
-            gx, gy, gz = float(g[0]), float(g[1]), float(g[2])
-            gy += GRAVITY   # gravity compensation
-            gmax = IR_MAX_G * GRAVITY
-            n2 = gx * gx + gy * gy + gz * gz
-            if n2 > gmax * gmax:
-                k = gmax / math.sqrt(n2)
-                gx *= k
-                gy *= k
-                gz *= k
+            gc = gravity_compensation_accel(self.vel, GRAVITY)
+            gx = float(g[0] + gc[0])
+            gy = float(g[1] + gc[1])
+            gz = float(g[2] + gc[2])
 
         # --- forces ---
         thrust = 0.0
@@ -419,9 +421,17 @@ class IrMissile:
             self._propellant = max(0.0, self._propellant - IR_MDOT * dt)
             self._mass = IR_LAUNCH_MASS_KG - (IR_PROPELLANT_KG - self._propellant)
 
-        drag = drag_force_scalar(
-            speed, py, cd_from_mach_scalar(mach_scalar(speed, py)), IR_REF_AREA_M2
-        )
+        q = q_scalar(speed, py)
+        gx, gy, gz = autopilot_step_scalar(
+            gx, gy, gz, self._ap_x, self._ap_y, self._ap_z,
+            dt=dt, tau=IR_AUTOPILOT_TAU_S, q=q,
+            ref_area=IR_REF_AREA_M2, mass=max(self._mass, 1.0),
+            cl_max=IR_CL_MAX, structural_limit=IR_MAX_G * GRAVITY)
+        self._ap_x, self._ap_y, self._ap_z = gx, gy, gz
+        qs = q * IR_REF_AREA_M2
+        drag = qs * cd_from_mach_scalar(mach_scalar(speed, py))
+        lift = self._mass * math.sqrt(gx * gx + gy * gy + gz * gz)
+        drag += IR_K_INDUCED * lift * lift / max(qs, QS_FLOOR)
 
         # --- semi-implicit Euler ---
         coef = (thrust - drag) / max(self._mass, 1.0)

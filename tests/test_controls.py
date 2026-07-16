@@ -53,6 +53,7 @@ class FakeSandbox:
         self.log = []
         self.rig = FakeRig(self.log)
         self.map_open = False
+        self.followed = None
         self.profile = "hi-lo"
         self.controls_overlay = False
 
@@ -90,6 +91,12 @@ class FakeSandbox:
         # binding test can assert the key routed.
         self.log.append("auto_warp_toggle")
         return self.app.keybinds  # unused; mirror real return shape harmlessly
+
+    def toggle_launch_cinema(self):
+        self.log.append("launch_cinema")
+
+    def toggle_flight_computer_debug(self):
+        self.log.append("flight_computer_debug")
 
 
 @pytest.fixture
@@ -280,6 +287,24 @@ def test_bug_report_default_binding_is_f3(tmp_path):
     kb = Keybinds(str(tmp_path / "settings.json"))
     assert kb.key_for("bug_report") == pygame.K_F3
     assert kb.action_for(pygame.K_F3) == "bug_report"
+
+
+def test_f5_is_flight_computer_in_chase_but_cinema_on_map(ctl):
+    class _FC:
+        pass
+
+    class _Missile:
+        alive = True
+        _fc = _FC()
+
+    sb = ctl.sandbox
+    sb.followed = _Missile()
+    ctl._handle_key(pygame.K_F5)
+    assert sb.log == ["flight_computer_debug"]
+
+    sb.map_open = True
+    ctl._handle_key(pygame.K_F5)
+    assert sb.log == ["flight_computer_debug", "launch_cinema"]
 
 
 def test_hud_click_dispatches_the_registered_action(ctl):

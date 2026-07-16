@@ -75,7 +75,7 @@ import numpy as np
 from sim.arsenal import SM2, SM6
 from sim.ciws import Ciws
 from sim.missile import Missile
-from sim.sam import SamMissile
+from sim.sam import SPH_TERMINAL, SamMissile
 
 VIS_CHECK_PERIOD = 0.25     # s between cached SPY-1 visibility re-checks
 TRACK_FORM_S = 1.5          # s of continuous visibility before track forms
@@ -199,8 +199,14 @@ class StealthTargetSam(SamMissile):
         illumination chain), clamped to 1.  A dead/None illuminator rates
         1.0: with no painter the track is pure noise floor (the lock-break
         check kills the shot anyway)."""
-        src = (self.illuminator_pos_fn()
-               if self.illuminator_pos_fn is not None else None)
+        if self.weapon.guidance == "arh":
+            # Before handover, SNR belongs to the launch-track geometry; once
+            # active, it belongs to the missile's own seeker.  An ARH round is
+            # never made dependent on a launcher illuminator callback.
+            src = self.pos if self.phase >= SPH_TERMINAL else self._fc_pos
+        else:
+            src = (self.illuminator_pos_fn()
+                   if self.illuminator_pos_fn is not None else None)
         if src is None:
             return 1.0
         tp = self.target.pos
@@ -417,7 +423,9 @@ class ShipDefense:
         ship = self.ship
 
         def illuminator_pos():
-            if not ship.alive:
+            radar = getattr(ship, "radar", None)
+            if (not ship.alive or radar is None
+                    or not radar.alive or not radar.emitting):
                 return None
             return (float(ship.pos[0]),
                     float(ship.pos[1]) + ILLUMINATOR_M,
@@ -434,8 +442,12 @@ class ShipDefense:
         # a plain Destroyer on the LOCKED SM2_MAX_INFLIGHT const (existing
         # enemy_defense tests unchanged).
         max_inflight = getattr(ship, "sm2_max_inflight", SM2_MAX_INFLIGHT)
+        radar = getattr(ship, "radar", None)
         if (ship.sm2_ammo <= 0 or ship.sm2_reload_timer > 0.0
                 or len(self._inflight) >= max_inflight):
+            return
+        if (not ship.alive or radar is None
+                or not radar.alive or not radar.emitting):
             return
         sx, sz = float(ship.pos[0]), float(ship.pos[2])
         best_key = None
@@ -483,7 +495,10 @@ class ShipDefense:
         at DRONE_SM2_MAX_INFLIGHT rounds per drone; the round is a
         StealthTargetSam so the low-SNR physics rides the guidance."""
         ship = self.ship
-        if ship.sm2_ammo <= 0 or ship.sm2_reload_timer > 0.0:
+        radar = getattr(ship, "radar", None)
+        if (ship.sm2_ammo <= 0 or ship.sm2_reload_timer > 0.0
+                or not ship.alive or radar is None
+                or not radar.alive or not radar.emitting):
             return
         sx, sz = float(ship.pos[0]), float(ship.pos[2])
         detect_range = ship.radar.ranges.get("stealth", 0.0)
@@ -564,8 +579,7 @@ class ShipDefense:
             sam = SamMissile(
                 SM6, deck, self._tracks[best_key]["missile"],
                 contact_estimate_fn=self._estimate(best_key),
-                rng=np.random.default_rng(int(self.rng.integers(2 ** 63))),
-                illuminator_pos_fn=self._illuminator())
+                rng=np.random.default_rng(int(self.rng.integers(2 ** 63))))
             sam.launch_cinematic = False
             sam.launch_platform = ship
             _mark_hostile_round(sam)
@@ -598,7 +612,6 @@ class ShipDefense:
                 SM6, deck, drone,
                 contact_estimate_fn=self._estimate(did, self._drone_tracks),
                 rng=np.random.default_rng(int(self.rng.integers(2 ** 63))),
-                illuminator_pos_fn=self._illuminator(),
                 detection_range_m=detect_range)
             sam.launch_cinematic = False
             sam.launch_platform = ship

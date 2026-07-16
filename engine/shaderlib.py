@@ -28,12 +28,15 @@ uniform sampler2D u_cloud_weather;
 uniform vec2 u_cloud_cam_xz;
 uniform float u_cloud_amt;
 uniform float u_cloud_time;
+uniform vec2 u_cloud_wind_xz;
+uniform float u_cloud_tile_m;
 float cloud_shadow(vec3 view_vec){
     if (u_cloud_amt <= 0.0) return 1.0;
     vec2 xz = u_cloud_cam_xz + view_vec.xz;
     xz -= (u_sun_dir.xz / max(u_sun_dir.y, 0.2)) * 2500.0;
-    vec2 drift = vec2(u_cloud_time * 18.0, u_cloud_time * 18.0 * 0.35);
-    float coverage = texture(u_cloud_weather, (xz + drift) / 300000.0).r;
+    vec2 drift = u_cloud_time * u_cloud_wind_xz;
+    float coverage = texture(u_cloud_weather,
+                             (xz + drift) / max(u_cloud_tile_m, 1.0)).r;
     return 1.0 - u_cloud_amt * smoothstep(0.30, 0.75, coverage);
 }
 """

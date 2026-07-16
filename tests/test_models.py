@@ -13,7 +13,8 @@ from models.missiles import (build_40n6, build_48n6, build_57e6,
                              build_tomahawk, build_zircon)
 from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_missile, build_s300_tel
-from models.ships_models import build_cargo, build_tanker, build_warship
+from models.ships_models import (build_cargo, build_lcac, build_tanker,
+                                 build_transport, build_warship)
 from models.structures import build_fuel_depot, build_harbor, build_radar_station
 
 
@@ -45,6 +46,7 @@ def test_all_builders_finite_unit_normals():
                build_kh31p(), build_zircon(), build_sm6(),
                build_patrol_aircraft(), build_fast_aircraft(),
                build_cargo(), build_tanker(), build_warship(),
+               build_transport(), build_lcac(),
                build_radar_station(), build_fuel_depot(), build_harbor()):
         _check(md)
 
@@ -155,6 +157,40 @@ def test_ship_dimensions():
         assert abs(p[:, 2].max() + p[:, 2].min()) <= 2.0, build.__name__
         # nothing deeper than 2 m below the waterline
         assert p[:, 1].min() >= -2.001, build.__name__
+
+
+def test_amphibious_ship_dimensions_match_live_colliders():
+    """Dedicated proxy replacements retain today's sim-space dimensions."""
+    for build, length, beam in ((build_transport, 200.0, 32.0),
+                                (build_lcac, 27.0, 14.0)):
+        p = build().vertices[:, :3]
+        assert abs((p[:, 2].max() - p[:, 2].min()) - length) <= 0.05
+        assert abs((p[:, 0].max() - p[:, 0].min()) - beam) <= 0.05
+        assert abs(p[:, 2].max() + p[:, 2].min()) <= 0.05
+
+
+def test_rebuilt_ship_signature_geometry():
+    """Guard the cues that distinguish five formerly blocky/proxy hulls."""
+    cargo = build_cargo()
+    container = np.zeros(len(cargo.vertices), dtype=bool)
+    for key in ("container_a", "container_b", "container_c"):
+        container |= _color_mask(cargo, key)
+    # Individual ISO-like boxes, not the old ten fused mega-blocks.
+    assert container.sum() >= 4_000
+
+    tanker = build_tanker()
+    assert _color_mask(tanker, "pipe").sum() >= 500
+
+    warship = build_warship()
+    assert _color_mask(warship, "aircraft_dark").sum() >= 500
+
+    transport = build_transport()
+    t_dark = transport.vertices[_color_mask(transport, "aircraft_dark")]
+    assert len(t_dark) and t_dark[:, 2].min() <= -99.0  # stern well-deck gate
+
+    lcac = build_lcac()
+    assert _color_mask(lcac, "tire").sum() >= 80       # full cushion skirt
+    assert _color_mask(lcac, "aircraft_dark").sum() >= 200  # fans/propulsors
 
 
 def test_structures_above_ground():
@@ -424,6 +460,27 @@ def test_patrol_aircraft_has_nacelles():
     dark = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["aircraft_dark"],
                              atol=1e-4), axis=1)
     nac = md.vertices[dark & (np.abs(md.vertices[:, 0]) > 3.0)]
-    assert len(nac)                 # underwing pods clear of the fuselage
+    assert len(nac)                 # engine/prop details clear of the fuselage
     assert (nac[:, 0] > 3.0).any() and (nac[:, 0] < -3.0).any()
-    assert nac[:, 1].max() <= 0.0   # slung BELOW the wing plane
+    # Atlantique-2 turboprops are integrated into the high wing; the four
+    # propeller blades cross above and below the nacelle centreline.
+    assert nac[:, 1].min() < -0.8
+    assert nac[:, 1].max() > 1.0
+
+
+def test_fast_aircraft_has_twin_engines_and_upright_tails():
+    md = build_fast_aircraft()
+    p = md.vertices[:, 0:3]
+
+    exhaust = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["exhaust_ring"],
+                                atol=1e-4), axis=1)
+    nozzles = p[exhaust]
+    assert (nozzles[:, 0] > 0.4).any()
+    assert (nozzles[:, 0] < -0.4).any()
+
+    grey = np.all(np.isclose(md.vertices[:, 6:9], PALETTE["aircraft_grey"],
+                             atol=1e-4), axis=1)
+    fin_tips = p[grey & (p[:, 2] < -5.0) & (p[:, 1] > 2.0)]
+    assert (fin_tips[:, 0] > 0.5).any()
+    assert (fin_tips[:, 0] < -0.5).any()
+    assert p[:, 1].min() > -1.1       # no inverted fin below the belly

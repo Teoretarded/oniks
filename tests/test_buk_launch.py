@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from sim.arsenal import BUK_AGILE, BUK_LONG
+from models.support_assets import BUK_MOUTH_OFFSETS
+from sim.arsenal import BUK_AGILE, BUK_LONG, BUK_TEL
 from sim.sam import SamMissile
 from world.combat import CombatWorld
 from world.combat_config import CombatConfig
@@ -86,6 +87,23 @@ def test_buk_battery_builds_and_radar_joins_net():
     # The 9S36 radar joined the player net.
     assert any("9s36" in getattr(r, "radar_id", "")
                for r in cw.radar_net.radars)
+
+
+def test_buk_tubes_use_six_distinct_visible_model_mouths():
+    cw = CombatWorld(CombatConfig(seed=1337, n_buk=1))
+    launcher = cw._buk_launcher_positions[0]
+    offsets = [tube["pos"] - launcher for tube in cw._buk_tubes]
+
+    assert len(offsets) == BUK_TEL.tubes == len(BUK_MOUTH_OFFSETS) == 6
+    for actual, expected in zip(offsets, BUK_MOUTH_OFFSETS):
+        assert np.allclose(actual, expected)
+    assert len({tuple(np.round(offset, 6)) for offset in offsets}) == 6
+
+    target = _air_entity(cw)
+    track_id = _inject_air_track(cw, target)
+    expected_launch_pos = cw._buk_tubes[0]["pos"].copy()
+    missile = cw.launch_buk(track_id)
+    assert np.allclose(missile.pos, expected_launch_pos)
 
 
 def test_buk_battery_does_not_trip_lose_condition():

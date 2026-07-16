@@ -15,9 +15,10 @@ Normative sources (constants cite these, do not re-derive from vibes):
 LOCKED conventions:
   * Ship-local frame == Ship.obb(): +Z bow, +Y up, +X starboard.  Grid rows
     use the research doc's units — z0/z1 as LENGTH FRACTIONS stern(0)->bow(1),
-    y0/y1 vs the WATERLINE where y<0 scales by HULL_DRAFT (y=-1 keel) and
-    y>=0 scales by ship.height/Y_TOP_FRAC (y=Y_TOP_FRAC masthead), x as a
-    half-beam fraction.
+    y0/y1 vs the WATERLINE where y<0 scales by the hull's draft (y=-1 keel)
+    and y>=0 scales by ship.height/Y_TOP_FRAC (y=Y_TOP_FRAC masthead), x as
+    half-beam fractions. Seven-field rows are centered on x=0; optional
+    eight-field rows add x_center before x_half for asymmetric modules.
   * This module is consulted ONLY when the world runs
     damage_model == "subsystem" (world/combat_config.py).  The legacy
     hp -= 1 path in sim/damage.py is byte-identical when it is off.
@@ -43,7 +44,7 @@ from sim.ships import (BURN_TIME, HULL_DRAFT, ST_ALIVE, ST_BURNING,
 _EPS = 1e-12
 
 # --- Grid vertical convention -------------------------------------------------
-# Research grids give y as: -1.0 = keel (== -HULL_DRAFT), 0 = waterline,
+# Research grids give y as: -1.0 = keel (== ship draft), 0 = waterline,
 # +Y_TOP_FRAC = masthead (== ship.height above the waterline).
 Y_TOP_FRAC = 1.4
 
@@ -156,43 +157,100 @@ def fireball_radius_m(w_tnt_kg: float) -> float:
     return 3.5 * max(0.0, w_tnt_kg) ** (1.0 / 3.0)
 
 
-# --- Module grids (research doc RECOMMENDED GRID, transcribed verbatim) --------
-# Row: (name, z0, z1, y0, y1, x_half, effect_kind)
+# --- Module grids ---------------------------------------------------------------
+# Legacy row: (name, z0, z1, y0, y1, x_half, effect_kind)
+# Offset row: (name, z0, z1, y0, y1, x_center, x_half, effect_kind)
+# x_center/x_half are fractions of HALF the ship beam. Keeping the original
+# seven-field form valid avoids invalidating existing research grids while
+# allowing real off-centre structures such as a carrier island.
 BURKE_GRID = [
-    ("vls_aft_64",    0.60, 0.70, -0.15, 0.15, 0.35, "vls"),
-    ("vls_fwd_32",    0.72, 0.80, -0.15, 0.15, 0.30, "vls"),
+    # Rebuilt mesh: aft field centred at z=-27 m, forward at z=+40 m.
+    ("vls_aft_64",    0.305, 0.347, 0.24, 0.29, 0.55, "vls"),
+    ("vls_fwd_32",    0.737, 0.779, 0.24, 0.29, 0.30, "vls"),
     ("mer2_port",     0.30, 0.42, -1.00, 0.00, 0.60, "propulsion"),
     ("aux2",          0.42, 0.48, -0.90, -0.20, 0.50, "propulsion"),
     ("mer1_stbd",     0.48, 0.58, -1.00, 0.00, 0.60, "propulsion"),
     ("aux1_gtg",      0.58, 0.63, -0.90, -0.20, 0.50, "propulsion"),
-    ("spy_fwd",       0.68, 0.74, 0.50, 0.90, 0.50, "sensors"),
-    ("spy_aft",       0.55, 0.60, 0.60, 1.00, 0.50, "sensors"),
-    ("mast",          0.60, 0.66, 0.90, 1.40, 0.15, "sensors"),
-    ("bridge",        0.70, 0.75, 0.55, 0.75, 0.30, "c2"),
-    ("cic",           0.66, 0.74, 0.05, 0.30, 0.40, "c2"),
+    # Four SPY faces sit at z=2.7/17.3 m and x=+-7.3 m on the rebuilt house.
+    # The broad symmetric boxes cover each port/starboard pair; the narrow
+    # mast remains a separate high sensor volume at z=14 m.
+    ("spy_fwd",       0.594, 0.629, 0.35, 0.53, 1.00, "sensors"),
+    ("spy_aft",       0.500, 0.535, 0.35, 0.53, 1.00, "sensors"),
+    ("mast",          0.58, 0.61, 0.83, 1.40, 0.45, "sensors"),
+    ("bridge",        0.60, 0.66, 0.49, 0.76, 0.72, "c2"),
+    ("cic",           0.50, 0.64, 0.05, 0.50, 0.70, "c2"),
     ("hangar",        0.18, 0.30, 0.10, 0.45, 0.50, "aviation"),
     ("fuel_f76",      0.25, 0.65, -1.00, -0.30, 0.90, "fire"),
 ]
 
 TICO_GRID = [
-    ("vls_aft_61",    0.20, 0.30, -0.15, 0.15, 0.35, "vls"),
-    ("vls_fwd_61",    0.72, 0.82, -0.15, 0.15, 0.35, "vls"),
+    # Rebuilt Ticonderoga mesh: VLS fields at z=-50/+53.5 m on the 6.7 m
+    # weather deck. The damage frame's +28 m top makes that y=.33-.34.
+    ("vls_aft_61",    0.190, 0.232, 0.30, 0.37, 0.45, "vls"),
+    ("vls_fwd_61",    0.789, 0.830, 0.30, 0.37, 0.45, "vls"),
     ("er_aft",        0.34, 0.46, -1.00, 0.00, 0.60, "propulsion"),
     ("er_fwd",        0.52, 0.64, -1.00, 0.00, 0.60, "propulsion"),
-    ("spy_fwd",       0.66, 0.72, 0.50, 0.90, 0.50, "sensors"),
-    ("spy_aft",       0.28, 0.34, 0.50, 0.90, 0.50, "sensors"),
-    ("bridge",        0.68, 0.74, 0.55, 0.80, 0.30, "c2"),
+    ("spy_fwd",       0.630, 0.660, 0.49, 0.70, 0.90, "sensors"),
+    ("spy_aft",       0.340, 0.370, 0.46, 0.68, 0.90, "sensors"),
+    ("bridge",        0.578, 0.734, 0.32, 0.86, 0.82, "c2"),
+    ("mast_fwd",      0.578, 0.607, 0.79, 1.40, 0.55, "sensors"),
+    ("mast_aft",      0.345, 0.376, 0.75, 1.27, 0.60, "sensors"),
+    ("hangar",        0.268, 0.408, 0.32, 0.83, 0.82, "aviation"),
     ("fuel",          0.30, 0.66, -1.00, -0.30, 0.90, "fire"),
 ]
 
 NIMITZ_GRID = [
     ("reactors",      0.40, 0.60, -1.00, -0.40, 0.40, "propulsion"),
     ("jp5_fuel",      0.35, 0.65, -1.00, -0.50, 0.60, "fire"),
-    ("magazine_fwd",  0.30, 0.45, -0.90, -0.40, 0.40, "magazine"),
-    ("magazine_aft",  0.65, 0.75, -0.90, -0.40, 0.40, "magazine"),
-    ("hangar",        0.15, 0.75, 0.15, 0.45, 0.80, "aviation"),
-    ("island",        0.52, 0.62, 0.45, 1.00, 0.60, "c2"),
+    # Grid z=0 is stern and z=1 is bow; the former labels were reversed.
+    ("magazine_aft",  0.30, 0.45, -0.90, -0.40, 0.40, "magazine"),
+    ("magazine_fwd",  0.65, 0.75, -0.90, -0.40, 0.40, "magazine"),
+    ("hangar",        0.15, 0.75, 0.00, 0.24, 0.80, "aviation"),
+    # Rebuilt island: x=+27.5 m starboard on a 40 m waterline beam and
+    # z=-1..+29 m. x_center exceeds 1 because the flight deck overhangs hull.
+    ("island",        0.497, 0.587, 0.24, 1.40, 1.375, 0.40, "c2"),
     ("machinery",     0.20, 0.45, -1.00, -0.30, 0.70, "propulsion"),
+]
+
+CARGO_GRID = [
+    ("engine_room",   0.05, 0.20, -1.00, -0.10, 0.60, "propulsion"),
+    ("bridge_accom",  0.025, 0.105, 0.28, 0.95, 0.86, "c2"),
+    ("cargo_holds",   0.17, 0.80, -0.70, 0.28, 0.90, "fire"),
+]
+
+TANKER_GRID = [
+    ("engine_room",    0.02, 0.14, -1.00, -0.10, 0.62, "propulsion"),
+    ("bridge_accom",   0.025, 0.090, 0.28, 0.95, 0.80, "c2"),
+    ("cargo_tanks",    0.16, 0.88, -0.90, 0.25, 0.92, "fire"),
+    ("cargo_manifold", 0.47, 0.55, 0.12, 0.42, 0.82, "fire"),
+]
+
+WARSHIP_GRID = [
+    ("frigate_engine_aft", 0.28, 0.42, -1.00, -0.05, 0.62, "propulsion"),
+    ("frigate_engine_fwd", 0.42, 0.54, -1.00, -0.05, 0.62, "propulsion"),
+    ("frigate_vls_32",     0.737, 0.783, 0.28, 0.40, 0.42, "vls"),
+    ("frigate_bridge",     0.61, 0.70, 0.45, 0.85, 0.58, "c2"),
+    ("frigate_mast",       0.53, 0.62, 0.72, 1.40, 0.38, "sensors"),
+    ("frigate_hangar",     0.20, 0.38, 0.20, 0.55, 0.72, "aviation"),
+    ("frigate_fuel",       0.22, 0.66, -1.00, -0.30, 0.85, "fire"),
+]
+
+TRANSPORT_GRID = [
+    ("transport_engine", 0.05, 0.20, -1.00, -0.08, 0.65, "propulsion"),
+    ("well_deck",        0.00, 0.16, -0.35, 0.25, 0.62, "aviation"),
+    ("transport_hangar", 0.25, 0.47, 0.18, 0.58, 0.78, "aviation"),
+    ("transport_bridge", 0.63, 0.79, 0.50, 0.92, 0.68, "c2"),
+    ("transport_masts",  0.49, 0.69, 0.78, 1.40, 0.32, "sensors"),
+    ("transport_fuel",   0.20, 0.65, -1.00, -0.30, 0.84, "fire"),
+]
+
+LCAC_GRID = [
+    # Machinery sponsons and the control cabin are genuinely offset from the
+    # centre cargo lane; these exercise the eight-field asymmetric row form.
+    ("lcac_engine_port", 0.14, 0.82, 0.12, 0.88, -0.72, 0.18, "propulsion"),
+    ("lcac_engine_stbd", 0.14, 0.82, 0.12, 0.88, 0.72, 0.18, "propulsion"),
+    ("lcac_cabin",       0.61, 0.81, 0.46, 1.25, 0.69, 0.22, "c2"),
+    ("lcac_cushion",     0.01, 0.99, -1.00, 0.26, 1.00, "flotation"),
 ]
 
 MERCHANT_GRID = [
@@ -206,8 +264,18 @@ GRID_BY_TYPE = {
     "ground_attack_destroyer": BURKE_GRID,
     "flagship": TICO_GRID,
     "carrier": NIMITZ_GRID,
-    # merchants (cargo/tanker/warship-lane/transport) fall back to
-    # MERCHANT_GRID in grid_for().
+    "cargo": CARGO_GRID,
+    "tanker": TANKER_GRID,
+    "warship": WARSHIP_GRID,
+    "transport": TRANSPORT_GRID,
+    "lcac": LCAC_GRID,
+}
+
+# Grid presence no longer implies a naval damage-control standard: merchants
+# and the LCAC have distinct grids but retain the lighter flooding model.
+WARSHIP_TYPES = {
+    "destroyer", "aaw_destroyer", "ground_attack_destroyer", "flagship",
+    "carrier", "warship", "transport",
 }
 
 # Fraction of the SM-2/SM-6/TLAM pools stored in each VLS module (Burke:
@@ -225,8 +293,16 @@ PROP_SPEED_MULT = {
     "mer2_port": 0.5, "mer1_stbd": 0.5, "aux2": 0.8, "aux1_gtg": 0.8,
     "er_aft": 0.5, "er_fwd": 0.5, "reactors": 0.3, "machinery": 0.6,
     "engine_room": 0.0,          # a merchant's single plant: dead in water
+    "frigate_engine_aft": 0.5, "frigate_engine_fwd": 0.5,
+    "transport_engine": 0.0,
+    "lcac_engine_port": 0.5, "lcac_engine_stbd": 0.5,
 }
-_MAIN_ENGINES = {"mer2_port", "mer1_stbd", "er_aft", "er_fwd"}
+_MAIN_ENGINE_PAIRS = (
+    frozenset(("mer2_port", "mer1_stbd")),
+    frozenset(("er_aft", "er_fwd")),
+    frozenset(("frigate_engine_aft", "frigate_engine_fwd")),
+    frozenset(("lcac_engine_port", "lcac_engine_stbd")),
+)
 
 
 def grid_for(ship) -> list:
@@ -234,10 +310,56 @@ def grid_for(ship) -> list:
 
 
 def _is_warship(ship) -> bool:
-    return getattr(ship, "ship_type", "") in GRID_BY_TYPE
+    return getattr(ship, "ship_type", "") in WARSHIP_TYPES
 
 
 # --- Geometry -------------------------------------------------------------------
+
+def _ship_draft(ship) -> float:
+    """Positive per-hull draft, with the historical global as fallback."""
+    draft = float(getattr(ship, "draft", HULL_DRAFT))
+    return draft if np.isfinite(draft) and draft > 0.0 else HULL_DRAFT
+
+
+def _ship_damage_height(ship) -> float:
+    """Waterline-to-grid-top height, independent of broad collision height."""
+    height = float(getattr(ship, "damage_height", ship.height))
+    return height if np.isfinite(height) and height > 0.0 else float(ship.height)
+
+
+def _damage_obb(ship):
+    """Return the stable subsystem-local frame for a ship.
+
+    New ship implementations expose ``damage_obb``. The fallback preserves
+    older test doubles/integration objects which only provide ``obb``.
+    """
+    damage_obb = getattr(ship, "damage_obb", None)
+    return damage_obb() if damage_obb is not None else ship.obb()
+
+
+def _row_parts(row) -> tuple:
+    """Normalize legacy/offset module rows to an eight-value tuple.
+
+    Returned order is ``name,z0,z1,y0,y1,x_center,x_half,effect_kind``.
+    """
+    if len(row) == 7:
+        name, z0, z1, y0, y1, x_half, kind = row
+        return name, z0, z1, y0, y1, 0.0, x_half, kind
+    if len(row) == 8:
+        return tuple(row)
+    raise ValueError(f"module grid row must have 7 or 8 fields, got {len(row)}")
+
+
+def _hitcam_row(row) -> tuple:
+    """Seven-field projection for the existing symmetric hitcam renderer.
+
+    Simulation geometry keeps the true lateral offset.  The renderer predates
+    offset rows, so its symmetric plan-view envelope conservatively covers the
+    module until the presentation layer gains x-center support of its own.
+    """
+    name, z0, z1, y0, y1, x_center, x_half, kind = _row_parts(row)
+    return name, z0, z1, y0, y1, abs(x_center) + x_half, kind
+
 
 def segment_obb_entry(p0, p1, center, half, rot3x3):
     """Entry point of segment p0->p1 into the OBB, or None.
@@ -269,25 +391,27 @@ def local_to_grid(ship, q_local) -> tuple:
     """OBB-local meters -> (z_frac stern->bow, y_grid, x_frac half-beam).
 
     y_grid follows the research convention: negative = fraction of
-    HULL_DRAFT below the waterline, positive = fraction of
-    ship.height/Y_TOP_FRAC above it."""
+    the ship's draft below the waterline, positive = fraction of
+    the ship's damage-grid height/Y_TOP_FRAC above it."""
+    draft = _ship_draft(ship)
+    damage_height = _ship_damage_height(ship)
     half_len = ship.length * 0.5
     z_frac = (float(q_local[2]) + half_len) / ship.length
-    # The OBB's local y=0 sits (height - draft)/2 ABOVE the waterline.
-    y_wl_m = float(q_local[1]) + (ship.height - HULL_DRAFT) * 0.5
+    # The damage frame's local y=0 sits (height - draft)/2 above waterline.
+    y_wl_m = float(q_local[1]) + (damage_height - draft) * 0.5
     if y_wl_m < 0.0:
-        y_grid = y_wl_m / HULL_DRAFT
+        y_grid = y_wl_m / draft
     else:
-        y_grid = y_wl_m * Y_TOP_FRAC / ship.height
+        y_grid = y_wl_m * Y_TOP_FRAC / damage_height
     x_frac = float(q_local[0]) / (ship.beam * 0.5)
     return z_frac, y_grid, x_frac
 
 
 def _box_contains(row, z, y, x, margin=0.0) -> bool:
-    _n, z0, z1, y0, y1, xh, _k = row
+    _n, z0, z1, y0, y1, xc, xh, _k = _row_parts(row)
     return (z0 - margin <= z <= z1 + margin
             and y0 - margin <= y <= y1 + margin
-            and abs(x) <= xh + margin)
+            and abs(x - xc) <= xh + margin)
 
 
 PATH_STEP_M = 2.0          # interior damage-path sample spacing (meters)
@@ -303,22 +427,26 @@ FRAG_CONTACT_M = 4.0       # m: a frag head detonates on the first structure
 def _grid_y_to_m(ship, y_grid: float) -> float:
     """Grid vertical (research convention) -> waterline-relative meters."""
     if y_grid < 0.0:
-        return y_grid * HULL_DRAFT
-    return y_grid * ship.height / Y_TOP_FRAC
+        return y_grid * _ship_draft(ship)
+    return y_grid * _ship_damage_height(ship) / Y_TOP_FRAC
 
 
 def _box_local_m(ship, row):
     """A grid row's box as (center, half) in OBB-LOCAL meters."""
-    _n, z0, z1, y0, y1, xh, _k = row
+    _n, z0, z1, y0, y1, xc, xh, _k = _row_parts(row)
+    draft = _ship_draft(ship)
+    damage_height = _ship_damage_height(ship)
     half_len = ship.length * 0.5
     za = z0 * ship.length - half_len
     zb = z1 * ship.length - half_len
     ya = _grid_y_to_m(ship, y0)
     yb = _grid_y_to_m(ship, min(y1, Y_TOP_FRAC))
-    off = (ship.height - HULL_DRAFT) * 0.5      # waterline in local y
-    xa = xh * ship.beam * 0.5
-    center = np.array([0.0, (ya + yb) * 0.5 - off, (za + zb) * 0.5])
-    half = np.array([xa, (yb - ya) * 0.5, (zb - za) * 0.5])
+    off = (damage_height - draft) * 0.5   # waterline in damage-frame local y
+    x_center = xc * ship.beam * 0.5
+    x_half = xh * ship.beam * 0.5
+    center = np.array([x_center, (ya + yb) * 0.5 - off,
+                       (za + zb) * 0.5])
+    half = np.array([x_half, (yb - ya) * 0.5, (zb - za) * 0.5])
     return center, half
 
 
@@ -343,13 +471,15 @@ def _walk_path(ship, grid, q_entry, v_local, run_m, blast_r_m, first_only):
     reached (a diving round that crosses below the waterline floods as a
     BELOW-waterline breach no matter where it entered).  Deterministic and
     direction-agnostic."""
+    draft = _ship_draft(ship)
+    damage_height = _ship_damage_height(ship)
     n = np.linalg.norm(v_local)
     if n < _EPS:
-        return [], q_entry, float(q_entry[1] + (ship.height - HULL_DRAFT)
+        return [], q_entry, float(q_entry[1] + (damage_height - draft)
                                   * 0.5)
     d = v_local / n
     boxes = [(row, *_box_local_m(ship, row)) for row in grid]
-    off = (ship.height - HULL_DRAFT) * 0.5
+    off = (damage_height - draft) * 0.5
     half_len = ship.length * 0.5
     hit, seen = [], {}
     q_det = q_entry.copy()
@@ -357,7 +487,7 @@ def _walk_path(ship, grid, q_entry, v_local, run_m, blast_r_m, first_only):
     steps = max(1, int(run_m / PATH_STEP_M))
     for i in range(steps + 1):
         q = q_entry + d * (i * PATH_STEP_M)
-        if abs(q[2]) > half_len + 2.0 or q[1] + off < -HULL_DRAFT - 2.0:
+        if abs(q[2]) > half_len + 2.0 or q[1] + off < -draft - 2.0:
             break                        # left the hull (length or keel)
         q_det = q
         min_y_wl = min(min_y_wl, float(q[1] + off))
@@ -476,10 +606,9 @@ def _apply_module_kill(ship, st: DamageState, name: str, kind: str,
     elif kind == "propulsion":
         mult = PROP_SPEED_MULT.get(name, 0.6)
         ship.speed = float(ship.speed) * mult
-        # Every hull in the grids carries exactly TWO main plants (Burke
-        # MER1/MER2, Tico ER fwd/aft) — both dead means dead in the water.
-        if name in _MAIN_ENGINES \
-                and len(st.dead_modules & _MAIN_ENGINES) >= 2:
+        # A paired plant is dead in the water only when both halves are gone.
+        if any(name in pair and pair <= st.dead_modules
+               for pair in _MAIN_ENGINE_PAIRS):
             ship.speed = 0.0
     elif kind == "c2":
         cap = getattr(ship, "sm2_max_inflight", None)
@@ -514,19 +643,27 @@ def _catastrophe(ship, st: DamageState, effects_out, pos) -> None:
                         np.asarray(pos, dtype=np.float64).copy()))
 
 
-def resolve_hit(ship, m, impact_world, effects_out) -> None:
+def resolve_hit(ship, m, impact_world, effects_out, *, entry_world=None) -> None:
     """Apply one missile impact under the subsystem model.
 
     Caller (sim/damage.py) has already: passed the OBB test, killed the
     round, stamped forensics.  This function only damages the ship."""
     st = ensure_state(ship)
-    center, half, rot = ship.obb()
-    entry = segment_obb_entry(m.prev_pos, m.pos, center, half, rot)
-    if entry is None:                    # numerical edge: fall back to the
-        q_local = rot.T @ (np.asarray(impact_world, dtype=np.float64)
-                           - center)    # midpoint the caller already has
+    center, half, rot = _damage_obb(ship)
+    if entry_world is not None:
+        # sim.damage already selected the earliest entry across every actual
+        # compound collision volume. Convert that world point into the stable
+        # damage frame; do not try the broad hull again (deck/island/mast-only
+        # impacts may never intersect it).
+        q_local = rot.T @ (
+            np.asarray(entry_world, dtype=np.float64) - center)
     else:
-        q_local = entry[1]
+        entry = segment_obb_entry(m.prev_pos, m.pos, center, half, rot)
+        if entry is None:                # numerical edge / legacy direct call
+            q_local = rot.T @ (np.asarray(impact_world, dtype=np.float64)
+                               - center)
+        else:
+            q_local = entry[1]
     z, y, x = local_to_grid(ship, q_local)
     z = min(1.0, max(0.0, z))
 
@@ -569,7 +706,7 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
     dead_before = set(st.dead_modules)
     catastrophe = False
     for row, inside in hit_modules:
-        name, kind = row[0], row[6]
+        name, *_unused, kind = _row_parts(row)
         dose = st.module_dose.get(name, 0.0) + warhead
         st.module_dose[name] = dose
         if kind == "fire":
@@ -627,12 +764,16 @@ def resolve_hit(ship, m, impact_world, effects_out) -> None:
     # dead round like the forensics stamps; NO sim code ever does — the
     # digest contract is untouched).
     grid = grid_for(ship)
+    hitcam_grid = [_hitcam_row(row) for row in grid]
     m.hitcam = {
         "ship_type": getattr(ship, "ship_type", "ship"),
-        "grid": grid,
-        "kinds": {row[0]: row[6] for row in grid},
+        "grid": hitcam_grid,
+        "kinds": {row[0]: _row_parts(row)[-1] for row in grid},
         "dose": dict(st.module_dose),
-        "toughness": {row[0]: TOUGHNESS.get(row[6], 1.0e9) for row in grid},
+        "toughness": {
+            row[0]: TOUGHNESS.get(_row_parts(row)[-1], 1.0e9)
+            for row in grid
+        },
         "new_dead": sorted(st.dead_modules - dead_before),
         "all_dead": sorted(st.dead_modules),
         "flood": list(st.flood),
@@ -697,7 +838,9 @@ def _step_one(ship, st: DamageState, dt: float, effects_out) -> None:
     if st.fire >= COOK_I and not st.cooked_off:
         near = None
         for row in grid_for(ship):
-            if row[6] in ("vls", "magazine") and row[0] not in st.dead_modules:
+            kind = _row_parts(row)[-1]
+            if kind in ("vls", "magazine") \
+                    and row[0] not in st.dead_modules:
                 z0, z1 = row[1], row[2]
                 if z0 - COOK_Z_REACH <= st.fire_z <= z1 + COOK_Z_REACH:
                     near = row
@@ -706,7 +849,8 @@ def _step_one(ship, st: DamageState, dt: float, effects_out) -> None:
             st.cook_dwell += dt
             if st.cook_dwell >= COOK_DWELL_S:
                 n = _magazine_ammo(ship, near[0])
-                _apply_module_kill(ship, st, near[0], near[6], effects_out)
+                _apply_module_kill(
+                    ship, st, near[0], _row_parts(near)[-1], effects_out)
                 if n > 0 and cookoff_tnt_kg(n) >= COOK_SINK_TNT_KG:
                     _catastrophe(ship, st, effects_out, ship.pos)
                     return

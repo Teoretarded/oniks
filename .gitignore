@@ -6,3 +6,11 @@ sounds/*.wav
 cache/
 blackbox/
 bug_reports/
+testing_feedback/
+testing_flights/
+data/cinematic_raw/
+assets/cinematic/
+renders/
+documentation and research/02_vehicle_structure_models/renders/
+pytesttmp_*/
+tools_rwr_probe_out.txt

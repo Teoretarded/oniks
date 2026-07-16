@@ -54,9 +54,12 @@ import math
 import numpy as np
 
 from sim.aero import (ALPHA_TAX, AP_TAU_STRIKE, CL_MAX_STRIKE, QS_FLOOR,
-                      lag_gain, q_scalar)
+                      autopilot_step_scalar, lag_gain,
+                      project_perpendicular_scalar, q_scalar)
 from sim.guidance import (STEER_GAIN, STEER_MAX_A,
                           altitude_hold_accel, pn_accel)
+from sim.flight_computer import (AirframeEnvelope, FlightMode, FlightState,
+                                 MissionSnapshot, OnlineFlightComputer)
 from sim.physics import (GRAVITY, cd_from_mach_scalar, drag_force_scalar,
                          mach_scalar)
 
@@ -269,6 +272,11 @@ class StrikeMissile:
         self._thrust_tau = weapon.thrust_tau
         self._ap_x = self._ap_y = self._ap_z = 0.0  # achieved-accel lag state
         self._thrust_act = 0.0                      # spooled cruise thrust
+        fc_family = ("arm" if str(weapon.weapon_id) in ("harm", "kh31p")
+                     else "strike")
+        self._fc = OnlineFlightComputer(
+            AirframeEnvelope.from_weapon(weapon, fc_family))
+        self._fc_command = None
 
     # --- duck-type properties ------------------------------------------------
 
@@ -293,13 +301,68 @@ class StrikeMissile:
     # --- helpers -------------------------------------------------------------
 
     def _dist_to_target(self) -> float:
-        dx = self.pos[0] - self.target_x
-        dz = self.pos[2] - self.target_z
+        tx, _ty, tz = self._flight_target_point()
+        dx = self.pos[0] - tx
+        dz = self.pos[2] - tz
         return math.hypot(dx, dz)
 
     def _route_heading(self) -> float:
-        return math.atan2(self.target_x - self.pos[0],
-                          self.target_z - self.pos[2])
+        tx, _ty, tz = self._flight_target_point()
+        return math.atan2(tx - self.pos[0], tz - self.pos[2])
+
+    def _flight_target_point(self):
+        """Numeric target supplied to the entity-free flight computer."""
+        return self.target_x, self.target_y, self.target_z
+
+    def _flight_computer_step(self, dt, world):
+        tx, ty, tz = self._flight_target_point()
+        state = FlightState(
+            pos=(float(self.pos[0]), float(self.pos[1]), float(self.pos[2])),
+            vel=(float(self.vel[0]), float(self.vel[1]), float(self.vel[2])),
+            mass_kg=float(self.mass), fuel_kg=float(self.fuel),
+            thrust_actual_n=float(self._thrust_act), time_s=float(self.t))
+        surface_at_target = _surface_at(world, float(tx), float(tz))
+        is_arm = str(self.weapon.weapon_id) in ("harm", "kh31p")
+        handover_alt = (float(ty) + math.tan(math.radians(25.0))
+                        * TERMINAL_RANGE_M if is_arm else
+                        surface_at_target + float(self.weapon.cruise_alt))
+        mission = MissionSnapshot(
+            path_xz=((float(tx), float(tz)),),
+            target_y_m=float(ty),
+            terminal_handover_alt_m=handover_alt,
+            allow_high=is_arm,
+            terminal_armed=True,
+            terminal_latched=self.phase == SPH_STRIKE_TERMINAL,
+            terminal_commit_max_m=TERMINAL_RANGE_M)
+        self._fc_command = self._fc.update(
+            dt, state, mission,
+            lambda x, z: _surface_at(world, x, z))
+        return self._fc_command
+
+    def _online_midcourse_guidance(self, speed: float, vx: float,
+                                   vy: float, vz: float, dt: float,
+                                   world) -> tuple:
+        """Follow the cached online plan with the 120 Hz inner loop."""
+        gx, gz = _steer_scalar(vx, vz, self._route_heading())
+        gy = 0.0
+        command = self._fc_command
+        if command is None:
+            command = self._flight_computer_step(dt, world)
+
+        hspeed = math.hypot(vx, vz)
+        if speed > 1e-9 and hspeed > 1e-9:
+            gamma = math.atan2(vy, hspeed)
+            # FlightCommand carries kinematic path-normal acceleration;
+            # the executor supplies the normal lift needed against gravity.
+            lift_n = (command.path_normal_accel_mps2
+                      + GRAVITY * math.cos(gamma))
+            nx = -vx * vy / (speed * hspeed)
+            ny = hspeed / speed
+            nz = -vz * vy / (speed * hspeed)
+            gx += nx * lift_n
+            gy += ny * lift_n
+            gz += nz * lift_n
+        return gx, gy, gz
 
     def _skim_ref(self, alt: float, vs: float, world) -> tuple:
         """AGL altitude and corrected vertical speed for terrain-following."""
@@ -318,7 +381,9 @@ class StrikeMissile:
         if self.fuel <= 0.0:
             return 0.0
         w = self.weapon
-        thrust = KP_THRUST * (w.cruise_mach - m_now) * THRUST_SCALE + drag_ff
+        target_mach = (self._fc_command.target_mach
+                       if self._fc_command is not None else w.cruise_mach)
+        thrust = KP_THRUST * (target_mach - m_now) * THRUST_SCALE + drag_ff
         thrust = min(max(thrust, 0.0), w.max_thrust)
         if self._thrust_tau > 0.0:
             # Engine spool (energy model): turbofan/turbojet thrust cannot
@@ -373,20 +438,35 @@ class StrikeMissile:
             if self._boost_elapsed >= self.weapon.booster_time:
                 self.phase = SPH_STRIKE_CLIMB
 
-        if self.phase == SPH_STRIKE_CLIMB:
-            if self._launched_above_cruise:
-                # Descending from above cruise_alt (e.g. JASSM air-drop):
-                # transition to CRUISE when we have come down to cruise_alt.
-                if alt <= self.weapon.cruise_alt * 1.5:
-                    self.phase = SPH_STRIKE_CRUISE
-            else:
-                # Climbing from below: transition when near the target altitude.
-                if alt >= CLIMB_TO_CRUISE_FRAC * self.weapon.cruise_alt:
-                    self.phase = SPH_STRIKE_CRUISE
-
-        if self.phase in (SPH_STRIKE_CLIMB, SPH_STRIKE_CRUISE):
-            if self._dist_to_target() < TERMINAL_RANGE_M:
-                self.phase = SPH_STRIKE_TERMINAL
+        if self.phase in (SPH_STRIKE_CLIMB,
+                          SPH_STRIKE_CRUISE,
+                          SPH_STRIKE_TERMINAL):
+            command = self._flight_computer_step(dt, world)
+            if self.phase != SPH_STRIKE_TERMINAL:
+                if command.mode is FlightMode.TERMINAL:
+                    self.phase = SPH_STRIKE_TERMINAL
+                elif self.phase == SPH_STRIKE_CLIMB:
+                    is_arm = str(self.weapon.weapon_id) in ("harm", "kh31p")
+                    if (is_arm and alt >= (CLIMB_TO_CRUISE_FRAC
+                                           * self.weapon.cruise_alt)):
+                        # The planner owns the loft command; once the declared
+                        # capture basket is reached, passive homing owns the
+                        # rest of the ARM flight instead of spending ramjet
+                        # fuel waiting for vertical rate to decay to zero.
+                        self.phase = SPH_STRIKE_CRUISE
+                    elif (command.mode is FlightMode.CLIMB
+                            or (self._launched_above_cruise
+                                and (command.mode is FlightMode.DESCEND
+                                     or command.prediction.corridor ==
+                                     "hold"))):
+                        # The public CLIMB stage covers altitude capture in
+                        # either direction.  A high-release ARM may elect to
+                        # hold energy first; that is still pre-cruise capture.
+                        self.phase = SPH_STRIKE_CLIMB
+                    else:
+                        self.phase = SPH_STRIKE_CRUISE
+                # Once the broad cruise stage is established, later online
+                # climb/descend corrections do not chatter the public label.
 
         # --- forces ----------------------------------------------------------
 
@@ -436,21 +516,18 @@ class StrikeMissile:
             qs = q * self.weapon.ref_area
             drag = qs * cd_from_mach_scalar(m_now)
             gx, gy, gz = self._guidance(alt, vy, speed, vx, vz, dt, world)
+            gx, gy, gz = project_perpendicular_scalar(
+                gx, gy, gz, vx, vy, vz)
             # --- energy model (sim/aero.py; plan 2026-07-05): q-limit the
             # command, lag it through the autopilot, charge the achieved
             # lift as induced drag — turning costs speed here too.
-            a_avail = qs * self._cl_max / max(self.mass, 1.0)
-            n2 = gx * gx + gy * gy + gz * gz
-            if n2 > a_avail * a_avail:
-                s = a_avail / math.sqrt(n2)
-                gx *= s
-                gy *= s
-                gz *= s
-            k = lag_gain(dt, self._ap_tau)
-            self._ap_x += (gx - self._ap_x) * k
-            self._ap_y += (gy - self._ap_y) * k
-            self._ap_z += (gz - self._ap_z) * k
-            gx, gy, gz = self._ap_x, self._ap_y, self._ap_z
+            gx, gy, gz = autopilot_step_scalar(
+                gx, gy, gz, self._ap_x, self._ap_y, self._ap_z,
+                dt=dt, tau=self._ap_tau, q=q,
+                ref_area=self.weapon.ref_area, mass=max(self.mass, 1.0),
+                cl_max=self._cl_max,
+                structural_limit=self.weapon.max_g * GRAVITY)
+            self._ap_x, self._ap_y, self._ap_z = gx, gy, gz
             lift = self.mass * math.sqrt(gx * gx + gy * gy + gz * gz)
             drag += self._k_ind * lift * lift / max(qs, QS_FLOOR)
             # Booster still running during CLIMB (VLS after pitch-over).
@@ -513,43 +590,14 @@ class StrikeMissile:
         Called for CLIMB, CRUISE, and TERMINAL phases."""
         w = self.weapon
 
-        if self.phase == SPH_STRIKE_CLIMB:
-            gx, gz = _steer_scalar(vx, vz, self._route_heading())
-            if self._launched_above_cruise:
-                # Air-launched from above cruise alt: descend at a gentle,
-                # controlled DESCENT_SINK_RATE.  The PD reaches equilibrium
-                # when kp * offset == kd * sink, so the commanded point
-                # must sit offset = sink * kd / kp BELOW the current
-                # altitude to realize the wanted sink (a fixed `alt - 30`
-                # offset only delivered kp/kd * 30 ~ 9.5 m/s — measured by
-                # the 5b probes: a JASSM released at its 150 km gate
-                # arrived TERMINAL still kilometres high and dove into
-                # the sea short of every target).  30 m/s on a ~250 m/s
-                # cruise is a ~7 deg glide — no 4G dive.
-                DESCENT_SINK_RATE = 30.0   # m/s realized sink rate
-                target_alt = max(w.cruise_alt,
-                                 alt - DESCENT_SINK_RATE
-                                 * CRUISE_ALT_KD / CRUISE_ALT_KP)
-                gy = altitude_hold_accel(alt, vs, target_alt,
-                                         CRUISE_ALT_KP, CRUISE_ALT_KD,
-                                         CRUISE_ALT_MAX_A) + GRAVITY
-            else:
-                # Climbing from below: altitude-hold pulls up to cruise_alt.
-                gy = altitude_hold_accel(alt, vs, w.cruise_alt,
-                                         CRUISE_ALT_KP, CRUISE_ALT_KD,
-                                         CRUISE_ALT_MAX_A) + GRAVITY
-
-        elif self.phase == SPH_STRIKE_CRUISE:
-            gx, gz = _steer_scalar(vx, vz, self._route_heading())
-            # Terrain-following: hold cruise_alt AGL.
-            agl, agl_vs = self._skim_ref(alt, vs, world)
-            gy = altitude_hold_accel(agl, agl_vs, w.cruise_alt,
-                                     CRUISE_ALT_KP, CRUISE_ALT_KD,
-                                     CRUISE_ALT_MAX_A) + GRAVITY
+        if self.phase in (SPH_STRIKE_CLIMB, SPH_STRIKE_CRUISE):
+            gx, gy, gz = self._online_midcourse_guidance(
+                speed, vx, vs, vz, dt, world)
 
         elif self.phase == SPH_STRIKE_TERMINAL:
+            tx, ty, tz = self._flight_target_point()
             if (self._dist_to_target() > TERMINAL_COMMIT_RANGE_M
-                    or alt < self.target_y):
+                    or alt < ty):
                 # Stage 1: stay on the terrain-following deck — the armed
                 # round still rides the terrain over any ridge between it
                 # and the target (see TERMINAL_COMMIT_RANGE_M).  The
@@ -572,9 +620,7 @@ class StrikeMissile:
                 # Stage 2: committed — PN on the target point (target_y =
                 # aim altitude ASL; structure shots pass the OBB mid-height,
                 # see __init__ doc).
-                tgt_pos = np.array(
-                    [self.target_x, self.target_y, self.target_z],
-                    dtype=np.float64)
+                tgt_pos = np.array([tx, ty, tz], dtype=np.float64)
                 a = pn_accel(self.pos, self.vel, tgt_pos, np.zeros(3))
                 gx = float(a[0])
                 gy = float(a[1]) + GRAVITY
@@ -684,28 +730,22 @@ class HarmMissile(StrikeMissile):
             return self._aim_pos + self._miss_offset
         return self._aim_pos
 
+    def _flight_target_point(self):
+        """Current live/degraded ARM aim supplied to planning and steering."""
+        aim = self._aim_point()
+        return float(aim[0]), float(aim[1]), float(aim[2])
+
     # --- override guidance ---------------------------------------------------
 
     def _guidance(self, alt: float, vs: float, speed: float,
                   vx: float, vz: float, dt: float, world) -> tuple:
-        """HARM guidance: loft during CLIMB, PN-home during CRUISE/TERMINAL."""
+        """Use online midcourse flight control, then retain terminal PN."""
         w = self.weapon
 
-        if self.phase == SPH_STRIKE_EJECT:
-            return 0.0, GRAVITY, 0.0
+        if self.phase in (SPH_STRIKE_CLIMB, SPH_STRIKE_CRUISE):
+            return super()._guidance(alt, vs, speed, vx, vz, dt, world)
 
-        if self.phase == SPH_STRIKE_CLIMB:
-            # Loft: steer toward the aim point, climb to cruise_alt (9 km)
-            # using absolute altitude (not terrain-relative at this height).
-            aim = self._aim_point()
-            hdg = math.atan2(float(aim[0]) - self.pos[0],
-                             float(aim[2]) - self.pos[2])
-            gx, gz = _steer_scalar(vx, vz, hdg)
-            gy = altitude_hold_accel(alt, vs, w.cruise_alt,
-                                     CRUISE_ALT_KP, CRUISE_ALT_KD,
-                                     CRUISE_ALT_MAX_A) + GRAVITY
-
-        elif self.phase in (SPH_STRIKE_CRUISE, SPH_STRIKE_TERMINAL):
+        if self.phase == SPH_STRIKE_TERMINAL:
             # PN homing on aim point (stationary ground target).
             aim = self._aim_point().copy()
             a = pn_accel(self.pos, self.vel, aim, np.zeros(3))
@@ -721,19 +761,7 @@ class HarmMissile(StrikeMissile):
                 gy *= k
                 gz *= k
             return gx, gy, gz
-
-        else:
-            return 0.0, GRAVITY, 0.0
-
-        # G-limiter for CLIMB branch.
-        gmax = w.max_g * GRAVITY
-        n2 = gx * gx + gy * gy + gz * gz
-        if n2 > gmax * gmax:
-            k = gmax / math.sqrt(n2)
-            gx *= k
-            gy *= k
-            gz *= k
-        return gx, gy, gz
+        return 0.0, GRAVITY, 0.0
 
     # --- proximity fuse ------------------------------------------------------
 
@@ -768,7 +796,7 @@ class HarmMissile(StrikeMissile):
             return True
         return False
 
-    # --- override update to add fuse and phase correction -------------------
+    # --- override update to add fuse -----------------------------------------
 
     def update(self, dt: float, world) -> None:
         if not self.alive:
@@ -783,14 +811,6 @@ class HarmMissile(StrikeMissile):
         # Proximity fuse check after integration.
         if self.alive:
             self._fuse_check()
-
-        # CRUISE -> TERMINAL: inside TERMINAL_RANGE_M of the aim point.
-        if self.alive and self.phase == SPH_STRIKE_CRUISE:
-            aim = self._aim_point()
-            dx = float(aim[0]) - float(self.pos[0])
-            dz = float(aim[2]) - float(self.pos[2])
-            if math.hypot(dx, dz) < TERMINAL_RANGE_M:
-                self.phase = SPH_STRIKE_TERMINAL
 
 
 # ---------------------------------------------------------------------------

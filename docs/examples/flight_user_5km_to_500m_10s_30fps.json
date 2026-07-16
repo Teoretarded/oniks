@@ -1,0 +1,15 @@
+{
+  "seed": 7,
+  "fps": 30,
+  "name": "user_5km_to_500m_10s_30fps",
+  "segments": [
+    {
+      "sec": 10.0,
+      "from": {"cluster_offset": [-3535.5339059, 0.0, -3535.5339059]},
+      "to": {"cluster_offset": [-353.5533906, 0.0, -353.5533906]},
+      "ease": "linear",
+      "look": "cluster",
+      "roll_deg": [0.0, 0.0]
+    }
+  ]
+}

@@ -294,7 +294,14 @@ class SandboxControls:
         elif action == "map_layout":
             sandbox.toggle_map_layout()
         elif action == "launch_cinema":
-            sandbox.toggle_launch_cinema()
+            # F5 is contextual: in the 3-D chase view it inspects the
+            # followed missile's real planner.  On the tactical map it keeps
+            # its existing launch-cinema job, so one toggle cannot disturb
+            # the other.
+            if not sandbox.map_open:
+                sandbox.toggle_flight_computer_debug()
+            else:
+                sandbox.toggle_launch_cinema()
         elif action == "controls_overlay":  # reserved: always F1
             sandbox.toggle_controls_overlay()
 

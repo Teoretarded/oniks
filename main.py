@@ -59,13 +59,17 @@ class App:
         # per-battle ledger JSONL.  Hidden windows are batch tools
         # (smoke/perf/screenshot harnesses) — they stay disk-silent.
         self.blackbox_dir = None if hidden else "blackbox"
-        self.bug_shot_path = None           # F3: bug-report screenshot dest
+        # Clean pre-overlay capture destination shared by combat bug reports
+        # and the hidden testing lab's asset feedback sheet.
+        self.bug_shot_path = None
         self.running = True                 # cleared by QUIT / menu QUIT
         self.keybinds = Keybinds()          # persisted action->key table
         from game.ui_prefs import UiPrefs
         self.ui_prefs = UiPrefs()           # map layout / launch cinema
         self.states = StateMachine()
         self.sandbox = None                 # live game session (RESUME target)
+        self.testing_lab = None             # hidden F3 menu inspection session
+        self._cinematic = None              # cinematic walkabout (lab tab)
         self.campaign = None                # CampaignState (lazily loaded)
         self.campaign_battle = False        # True while playing a campaign battle
         self.menu = MenuState(self)
@@ -98,6 +102,42 @@ class App:
         self.paused = False
         self.sandbox = SandboxWarState(self)
         self.states.switch(self.sandbox)
+
+    def open_testing_lab(self) -> None:
+        """Raw F3 on the main menu: enter the hidden asset inspection lab."""
+        from game.testing_lab import TestingLabState
+        self._draw_loading_frame("BUILDING TEST CHAMBER...")
+        if self.testing_lab is not None:
+            self.testing_lab.dispose()
+        self.paused = False
+        self.testing_lab = TestingLabState(self)
+        self.states.switch(self.testing_lab)
+
+    def close_testing_lab(self) -> None:
+        """Return from the hidden lab and release its GPU resources."""
+        lab, self.testing_lab = self.testing_lab, None
+        self.states.switch(self.menu)
+        if lab is not None:
+            lab.dispose()
+
+    def open_cinematic(self, scene_dir: str) -> None:
+        """Lab CINEMATIC tab: enter a baked real-world walkabout scene.
+        The lab stays alive behind it — ESC in the scene returns there."""
+        from game.cinematic import CinematicState
+        self._draw_loading_frame("SURVEYING TERRAIN...")
+        if self._cinematic is not None:
+            self._cinematic.dispose()
+        self.paused = False
+        self._cinematic = CinematicState(self, scene_dir)
+        self.states.switch(self._cinematic)
+
+    def close_cinematic(self) -> None:
+        """ESC in a cinematic scene: back to the lab (or the menu)."""
+        cine, self._cinematic = self._cinematic, None
+        self.states.switch(self.testing_lab if self.testing_lab is not None
+                           else self.menu)
+        if cine is not None:
+            cine.dispose()
 
     def open_combat_setup(self) -> None:
         """Menu COMBAT item: the two-page setup screen (World/Armory) before
@@ -150,9 +190,8 @@ class App:
             self.sandbox.world.apply_initial_state(st)
         self.campaign_battle = True
 
-    def _draw_loading_frame(self) -> None:
-        """One immediate 'BUILDING WORLD...' frame so the SANDBOX click never
-        reads as a hang while terrain/models/audio construct (~2 s)."""
+    def _draw_loading_frame(self, message: str = "BUILDING WORLD...") -> None:
+        """Show one immediate frame before an expensive world/asset build."""
         from OpenGL import GL as gl
         from engine.text import HEADER_SIZE
         from game.states import ACCENT, BG0
@@ -160,7 +199,7 @@ class App:
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         text = self.ui_text()
         w, h = self.window.size()
-        msg = "BUILDING WORLD..."
+        msg = message
         tw = text.text_width(msg, HEADER_SIZE)
         text.draw_text((w - tw) * 0.5, (h - 28) * 0.5, msg, ACCENT, HEADER_SIZE)
         text.flush(w, h)
@@ -219,8 +258,8 @@ class App:
                 self.screenshot_requested = False
                 print(f"[main] saved {self._save_screenshot()}")
             if self.bug_shot_path:
-                # F3 bug report: the just-rendered frame into the report
-                # folder (same back-buffer read as F2).
+                # Annotated report: save the clean just-rendered frame before
+                # the report overlay appears (same back-buffer read as F2).
                 path, self.bug_shot_path = self.bug_shot_path, None
                 try:
                     pygame.image.save(

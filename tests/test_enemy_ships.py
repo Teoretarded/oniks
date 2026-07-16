@@ -269,10 +269,9 @@ def test_sm2_reload_timer_counts_down():
 # ---------------------------------------------------------------------------
 
 def test_obb_uses_destroyer_dimensions():
-    from sim.ships import HULL_DRAFT
     d = Destroyer("dd20", (0.0, 100_000.0))
     spec = SHIP_TYPES["destroyer"]
     center, half, rot = d.obb()
-    assert np.allclose(half, [spec["beam"] / 2,
-                               (spec["height"] + HULL_DRAFT) / 2,
+    assert np.allclose(half, [d.collision_beam / 2,
+                               (d.collision_height + d.draft) / 2,
                                spec["length"] / 2])

@@ -41,8 +41,76 @@ LIST_MAX = np.radians(35.0)       # final list (roll about the keel) while sinki
 LIST_RAMP_TIME = 25.0             # s to ramp from 0 to full list
 SINK_RATE = 1.2                   # m/s downward while sinking
 SINK_GONE_TIME = 60.0             # s of sinking before the wreck is removed
-HULL_DRAFT = 5.0                  # m of hull below the waterline (OBB extends
-                                  #  down to it so waterline strikes register)
+HULL_DRAFT = 5.0                  # legacy/fallback draft for unknown hull types
+
+# Rebuilt meshes use the waterline as model-space y=0.  Keep three vertical
+# concepts separate: visible draft, the top of the broad hull collision box,
+# and the top used by the subsystem grid.  Tall, narrow fittings are represented
+# by compound boxes instead of inflating the whole hull into empty air.
+SHIP_DRAFT_BY_TYPE = {
+    "cargo": 2.0,
+    "tanker": 2.0,
+    "warship": 2.0,
+    "transport": 2.0,
+    "lcac": 1.0,
+    "destroyer": 6.0,
+    "aaw_destroyer": 6.0,
+    "ground_attack_destroyer": 6.0,
+    "flagship": 5.0,
+    "carrier": 9.0,
+}
+
+SHIP_COLLISION_TOP_BY_TYPE = {
+    "warship": 7.5,
+    "transport": 9.2,
+    "lcac": 4.6,
+    "flagship": 6.8,
+    "carrier": 7.5,
+}
+
+SHIP_COLLISION_BEAM_BY_TYPE = {
+    "carrier": 40.84,
+}
+
+SHIP_DAMAGE_TOP_BY_TYPE = {
+    "warship": 28.22,
+    "transport": 36.25,
+    "lcac": 4.6,
+    "destroyer": 39.427433,
+    "aaw_destroyer": 39.427433,
+    "ground_attack_destroyer": 39.427433,
+    "flagship": 28.0,
+    "carrier": 48.6,
+}
+
+# Additional visible volumes in waterline-relative ship-local coordinates.
+# These boxes cover only rebuilt superstructures/fittings above the broad hull.
+_EXTRA_LOCAL_HIT_BOXES = {
+    "warship": (
+        ((0.0, 8.2, 0.0), (9.2, 1.2, 74.0)),
+        ((0.0, 11.0, 16.0), (6.6, 4.3, 15.6)),
+        ((0.0, 21.7, 10.0), (3.7, 6.6, 3.8)),
+        ((0.0, 13.2, -2.0), (2.7, 2.7, 3.8)),
+        ((0.0, 10.0, -31.5), (6.7, 3.7, 13.0)),
+        ((0.0, 9.0, 58.5), (2.2, 2.0, 7.0)),
+    ),
+    "transport": (
+        ((0.0, 14.7, 28.0), (12.7, 8.7, 29.2)),
+        ((0.0, 29.2, 25.0), (3.7, 7.1, 3.7)),
+        ((0.0, 28.7, 5.0), (3.7, 6.6, 3.7)),
+        ((0.0, 11.3, -21.0), (12.7, 4.2, 14.5)),
+    ),
+    "flagship": (
+        ((0.0, 8.0, 0.0), (8.4, 1.6, 85.0)),
+        ((0.0, 11.8, 27.0), (7.0, 5.5, 14.0)),
+        ((0.0, 11.5, -28.0), (7.0, 5.3, 12.5)),
+        ((0.0, 22.0, 16.0), (4.8, 6.1, 1.5)),
+        ((0.0, 20.1, -24.0), (4.5, 5.5, 1.4)),
+        ((0.0, 10.4, -1.5), (2.6, 4.1, 10.2)),
+        ((0.0, 9.0, 74.0), (2.2, 2.7, 9.0)),
+        ((0.0, 9.0, -65.0), (2.2, 2.7, 8.0)),
+    ),
+}
 
 
 class Ship:
@@ -55,6 +123,7 @@ class Ship:
         self.length = spec["length"]
         self.beam = spec["beam"]
         self.height = spec["height"]
+        self._configure_type_hit_geometry()
         self.speed = spec["speed"]
         self.hp = spec["hp"]
         self.state = ST_ALIVE
@@ -62,12 +131,6 @@ class Ship:
         self.burn_timer = BURN_TIME
         self.sink_elapsed = 0.0
         self.list_angle = 0.0     # rad, roll about the keel while sinking
-        # Bounding-sphere reach of the hull OBB about ship.pos: half diagonal
-        # plus the box-center offset (damage.py's pair prefilter, Task 22).
-        self.hit_reach = (0.5 * math.sqrt(
-            self.beam ** 2 + (self.height + HULL_DRAFT) ** 2 + self.length ** 2)
-            + 0.5 * (self.height - HULL_DRAFT))
-
         # Position interpolated along the lane polyline at fraction lane_t0 of
         # its total arc length; heading along the lane in the travel direction.
         self._pts = np.asarray(lane_pts, dtype=np.float64).reshape(-1, 2)
@@ -84,6 +147,10 @@ class Ship:
         d = seg[i] * self.direction
         self.heading = float(np.arctan2(d[0], d[1]))
         self._wp = i + 1 if self.direction == 1 else i
+        # Use Ship.hit_obbs explicitly: subclass constructors may not yet have
+        # installed their final dimensions, but plain merchant/frigate extras
+        # are already valid here. Subclasses recompute after every override.
+        self._set_hit_reach(Ship.hit_obbs(self))
 
     # --- interop properties (missile seeker duck-types these) -------------------
 
@@ -158,13 +225,22 @@ class Ship:
 
     # --- hull box for hit tests ----------------------------------------------------
 
-    def obb(self):
-        """Hull box: (center(3,), half_extents(3,), rotation3x3 local->world).
+    def _configure_type_hit_geometry(self):
+        """Install vertical geometry for the current ``ship_type``/dimensions.
 
-        Local frame: +Z forward (bow), +Y up, +X starboard. The box spans the
-        full length/beam and from HULL_DRAFT below the waterline up to the
-        superstructure height; it rolls with the sinking list.
+        Subclasses which replace their type/dimensions call this once after all
+        overrides, followed by :meth:`recompute_hit_reach`.
         """
+        ship_type = self.ship_type
+        self.draft = SHIP_DRAFT_BY_TYPE.get(ship_type, HULL_DRAFT)
+        self.collision_height = SHIP_COLLISION_TOP_BY_TYPE.get(
+            ship_type, self.height)
+        self.collision_beam = SHIP_COLLISION_BEAM_BY_TYPE.get(
+            ship_type, self.beam)
+        self.damage_height = SHIP_DAMAGE_TOP_BY_TYPE.get(ship_type, self.height)
+
+    def _rotation(self):
+        """Ship-local to world rotation, including the sinking list."""
         ch, sh = np.cos(self.heading), np.sin(self.heading)
         r_head = np.array([[ch, 0.0, sh],
                            [0.0, 1.0, 0.0],
@@ -173,10 +249,70 @@ class Ship:
         r_list = np.array([[cl, -sl, 0.0],
                            [sl, cl, 0.0],
                            [0.0, 0.0, 1.0]])
-        rot = r_head @ r_list
-        half = np.array([self.beam * 0.5,
-                         (self.height + HULL_DRAFT) * 0.5,
+        return r_head @ r_list
+
+    def obb(self):
+        """Hull box: (center(3,), half_extents(3,), rotation3x3 local->world).
+
+        Local frame: +Z forward (bow), +Y up, +X starboard. The box spans the
+        full length/beam and from ``self.draft`` below the waterline up to the
+        broad collision top; it rolls with the sinking list. Narrow structure
+        above that is supplied by :meth:`hit_obbs`.
+        """
+        rot = self._rotation()
+        top = self.collision_height
+        half = np.array([self.collision_beam * 0.5,
+                         (top + self.draft) * 0.5,
                          self.length * 0.5])
-        center = self.pos + rot @ np.array([0.0, (self.height - HULL_DRAFT) * 0.5,
+        center = self.pos + rot @ np.array([0.0, (top - self.draft) * 0.5,
                                             0.0])
         return center, half, rot
+
+    def damage_obb(self):
+        """Stable local frame for subsystem grids (not a collision volume)."""
+        rot = self._rotation()
+        top = self.damage_height
+        half = np.array([self.beam * 0.5,
+                         (top + self.draft) * 0.5,
+                         self.length * 0.5])
+        center = self.pos + rot @ np.array(
+            [0.0, (top - self.draft) * 0.5, 0.0])
+        return center, half, rot
+
+    def hit_obbs(self):
+        """Return the oriented volumes used by swept weapon hit tests.
+
+        Ordinary ships retain the historical single hull box. Ship classes
+        whose visible geometry extends beyond it can override this method with
+        a compound set. :meth:`damage_obb` remains the stable ship-local frame
+        used by the subsystem damage model.
+        """
+        hull = self.obb()
+        rot = hull[2]
+        volumes = [hull]
+        for center, half in _EXTRA_LOCAL_HIT_BOXES.get(self.ship_type, ()):
+            local_center = np.asarray(center, dtype=np.float64)
+            volumes.append((
+                self.pos + rot @ local_center,
+                np.asarray(half, dtype=np.float64).copy(),
+                rot,
+            ))
+        return tuple(volumes)
+
+    def _set_hit_reach(self, volumes):
+        """Set the exact conservative sphere for a supplied OBB collection."""
+        farthest = 0.0
+        signs = (-1.0, 1.0)
+        for center, half, rot in volumes:
+            local_center = rot.T @ (center - self.pos)
+            for sx in signs:
+                for sy in signs:
+                    for sz in signs:
+                        corner = local_center + half * np.array(
+                            [sx, sy, sz], dtype=np.float64)
+                        farthest = max(farthest, float(np.linalg.norm(corner)))
+        self.hit_reach = farthest
+
+    def recompute_hit_reach(self):
+        """Recompute broad-phase reach after type/dimension overrides."""
+        self._set_hit_reach(self.hit_obbs())

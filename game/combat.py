@@ -59,8 +59,12 @@ from models.common import rot_x, rot_y, rot_z
 from models.destroyer import build_destroyer
 from models.drone import build_recon_drone
 from models.fighter import build_fighter
+from models.flagship import build_flagship
 from models.jammer import build_jammer
 from models.pantsir import build_pantsir
+from models.support_assets import (build_buk_telar, build_cbr_radar,
+                                   build_corner_reflector,
+                                   build_decoy_emitter, build_swarm_pod)
 from models.structures import build_radar_station
 from sim.enemy_air import FS_GONE, FS_PARKED, FS_REARMING, Fighter, JammerAircraft
 from sim.recon import DRONE_GONE
@@ -698,6 +702,8 @@ class CombatState(SandboxState):
         # so a sim-dt clock would stretch its own life 4x).
         self.hitcam.tick(max(0.0, float(dt_real)))
         if self.forensics_open:
+            self._sync_cloud_renderer()
+            self._cloud_time += min(max(float(dt_real), 0.0), 0.05)
             self.controls.update(dt_real)        # free-cam still flies
             self.rig.update(dt_real, self.followed)
             audio = self.app.audio
@@ -712,6 +718,8 @@ class CombatState(SandboxState):
             self._render_bug_tail(w, h)
             return
         if self._end_overlay is not None:
+            self._sync_cloud_renderer()
+            self._cloud_time += min(max(float(dt_real), 0.0), 0.05)
             self.controls.update(dt_real)        # free-cam still flies
             self.rig.update(dt_real, self.followed)
             audio = self.app.audio
@@ -729,6 +737,10 @@ class CombatState(SandboxState):
             w, h = self.window.size()
             self.hitcam.draw(w, h)
             self.text.flush(w, h)
+        w, h = self.window.size()
+        if self.map_open:
+            self._draw_map_rail(w, h)
+        self._render_bug_tail(w, h)
 
     def effective_time_scale(self) -> float:
         """Sandbox scale, slowed to the cinematic rate while the X-ray hit
@@ -737,10 +749,6 @@ class CombatState(SandboxState):
         if self.hitcam.active:
             return min(scale, SLOWMO_SCALE)
         return scale
-        w, h = self.window.size()
-        if self.map_open:
-            self._draw_map_rail(w, h)
-        self._render_bug_tail(w, h)
 
     def _draw_map_rail(self, w: int, h: int) -> None:
         """Side-rail DEBRIEF button on the tactical-map screen — docked on
@@ -774,6 +782,7 @@ class CombatState(SandboxState):
         # Registered into the shared dict so _draw_ships picks it up by
         # ship_type and dispose() frees it with the other ship meshes.
         self._ship_meshes["destroyer"] = Mesh(build_destroyer())
+        self._ship_meshes["flagship"] = Mesh(build_flagship())
         self._ship_meshes["carrier"] = Mesh(build_carrier())
         self._mesh_drone = Mesh(build_recon_drone())
         self._mesh_fighter = Mesh(build_fighter())
@@ -787,6 +796,11 @@ class CombatState(SandboxState):
         # ground units guarding the base).  One shared mesh drawn at each
         # unit's terrain-pinned position in _draw_pantsirs.
         self._mesh_pantsir = Mesh(build_pantsir())
+        self._mesh_buk = Mesh(build_buk_telar())
+        self._mesh_swarm_pod = Mesh(build_swarm_pod())
+        self._mesh_cbr = Mesh(build_cbr_radar())
+        self._mesh_decoy = Mesh(build_decoy_emitter())
+        self._mesh_corner_reflector = Mesh(build_corner_reflector())
         # Enemy airfield: drawn like the land sites (appended into
         # _site_draws so the base _draw_scene renders it and dispose()
         # frees it with the other site meshes). The structure's pos is
@@ -812,6 +826,11 @@ class CombatState(SandboxState):
         self._mesh_awacs.delete()
         self._mesh_jammer.delete()
         self._mesh_pantsir.delete()
+        self._mesh_buk.delete()
+        self._mesh_swarm_pod.delete()
+        self._mesh_cbr.delete()
+        self._mesh_decoy.delete()
+        self._mesh_corner_reflector.delete()
         super().dispose()
 
     # ------------------------------------------------------------- platform
@@ -846,20 +865,24 @@ class CombatState(SandboxState):
         as a hulk (base structures do the same — destruction visuals are
         Phase-7 polish), but their radar has already gone dark in the sim.
 
-        M5/M4 stand-ins: the Buk TELAR draws the erected S-300 TEL mesh and
-        a swarm pod the horizontal Bastion TEL truck at their sim positions —
-        an armed battery the camera anchors on must never be INVISIBLE
-        (dedicated meshes are the deferred model pass).  Both lists are
-        empty at defaults (byte-identical n_buk=0 / no pods)."""
+        Buk, swarm, counter-battery, and decoy structures use dedicated
+        geometry at their live world positions. Lists remain empty at the
+        default zero-count settings."""
         super()._draw_tel()
         for unit in getattr(self.world, "pantsirs", ()):
             self.renderer.draw_mesh(self._mesh_pantsir, unit.pos)
         # Live world positions (NOT the init copy): a shoot-and-scoot Buk
         # must render where it actually is.
         for pos in getattr(self.world, "_buk_launcher_positions", ()):
-            self.renderer.draw_mesh(self._mesh_s300_tel, pos)
+            self.renderer.draw_mesh(self._mesh_buk, pos)
         for pos in getattr(self.world, "_swarm_pod_positions", ()):
-            self.renderer.draw_mesh(self._tel_meshes[0], pos)
+            self.renderer.draw_mesh(self._mesh_swarm_pod, pos)
+        for radar in getattr(self.world, "_cbr_radars", ()):
+            self.renderer.draw_mesh(self._mesh_cbr, radar.pos)
+        for decoy in getattr(self.world, "_decoy_emitters", ()):
+            self.renderer.draw_mesh(self._mesh_decoy, decoy.pos)
+        for reflector in getattr(self.world, "_corner_reflectors", ()):
+            self.renderer.draw_mesh(self._mesh_corner_reflector, reflector.pos)
 
     def _draw_aircraft(self) -> None:
         """The sandbox aircraft pass (none spawn in COMBAT), plus the

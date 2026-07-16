@@ -129,10 +129,11 @@ ACTIONS: tuple[ActionDef, ...] = (
     ActionDef("forensics", "FORENSICS / DEBRIEF", "SIMULATION", pygame.K_j),
     # Command-board map test (2026-07-05): F4 flips the tactical map between
     # the new BOARD layout and the CLASSIC one (persisted, the revert
-    # switch); F5 toggles the launch-cinema PiP on the map.  Both free keys.
+    # switch); F5 shows flight-computer paths in 3-D and toggles the
+    # launch-cinema PiP only while the map is open.  Both free keys.
     ActionDef("map_layout", "MAP LAYOUT BOARD/CLASSIC", "SIMULATION",
               pygame.K_F4),
-    ActionDef("launch_cinema", "LAUNCH CINEMA (MAP)", "SIMULATION",
+    ActionDef("launch_cinema", "FLIGHT PATHS / CINEMA (MAP)", "SIMULATION",
               pygame.K_F5),
     # M6 AUTO-TIME-WARP: T toggles event-aware auto pacing — the - / = ladder
     # sets the TARGET warp and the sim auto-drops to 1x on important events

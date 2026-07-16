@@ -389,6 +389,14 @@ def test_build_config_carries_map_preset(setup):
     assert cfg.map_preset == 2
 
 
+def test_world_page_exposes_and_carries_weather_preset(setup):
+    row = next(r for r in setup._rows()
+               if r.get("field") == "weather_preset")
+    assert row["label"] == "WEATHER (V2)"
+    setup._fields["weather_preset"] = 6
+    assert setup.build_config().weather_preset == 6
+
+
 # ---------------------------------------------------------------- navigation
 
 def test_nav_up_down_wraps(setup):

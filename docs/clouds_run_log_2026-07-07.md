@@ -379,3 +379,147 @@ Status: DONE_WITH_CONCERNS. The consolidation cleanup and softening pass
 improved approach metrics and restored stationary coherence, with no dead
 view-distance density structure left. The remaining concern is perf: the
 available measurement was load-contaminated and still far over budget.
+
+## Round 9 - approach pop/dropout audit
+
+User-directed probe added:
+`docs/examples/flight_user_5km_to_500m_10s_30fps.json` flies from 5 km to
+500 m from the selected seed-7 cluster over 10 s at 30 fps, camera at the
+cluster center altitude and looking at the cluster.
+
+Findings:
+- Wind-off replay still showed approach-linked changes, so natural drift was
+  not the root cause.
+- LOD0 and no-jitter diagnostics did not remove the issue.
+- Disabling mist skip-ahead kept much more cloud volume visible, proving the
+  skip accelerator was jumping through small puffs during approach.
+- A hard 2x cap gave the best visual continuity but pushed the cloud pass over
+  the avg GPU budget. A 5x cap is the shipped compromise: fewer close-approach
+  dropouts while keeping the cloud GPU timer under budget on the short mist
+  gate.
+
+Final probe:
+`python -m tools.probe_cloud_flight --spec docs/examples/flight_user_5km_to_500m_10s_30fps.json`
+writes `renders/flight_user_5km_to_500m_10s_30fps_seed7.gif` and sheets 1/2.
+
+## Round 10 - render clock decoupled from sim time
+
+User screenshot/replay complaint: clouds move too fast on a 600 km map and
+small pieces morph/pop during close flight.
+
+Root cause confirmed for the fast-motion layer:
+- `SandboxState` passed `world.sim_time` into `Clouds.draw()` and cloud
+  shadow uniforms.
+- The shader drift was `18 m/s * sim_time`; any battle time-warp multiplied
+  visual weather speed.
+- Cloud shadows had the same hardcoded `18.0` drift in `engine/shaderlib.py`.
+
+Changes:
+- Added `SandboxState._cloud_time`, advanced from real render `dt_real`
+  instead of battle sim time.
+- Passed `_cloud_time` to cloud rendering and cloud shadows.
+- Reduced visual cloud wind from 18 m/s to 3 m/s.
+- Added `u_cloud_wind_ms` so terrain/ocean cloud shadows drift at the same
+  speed as the volumetric pass.
+- Updated the flight probe so a 30 fps / 10 s capture advances 10 s of cloud
+  render time, not 5 s.
+
+Verified:
+- `pytest tests/test_cloud_bake.py` -> 7 passed.
+- `python -m tools.probe_cloud_flight --spec docs/examples/flight_user_5km_to_500m_10s_30fps.json`
+  -> frame diff mean/max `0.54 / 10.49`, max component jump `3`,
+  worst mask drop `0.0775`, mask start/end `0.3613 / 0.3461`.
+- Wrote updated capture:
+  `renders/flight_user_5km_to_500m_10s_30fps_seed7.gif`,
+  `renders/flight_user_5km_to_500m_10s_30fps_sheet1.png`,
+  `renders/flight_user_5km_to_500m_10s_30fps_sheet2.png`.
+- `python -m tools.perf_clouds 120 --mist` -> cloud pass inside budget
+  at `2.55 / 4.06 ms`, but TOTAL still fails at `19.48 ms` vs `16.0 ms`.
+
+Verdict:
+- Fast weather drift was a real code bug, not a raymarching problem.
+- The remaining small-cloud pop/morphing is architectural/tuning debt: the
+  current density field lets close-range detail become disconnected cloud
+  pieces instead of stable large cloud masses with shaded sub-detail.
+
+## Round 11 - Cloud V2 weather system completion (2026-07-10)
+
+Cloud V2 now replaces the camera-dependent legacy density with seeded lower,
+upper, cirrus, occupancy, and shadow fields. The 196.608 km density geography,
+seed-specific base/top/shear controls, rotated storm cells, displaced anvils,
+runtime 3D erosion, exact empty-cell traversal, temporal depth rejection, and
+depth-aware reconstruction address the repeated stamps, distant blocks,
+camera morphing, and close-edge disappearance reports. Display-space cloud
+radiance uses a soft shoulder and depth-aware storm tint instead of clipping
+thin-over-thick layers to white.
+
+The seven selectable states are CLEAR, FAIR, PARTLY CLOUDY, OVERCAST, HIGH
+CIRRUS, TOWERING CUMULUS, and THUNDERSTORM. Thunderstorm adds cloud-local rain,
+darkness, deterministic double lightning flashes, speed-of-sound-delayed
+thunder, and altitude cutoffs without changing weapon/sensor physics. V2 High
+is the new default; legacy remains selectable and the automatic failure
+fallback.
+
+Final acceptance:
+
+- Seven preset view plans plus fair/cirrus/storm altitude sweeps: 10/10 fresh
+  processes passed (`renders/cloud_acceptance_visual_final.json`).
+- Close approach: direct alpha p95 0.00441, no coverage drop, no component
+  disappearance, and exact repeat buffers.
+- Stationary real-cloud lock: 0.2299 RGB mask coverage, two components for
+  every frame, zero alpha drift/disappearance, and exact repeat buffers.
+- Storm watch: no alpha coverage loss and two detected lightning flashes;
+  brightest luminance pulse 0.1364 against the 0.08 gate.
+- Combined quantitative manifest passed all 3/3 processes:
+  `renders/cloud_acceptance_quantitative_final.json`.
+- Focused cloud/config/UI/weather regression suite passed; `compileall` and
+  `git diff --check` passed.
+
+RTX 3050 Laptop isolated cloud-pass measurements (240-frame hidden GL gate):
+legacy High 3.43 ms, V2 High 3.59 ms, V2 Ultra 5.87 ms. The strict complete
+6.94 ms frame gate still fails because the hidden full-scene harness is
+OS/load throttled; this is recorded rather than hidden. Ultra uses finer
+48-256 m occupied steps and a 70% depth-aware reconstruction target.
+
+## Round 12 - Weather Composer and independent supercells (2026-07-10)
+
+Added the Graphics/Weather Composer with atomic Apply/Cancel, quick presets,
+and independent low, mid, high, and convective selections. Custom recipes have
+stable cache identities and rebuild the live renderer/weather effects safely.
+
+Towering, supercell, and storm-line systems now bake in an independent 800 km
+domain. Severe cells use slim tilted updrafts, wall clouds, overshooting tops,
+and asymmetric trailing anvils up to roughly 22 km. The storm field was raised
+to 96×192×192 after visual inspection, while a separate temporal reconstruction
+budget keeps full-screen storms playable without reducing normal-cloud quality.
+
+Acceptance:
+
+- focused renderer/field/UI/weather suite: 53 passed; config/setup/bake/probe
+  suite: 105 passed;
+- Weather Composer GL UI screenshot rendered at 1000×760;
+- custom mixed recipe and built-in thunderstorm compiled and rendered on V2
+  High/Ultra without fallback;
+- worst-case close supercell cloud pass on RTX 3050 Laptop: High 8.5 ms,
+  Ultra 10.2 ms; normal V2 High remains about 3.5 ms;
+- close-approach repeat gate passed with zero alpha/depth mismatch; storm
+  underbelly gate passed with full cloud coverage and two lightning pulses;
+- the complete repository suite exceeded the 10-minute command timeout, so it
+  is not recorded as a pass.
+
+## Round 13 - supercell boundary disappearance fix (2026-07-10)
+
+User screenshots showed an exact screen-space cutoff after the camera crossed
+into a severe-cloud region. The cause was a 128-iteration budget counted only
+inside the conservative storm occupancy volume. Long anvil chords could spend
+that budget before reaching clouds behind them, creating a hard boundary as
+the camera entered or left an occupancy cell.
+
+Removed the storm-only cutoff; the normal global distance/step bounds and
+empty-space DDA remain. Added `flight_supercell_boundary_v2.json` and a shader
+source regression test forbidding another camera-crossing storm budget.
+
+Ultra boundary replay from outside through the storm center passed: direct
+coverage rose from 46.3% to 100%, maximum single-frame coverage drop was
+0.24%, alpha p95 change was 0.0116, and the approach gate passed. The preceding
+outside-to-edge replay also repeated with zero alpha/depth mismatch.

@@ -134,6 +134,25 @@ def test_superstructure_above_deck():
     )
 
 
+def test_vls_hatches_and_stern_flight_deck_are_visible():
+    """High-angle signatures: two real hatch fields and an aft landing mark."""
+    md = _mesh()
+    dark = np.all(np.isclose(md.vertices[:, 6:9],
+                             PALETTE["aircraft_dark"], atol=1e-4), axis=1)
+    # 96 individual lids contribute 24 vertices each.
+    assert dark.sum() >= 96 * 24
+
+    white = np.all(np.isclose(md.vertices[:, 6:9],
+                              PALETTE["radar_white"], atol=1e-4), axis=1)
+    aft_mark = md.vertices[white & (md.vertices[:, 2] < -63.0)]
+    assert len(aft_mark) >= 100
+
+
+def test_no_destroyer_geometry_overhangs_bow_or_stern():
+    z = _mesh().vertices[:, 2]
+    assert z.min() >= -77.501 and z.max() <= 77.501
+
+
 def test_index_count_is_multiple_of_3():
     """All faces are triangles, so index count must be divisible by 3."""
     md = _mesh()

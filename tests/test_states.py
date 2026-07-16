@@ -46,6 +46,7 @@ class FakeApp:
         self.settings_from = []
         self.resumed = 0
         self.quit_to_menu_calls = 0
+        self.testing_lab_opens = 0
 
     def start_sandbox(self):
         self.started += 1
@@ -61,6 +62,9 @@ class FakeApp:
 
     def open_settings(self, back_to):
         self.settings_from.append(back_to)
+
+    def open_testing_lab(self):
+        self.testing_lab_opens += 1
 
     def resume(self):
         self.resumed += 1
@@ -186,6 +190,15 @@ def test_menu_escape_quits_app(kb):
     app = FakeApp(kb)
     MenuState(app).handle_event(key_event(pygame.K_ESCAPE))
     assert app.running is False
+
+
+def test_menu_f3_opens_hidden_testing_lab_without_adding_a_row(kb):
+    app = FakeApp(kb)
+    menu = MenuState(app)
+    menu.handle_event(key_event(pygame.K_F3))
+    assert app.testing_lab_opens == 1
+    assert tuple(menu.items) == MAIN_ITEMS
+    assert "TEST" not in " ".join(menu.items)
 
 
 def test_menu_freezes_sim():

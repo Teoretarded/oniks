@@ -137,6 +137,19 @@ def test_fighter_origin_near_mid(fighter):
     assert abs(z_mid) <= 2.0, f"fighter z-midpoint {z_mid:.2f} m not near 0"
 
 
+def test_fighter_tails_are_upright_and_outboard(fighter):
+    """Regression for fins that previously rotated below the fuselage."""
+    pos = fighter.vertices[:, 0:3]
+    grey = np.all(
+        np.isclose(fighter.vertices[:, 6:9], PALETTE["aircraft_grey"], atol=1e-4),
+        axis=1,
+    )
+    tips = pos[grey & (pos[:, 2] < -4.0) & (pos[:, 1] > 2.2)]
+    assert (tips[:, 0] > 0.8).any()
+    assert (tips[:, 0] < -0.8).any()
+    assert float(pos[:, 1].min()) > -1.1
+
+
 # ===========================================================================
 # EA-18G Growler escort jammer (M3-F2)
 # ===========================================================================
@@ -221,6 +234,21 @@ def test_jammer_distinct_from_awacs(jammer):
     assert float(hi[0] - lo[0]) < _AWACS_SPAN_M * 0.5, (
         "jammer span is AWACS-sized — should be a Super Hornet"
     )
+
+
+def test_jammer_uses_two_seat_canopy(jammer, fighter):
+    """EA-18G derives from the tandem-seat F/A-18F, not single-seat E."""
+    def canopy_min_z(md):
+        pos = md.vertices[:, 0:3]
+        dark = np.all(
+            np.isclose(md.vertices[:, 6:9], PALETTE["aircraft_dark"], atol=1e-4),
+            axis=1,
+        )
+        canopy = pos[dark & (pos[:, 1] > 0.80) & (np.abs(pos[:, 0]) < 0.8)]
+        assert len(canopy)
+        return float(canopy[:, 2].min())
+
+    assert canopy_min_z(jammer) < canopy_min_z(fighter) - 0.6
 
 
 # ===========================================================================
@@ -313,6 +341,22 @@ def test_awacs_origin_near_mid(awacs):
     assert abs(z_mid) <= 3.0, f"AWACS z-midpoint {z_mid:.2f} m not near 0"
 
 
+def test_awacs_fin_upright_and_tailplane_conventional(awacs):
+    """E-3/707 has an upright fin and low conventional tail, not a T-tail."""
+    pos = awacs.vertices[:, 0:3]
+    grey = np.all(
+        np.isclose(awacs.vertices[:, 6:9], PALETTE["aircraft_grey"], atol=1e-4),
+        axis=1,
+    )
+    fin = pos[grey & (np.abs(pos[:, 0]) < 0.5) &
+              (pos[:, 2] < -14.0) & (pos[:, 1] > 6.0)]
+    assert len(fin)
+
+    tailplane = pos[grey & (np.abs(pos[:, 0]) > 3.0) & (pos[:, 2] < -12.0)]
+    assert len(tailplane)
+    assert float(tailplane[:, 1].max()) < 2.0
+
+
 # ===========================================================================
 # Nimitz-class Carrier
 # ===========================================================================
@@ -374,6 +418,26 @@ def test_carrier_vertex_count(carrier):
     # is 24 verts. 10 such primitives → 240 verts minimum — allow from 200.
     assert n >= 200, f"carrier vertex count {n} suspiciously low"
     assert n <= 100_000, f"carrier vertex count {n} unreasonably high"
+
+
+def test_carrier_planform_stays_inside_reference_envelope(carrier):
+    """Regression for the old fake bow and oversized rotated deck slab."""
+    lo, hi = _bbox(carrier)
+    assert lo[2] == pytest.approx(-166.5, abs=0.02)
+    assert hi[2] == pytest.approx(166.5, abs=0.02)
+    assert (hi[0] - lo[0]) == pytest.approx(76.8, abs=0.5)
+
+
+def test_carrier_has_catapult_landing_and_elevator_markings(carrier):
+    white = np.all(np.isclose(carrier.vertices[:, 6:9],
+                              PALETTE["radar_white"], atol=1e-4), axis=1)
+    yellow = np.all(np.isclose(carrier.vertices[:, 6:9],
+                               PALETTE["container_c"], atol=1e-4), axis=1)
+    elevator = np.all(np.isclose(carrier.vertices[:, 6:9],
+                                 PALETTE["warship_deck"], atol=1e-4), axis=1)
+    assert white.sum() >= 250
+    assert yellow.sum() >= 100
+    assert elevator.sum() >= 4 * 24
 
 
 # ===========================================================================

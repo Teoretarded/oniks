@@ -138,12 +138,13 @@ from __future__ import annotations
 
 import numpy as np
 
+from models.support_assets import BUK_MOUTH_OFFSETS
 from sim.arsenal import (BASTION_K, BUK_AGILE, BUK_LONG, BUK_TEL, KALIBR_PL,
                          KH31P, N40N6, ONIKS, S300, S300_TEL, SWARM, SWARM_POD,
                          TOMAHAWK, ZIRCON)
 from sim.asbm import AsbmMissile
-from sim.bases import (DIMS_TEL as _BUK_STRUCT_DIMS, HP_S300_TEL as _BUK_STRUCT_HP,
-                       Structure, apply_missile_hits_structures)
+from sim.bases import (HP_S300_TEL as _BUK_STRUCT_HP, Structure,
+                       apply_missile_hits_structures)
 from sim.commander import (EnemyCommander, BACKPLOT_ERR_FRAC,
                            back_plot_surface)
 from sim.contacts import ContactBoard, TRACK_DROP_S, _kind_of, _size_of
@@ -246,11 +247,11 @@ BUK_RADAR_RANGES = {            # size class -> max detection range (m)
     # 'lcac' until a splash).
     "lcac":    30_000.0,
 }
-# Buk struct: same soft-skinned TEL class as the S-300 (sim/bases.py 's300_tel'
-# HP/dims), reused EXPLICITLY (_BUK_STRUCT_DIMS / _BUK_STRUCT_HP, imported at the
-# top) because 'buk_tel' is not in the locked sim/bases.py tables.  ``defeated``
+# Buk struct: same soft-skinned HP class as the S-300.  ``defeated``
 # checks only bastion_tel, so a Buk death never trips the lose condition (mirror
-# of the Pantsir / swarm-pod wrappers).
+# of the Pantsir / swarm-pod wrappers).  This compact envelope follows the
+# dedicated tracked TELAR mesh rather than the much taller S-300 launch state.
+_BUK_STRUCT_DIMS = (8.7, 4.0, 5.0)  # (Z length, X beam, Y height)
 
 # --- M5 #3 CBR counter-battery / early-warning radar (config-driven, default 0) ---
 # A fixed PLAYER ground radar sited on the home coast, just inland of the
@@ -260,13 +261,14 @@ BUK_RADAR_RANGES = {            # size class -> max detection range (m)
 # that COMPLEMENTS the 18 m station, not a second area-search radar).  The CBR
 # Radar joins radar_net (so inbound Tomahawk/JASSM/HARM tracks surface EARLIER on
 # the ContactBoard) and EMITS (honest cost: ESM-locatable + HARM-able).  The CBR
-# Structure reuses the player radar-station OBB/HP defaults; on_destroyed clears
+# Structure uses a dedicated 35 m mast/plant envelope; on_destroyed clears
 # the Radar's ``alive`` so the net coverage + the emitter feed drop the node
 # (mirror of the radar-station / Buk / Pantsir wrappers).  ``defeated`` checks
 # only bastion_tel, so a CBR death never trips the lose condition.  With n_cbr=0
 # NOTHING is built (byte-identical default battle).
 CBR_SITE_XZ = (8_000.0, -1_500.0)   # home coast, just inland of the z=0 waterline
 CBR_LAUNCHER_SPACING_M = 12.0       # side-by-side gap for multiple CBR masts
+CBR_STRUCT_DIMS = (7.5, 14.5, 35.0)  # mast, array, and offset service plant
 
 # M5 #5 ESM decoy emitter + corner-reflector decoy placement (fixed home-coast
 # emplacements, like the radar-station / CBR / Buk sites — the player's static
@@ -282,11 +284,11 @@ CBR_LAUNCHER_SPACING_M = 12.0       # side-by-side gap for multiple CBR masts
 #   biased cluster scatters the salvo onto empty dirt.
 DECOY_SITE_XZ = (20_000.0, -1_500.0)   # isolated coastal bait emitter site
 DECOY_SPACING_M = 600.0                # gap between multiple decoy masts
-DECOY_STRUCT_DIMS = (3.0, 3.0, 8.0)    # a cheap mast/cab footprint
+DECOY_STRUCT_DIMS = (2.5, 2.5, 8.1)    # a cheap mast/cab footprint
 DECOY_STRUCT_HP = 1                    # soft: one HARM/TLAM hit kills the bait
 CR_SITE_XZ = (5_000.0, -300.0)         # fake coastal battery point off the pad
 CR_SPACING_M = 1_500.0                 # gap between multiple reflector clusters
-CR_STRUCT_DIMS = (4.0, 4.0, 4.0)       # an inflatable corner-reflector cluster
+CR_STRUCT_DIMS = (4.0, 4.0, 3.2)       # a ground corner-reflector cluster
 CR_STRUCT_HP = 1                       # soft: a round into it is a satisfying waste
 DECOY_RNG_TAG = 10                     # reserved determinism tag (placement is fixed)
 
@@ -320,12 +322,12 @@ DESTROYER_SPAWNS = (
 # if generation ever changes.
 AIRFIELD_XZ = (60_000.0, 516_000.0)
 
-# Airfield OBB, Structure dims order (length=X, beam=Z, height=Y): the
+# Airfield OBB, Structure dims order (length=Z, beam=X, height=Y): the
 # models/airfield.py runway runs along +Z (2 500 m) with the taxiway,
 # hangars and tower spread ~205 m across +X; the box pads both so a
 # terminal-diving Oniks anywhere over the installation registers.  Height
 # 50 m tops the 47 m tower mast.
-AIRFIELD_DIMS = (450.0, 2_600.0, 50.0)
+AIRFIELD_DIMS = (2_600.0, 450.0, 50.0)
 
 # Airfield HP: a dispersed 2.5 km installation — cratering the runway AND
 # flattening the hangars takes several 250 kg-class warheads (spec §5.5
@@ -461,13 +463,12 @@ PANTSIR_SPAWNS = (
 # (locked file boundary); the generic TEL dims/HP default is the right
 # class, so the wrapper is built with explicit hp + dims here.
 PANTSIR_STRUCT_HP = 2
-# sim/bases.py Structure.obb reads dims as (length=X, beam=Z, height=Y).  The
+# sim/bases.py Structure.obb reads dims as (length=Z, beam=X, height=Y).  The
 # models/pantsir.py body is built with its chassis LONG axis along +Z (the
 # threat-ingress bearing the model faces; X span 3.44 m, Z span 8.19 m — the
 # Z length is LOCKED by tests/test_pantsir_model.py::test_length_approx_8m).
-# So the OBB footprint is (beam_X=3.0, length_Z=8.0): the box long side runs
-# +Z with the hull, NOT +X.  Height 4.6 m tops the turret (model Y 4.58 m).
-PANTSIR_STRUCT_DIMS = (3.0, 8.0, 4.6)   # (X beam, Z length, Y height)
+# The box therefore runs long along +Z and covers the broad arrays and gun tips.
+PANTSIR_STRUCT_DIMS = (8.4, 3.6, 5.0)  # (Z length, X beam, Y height)
 
 # --- M4-B loitering swarm pod ---------------------------------------------------
 # The bundle-launch pods sit beside the Oniks battery at the home base.  Each
@@ -478,7 +479,7 @@ PANTSIR_STRUCT_DIMS = (3.0, 8.0, 4.6)   # (X beam, Z length, Y height)
 SWARM_POD_SPACING_M = 7.0       # gap between pods, side by side
 SWARM_POD_OFFSET = (0.0, 0.0, -40.0)   # m from BASE_POS (set back from the TELs)
 SWARM_POD_STRUCT_HP = 2
-SWARM_POD_STRUCT_DIMS = (4.0, 5.0, 2.4)   # (X beam, Z length, Y height)
+SWARM_POD_STRUCT_DIMS = (4.8, 4.0, 2.4)  # (Z length, X beam, Y height)
 # Multi-axis attack spread: each round detours through its own lateral spread
 # waypoint (a different attack bearing) before converging on the shared aim
 # point — the realistic loitering-swarm geometry that splits the defender's
@@ -867,6 +868,7 @@ class CombatWorld(WorldState):
             # centre is r.pos directly.
             self.structures.append(Structure(
                 f"cbr_{i:02d}", "radar_station", np.asarray(r.pos).copy(),
+                dims=CBR_STRUCT_DIMS,
                 on_destroyed=lambda _s, _r=r: setattr(_r, "alive", False)))
         # M5 #5: one destructible Structure per DECOY emitter.  Kind "decoy" is NOT
         # in sim/bases.py's locked HP/dims tables, so dims + hp pass explicitly
@@ -1536,38 +1538,61 @@ class CombatWorld(WorldState):
         return (size_class in ("ship", "lcac") and drone is not None
                 and drone.alive and self.sar.detects(drone.pos, pos))
 
-    def _sarh_illuminator_kw(self, weapon_def, target, radar=None):
-        """R-P1 (spec PART 2 §10.2): SARH/TVM rounds get their illuminator
-        closures under the scanned model — the station's 30N6-class wedge
-        for 48N6s (``radar`` None), or a Buk TEL's own 9S36 when passed.
+    def _sarh_illuminator_kw(self, weapon_def, target, radar=None,
+                             estimate_fn=None):
+        """Build live FCR callbacks for SARH/TVM and command-guided rounds.
+
+        The position/death/EMCON dependency exists in every radar model; the
+        scanned model additionally enforces the station/TEL sector wedge.
+        The station's 30N6-class wedge serves 48N6s, while a Buk TEL's own
+        9S36 is passed explicitly.
         The chosen wedge SLEWS to this (most recent) engagement's bearing;
         earlier rounds whose targets now sit outside it lose illumination —
         one FCR paints one wedge, so multi-axis raids saturate a single
-        engagement radar (capacity emerges, no dice).  ARH/command rounds
-        and the legacy functional model get an empty dict (byte-identical
-        constructions)."""
-        if (self.radar_model != "scanned"
-                or getattr(weapon_def, "guidance", "arh") != "sarh"):
+        engagement radar (capacity emerges, no dice).  ARH rounds get no
+        launcher dependency."""
+        guidance = getattr(weapon_def, "guidance", "arh")
+        if guidance not in ("sarh", "command"):
             return {}
         eng = radar if radar is not None else self.station_engagement
-        brg = _bearing_deg(eng.pos, target.pos)
+
+        def _pos(_e=eng):
+            if _e is None or not (_e.alive and _e.emitting):
+                return None
+            return (float(_e.pos[0]), _e.antenna_alt, float(_e.pos[2]))
+
+        result = dict(illuminator_pos_fn=_pos)
+        if self.radar_model != "scanned" or eng is None:
+            return result
+
+        aim_pos = (estimate_fn()[0] if estimate_fn is not None else target.pos)
+        brg = _bearing_deg(eng.pos, aim_pos)
         if radar is None:
             self._eng_boresight_deg = brg
         else:
             eng.boresight_deg = brg          # per-TEL 9S36 slews itself
         half = eng.scan.sector_deg * 0.5
 
-        def _pos(_e=eng):
-            if not (_e.alive and _e.emitting):
-                return None
-            return (float(_e.pos[0]), _e.antenna_alt, float(_e.pos[2]))
+        target_ref = [target]
+        estimate_ref = [estimate_fn]
 
-        def _ok(_e=eng, _t=target):
+        def _ok(_e=eng, _targets=target_ref, _estimates=estimate_ref):
+            current_target = _targets[0]
+            current_estimate = _estimates[0]
+            aim = (current_estimate()[0] if current_estimate is not None
+                   else current_target.pos)
             return _ang_diff_deg(
-                _bearing_deg(_e.pos, _t.pos),
+                _bearing_deg(_e.pos, aim),
                 _e._boresight_now()) <= half
 
-        return dict(illuminator_pos_fn=_pos, illuminator_ok_fn=_ok)
+        # SamMissile.retarget updates these mutable closure cells so a
+        # retargeted SARH/command round follows the new estimate rather than
+        # silently retaining its original target's sector gate.
+        _ok._target_ref = target_ref
+        _ok._estimate_ref = estimate_ref
+
+        result["illuminator_ok_fn"] = _ok
+        return result
 
     def _player_paint_state(self, pos, size_class: str, now: float,
                             window: float):
@@ -3471,7 +3496,8 @@ class CombatWorld(WorldState):
         48N6/40N6 pools (sam_ammo / sam_ammo_40n6) are shared across all tubes,
         and each tube re-cocks on its own timer (salvo: no firerate gate)."""
         base = np.asarray(SAM_TEL_POS, dtype=np.float64)
-        mouths = [np.asarray(o, dtype=np.float64) for o in SAM_MOUTH_OFFSETS]
+        mouths = [np.asarray(o, dtype=np.float64)
+                  for o in SAM_MOUTH_OFFSETS]
         n = max(1, int(n))
         self._s300_launcher_positions = []
         self._s300_tubes = []
@@ -3547,9 +3573,12 @@ class CombatWorld(WorldState):
                      and not self._launcher_committed(t)), None)
         if tube is None:
             return None
-        m = SamMissile(weapon_def, tube["pos"].copy(), target,
-                       contact_estimate_fn=self._contact_estimate(aircraft_id),
-                       **self._sarh_illuminator_kw(weapon_def, target))
+        estimate_fn = self._contact_estimate(aircraft_id)
+        m = SamMissile(
+            weapon_def, tube["pos"].copy(), target,
+            contact_estimate_fn=estimate_fn,
+            **self._sarh_illuminator_kw(
+                weapon_def, target, estimate_fn=estimate_fn))
         self.missiles.append(m)
         tube["reload_left"] = self._s300_tube_reload_s
         if round_id == "40n6":
@@ -3592,15 +3621,16 @@ class CombatWorld(WorldState):
             return
         bx, bz = BUK_SITE_XZ
         by = terrain_height_scalar(bx, bz)
-        mouths = [np.asarray(o, dtype=np.float64) for o in SAM_MOUTH_OFFSETS]
+        mouths = [np.asarray(o, dtype=np.float64)
+                  for o in BUK_MOUTH_OFFSETS]
         for i in range(n):
             dx = (i - (n - 1) * 0.5) * BUK_LAUNCHER_SPACING_M
             lpos = np.array([bx + dx, by, bz], dtype=np.float64)
             self._buk_launcher_positions.append(lpos)
-            # Tube mouths reuse the S-300 canister offsets, clamped to the
-            # 6-tube block (the offset tuple is only a cosmetic muzzle point).
+            # The six offsets come from the dedicated Buk mesh, in the same
+            # row/column order as its visible canister rack.
             for k in range(BUK_TEL.tubes):
-                mouth = mouths[k % len(mouths)]
+                mouth = mouths[k]
                 # "tel": which TEL this tube rides — R-P1 maps a launched
                 # 9M317 onto ITS OWN 9S36 illuminator (additive key).
                 self._buk_tubes.append({"pos": lpos + mouth,
@@ -3822,11 +3852,19 @@ class CombatWorld(WorldState):
         tel_i = int(tube.get("tel", 0))
         tel_radar = (self._buk_radars[tel_i]
                      if tel_i < len(self._buk_radars) else None)
-        m = SamMissile(weapon_def, tube["pos"].copy(), target,
-                       contact_estimate_fn=self._contact_estimate(aircraft_id),
-                       **(self._sarh_illuminator_kw(weapon_def, target,
-                                                    radar=tel_radar)
-                          if tel_radar is not None else {}))
+        estimate_fn = self._contact_estimate(aircraft_id)
+        if tel_radar is None:
+            fcr_kwargs = dict(
+                illuminator_pos_fn=lambda: None,
+                illuminator_ok_fn=lambda: False)
+        else:
+            fcr_kwargs = self._sarh_illuminator_kw(
+                weapon_def, target, radar=tel_radar,
+                estimate_fn=estimate_fn)
+        m = SamMissile(
+            weapon_def, tube["pos"].copy(), target,
+            contact_estimate_fn=estimate_fn,
+            **fcr_kwargs)
         self.missiles.append(m)
         tube["reload_left"] = self._buk_tube_reload_s
         if round_id == "9m338":

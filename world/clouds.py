@@ -15,8 +15,8 @@ TWO HALVES, one module:
   before particles into the default framebuffer — depth TEST on
   (terrain/ships occlude clouds via the
   first-hit log depth), depth WRITE off, premultiplied blend,
-  ``apply_haze`` on the result.  Animation clock = SIM time (replays
-  identical), never wall clock.
+  ``apply_haze`` on the result.  Animation clock = render-time weather
+  seconds, independent of battle time-warp.
 
 Determinism guard (LOCKED): no sim module imports this file
 (tests/test_cloud_bake.py greps for offenders).
@@ -286,7 +286,7 @@ in vec2 v_ndc;
 uniform mat4 u_inv_proj_rot;      // inverse(proj * view_rot): NDC -> ray
 uniform mat4 u_proj, u_view_rot;  // forward path for the entry-point depth
 uniform vec3 u_cam_pos;           // world-space camera (noise sampling)
-uniform float u_time;             // SIM time (replay-identical drift)
+uniform float u_time;             // render weather time, not sim time
 uniform float u_cloud_base, u_cloud_top;
 uniform float u_coverage_bias;    // W-P8 preset knob (0 = baked map as-is)
 uniform float u_log_depth_fcoef;
@@ -314,7 +314,7 @@ const float SIGMA         = 0.018;    // extinction per density per metre
 const float WEATHER_TILE  = 300000.0;
 const float BASE_TILE     = 6000.0;
 const float DETAIL_TILE   = 1200.0;
-const float WIND_MS       = 18.0;     // slab drift, sim-time clocked
+const float WIND_MS       = 3.0;      // slow visual weather drift, real-time
 const float BASE_RATIO    = 2.618;
 const float BASE_BLEND    = 0.38;
 const float WARP_WEATHER_SCALE = 0.37;
@@ -473,11 +473,10 @@ void main(){
                                      // giant stride mid-cloud (black blobs)
             } else {
                 mist_run += 1;
-                // Cap 8x: unbounded doubling grew the stride past whole
-                // clouds and the entry bisection then searched a km-wide
-                // interval - near clouds shaded at random interior points
-                // (v6 sweep iteration 3, obsidian-cloud bug).
-                if (mist_run >= 8) skip_mul = min(skip_mul * 2.0, 8.0);
+                // Cap 5x: larger jumps skip through small puffs during
+                // approach shots, so cloud pieces vanish then pop back in
+                // when a later sample finally catches them.
+                if (mist_run >= 8) skip_mul = min(skip_mul * 2.0, 5.0);
             }
             if (d > 0.003){
                 if (t_hit < 0.0){
@@ -630,7 +629,7 @@ class Clouds:
                              CLOUD_FRAG.replace("__HAZE__", HAZE_GLSL))
         self.enabled = True
 
-    def draw(self, renderer, camera, sim_time: float) -> None:
+    def draw(self, renderer, camera, cloud_time: float) -> None:
         if not self.enabled:
             return
         from OpenGL.GL import (GL_BLEND, GL_CULL_FACE, GL_DEPTH_TEST, GL_ONE,
@@ -646,7 +645,7 @@ class Clouds:
                                          dtype=np.float64))
         sh.set_mat4("u_inv_proj_rot", inv)
         sh.set_vec3("u_cam_pos", camera.eye)
-        sh.set_float("u_time", float(sim_time))
+        sh.set_float("u_time", float(cloud_time))
         sh.set_float("u_cloud_base", CLOUD_BASE_M)
         sh.set_float("u_cloud_top", CLOUD_TOP_M)
         sh.set_float("u_coverage_bias", 0.0)
@@ -677,7 +676,7 @@ class Clouds:
         glDepthMask(True)
 
     def bind_shadow_uniforms(self, shader, unit: int, camera,
-                             sim_time: float, amount: float = 0.5) -> None:
+                             cloud_time: float, amount: float = 0.5) -> None:
         """Bind the mipmapped weather texture for terrain/ocean cloud shadows."""
         shader.use()
         amt = float(amount) if self.enabled else 0.0
@@ -690,7 +689,9 @@ class Clouds:
         glBindTexture(GL_TEXTURE_2D, self._t_weather)
         shader.set_int("u_cloud_weather", int(unit))
         shader.set_vec2("u_cloud_cam_xz", (camera.eye[0], camera.eye[2]))
-        shader.set_float("u_cloud_time", float(sim_time))
+        shader.set_float("u_cloud_time", float(cloud_time))
+        shader.set_vec2("u_cloud_wind_xz", (3.0, 1.05))
+        shader.set_float("u_cloud_tile_m", WEATHER_TILE_M)
         glActiveTexture(GL_TEXTURE0)
 
     def delete(self) -> None:

@@ -19,8 +19,7 @@ from sim.damage import apply_missile_hits
 from sim.damage_model import (COOK_SINK_TNT_KG, DamageState, cookoff_tnt_kg,
                               local_to_grid, resolve_hit, segment_obb_entry,
                               step_ships)
-from sim.ships import (BURN_TIME, HULL_DRAFT, ST_ALIVE, ST_BURNING,
-                       ST_SINKING, Ship)
+from sim.ships import BURN_TIME, ST_ALIVE, ST_BURNING, ST_SINKING, Ship
 from world.combat_config import CombatConfig, clamp_config
 
 DT = 1.0 / 120.0
@@ -124,7 +123,7 @@ def test_segment_obb_entry_point():
 
 def test_local_to_grid_waterline_and_bow():
     ship = _destroyer()
-    center, half, rot = ship.obb()
+    center, half, rot = ship.damage_obb()
     # World point at the waterline (world y == 0 == ship.pos[1]), at the bow
     # tip, centered in beam.
     world = ship.pos + rot @ np.array([0.0, 0.0, ship.length * 0.5])
@@ -141,7 +140,7 @@ def test_arm_frag_mission_kills_never_sinks():
     """An 87 kg frag head into the mast: radar dead, hull dry, ship afloat."""
     ship = _destroyer()
     ev = []
-    r = _hit_at(ship, 0.63, 22.0, mass=600.0, warhead=87.0, hardness=0.2,
+    r = _hit_at(ship, 0.59, 35.0, mass=600.0, warhead=87.0, hardness=0.2,
                 speed=700.0)
     apply_missile_hits([r], [ship], ev, damage_model="subsystem")
     assert not r.alive
@@ -207,7 +206,7 @@ def test_penetrating_hit_into_full_vls_is_catastrophic():
     magazine: instant loss + the magazine_detonation effect event."""
     ship = _destroyer()                        # 24 SM-2 + 6 SM-6 + 8 TLAM
     ev = []
-    r = _hit_at(ship, 0.65, 0.5)               # vls_aft_64 (0.60-0.70), at WL
+    r = _hit_at(ship, 0.326, 7.4)  # rebuilt aft VLS at z=-27 m, on main deck
     apply_missile_hits([r], [ship], ev, damage_model="subsystem")
     assert ship.state == ST_SINKING
     assert any(k == "magazine_detonation" for k, _p in ev)
@@ -216,7 +215,7 @@ def test_vls_kill_on_empty_magazine_is_firepower_kill_only():
     ship = _destroyer()
     ship.sm2_ammo = 2; ship.sm6_ammo = 0; ship.tomahawk_ammo = 0
     ev = []
-    apply_missile_hits([_hit_at(ship, 0.65, 0.5)], [ship], ev,
+    apply_missile_hits([_hit_at(ship, 0.326, 7.4)], [ship], ev,
                        damage_model="subsystem")
     assert ship.state != ST_SINKING            # no yield to break the hull
     assert not any(k == "magazine_detonation" for k, _p in ev)

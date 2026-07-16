@@ -381,11 +381,9 @@ class WorldState:
         Both rounds share the same 5P85 TEL and the same sam_reload_left timer
         (one tube mechanically indexes per reload cycle; mixing round types is
         realistic — the TEL operator selects the canister type electronically).
-        The 40N6 uses an ACTIVE terminal seeker (illuminator_pos_fn=None):
-        the SamMissile LOS check runs from the missile itself, not a ground
-        illuminator.  This is the key difference from the 48N6 (which uses
-        the same None default — the player S300 is also own-seeker because
-        there is no S-300-specific illuminator pointer in the sandbox world).
+        The 40N6 uses an ACTIVE terminal seeker.  The 48N6 remains SARH/TVM;
+        this lightweight sandbox supplies a fixed battery-FCR position while
+        CombatWorld supplies the live, damageable/scanning radar.
 
         Engagement-envelope enforcement (round-specific):
             40N6: min_intercept_alt = 4,000 m — only engages HIGH targets.
@@ -442,13 +440,16 @@ class WorldState:
         tube = max(0, min(tube, len(SAM_MOUTH_OFFSETS) - 1))
         pos = SAM_TEL_POS + SAM_MOUTH_OFFSETS[tube]
 
-        # Active seeker (40N6) vs SARH (48N6 in sandbox context):
-        # Both pass illuminator_pos_fn=None here.  The 48N6 in the sandbox
-        # uses its own seeker LOS (same behaviour as before this change).
-        # The 40N6 is explicitly ARH — also None.  CombatWorld subclasses
-        # that want SARH for 48N6 can override _launch_sam_48n6 separately.
-        m = SamMissile(weapon_def, pos, target,
-                       contact_estimate_fn=self._contact_estimate(aircraft_id))
+        # Active seeker (40N6) vs fixed sandbox FCR geometry (48N6 SARH).
+        fcr_kwargs = {}
+        if weapon_def.guidance == "sarh":
+            fcr_pos = (float(SAM_TEL_POS[0]), float(SAM_TEL_POS[1]) + 12.0,
+                       float(SAM_TEL_POS[2]))
+            fcr_kwargs["illuminator_pos_fn"] = lambda _p=fcr_pos: _p
+        m = SamMissile(
+            weapon_def, pos, target,
+            contact_estimate_fn=self._contact_estimate(aircraft_id),
+            **fcr_kwargs)
         self.missiles.append(m)
 
         if round_id == "40n6":

@@ -15,7 +15,13 @@ from __future__ import annotations
 import json
 import os
 
+from game.weather_composer import (CONVECTIVE_OPTIONS, CUSTOM_DEFAULTS,
+                                   HIGH_OPTIONS, LOW_OPTIONS, MID_OPTIONS)
+
 PREFS_FILE = "ui_prefs.json"
+CLOUD_WEATHER_VALUES = ("battle", "clear", "fair", "partly cloudy",
+                        "overcast", "high cirrus", "towering cumulus",
+                        "thunderstorm", "custom")
 
 # key -> (default, validator)
 _SCHEMA = {
@@ -26,6 +32,25 @@ _SCHEMA = {
                          lambda v: v in ("low", "med", "high", "ultra")),
     "exhaust_trails": (True, lambda v: isinstance(v, bool)),
     "launch_smoke": ("full", lambda v: v in ("minimal", "full")),
+    # V2 is the shipped default after passing the deterministic visual gates
+    # at near-legacy High cost. Legacy remains selectable and is also the
+    # automatic runtime fallback if V2 cannot compile or allocate.
+    "cloud_renderer": ("v2", lambda v: v in ("legacy", "v2")),
+    "cloud_quality": ("high",
+                      lambda v: v in ("off", "low", "med", "high", "ultra")),
+    # "battle" follows CombatConfig.weather_preset; the named choices are a
+    # live visual override and make recipes reachable in sandbox/free-cam.
+    "cloud_weather_override": (
+        "battle", lambda v: v in CLOUD_WEATHER_VALUES),
+    "cloud_custom_low": (CUSTOM_DEFAULTS["cloud_custom_low"],
+                         lambda v: v in LOW_OPTIONS),
+    "cloud_custom_mid": (CUSTOM_DEFAULTS["cloud_custom_mid"],
+                         lambda v: v in MID_OPTIONS),
+    "cloud_custom_high": (CUSTOM_DEFAULTS["cloud_custom_high"],
+                          lambda v: v in HIGH_OPTIONS),
+    "cloud_custom_convective": (
+        CUSTOM_DEFAULTS["cloud_custom_convective"],
+        lambda v: v in CONVECTIVE_OPTIONS),
 }
 DEFAULTS = {k: d for k, (d, _) in _SCHEMA.items()}
 
@@ -52,8 +77,24 @@ class UiPrefs:
         return self.values[key]
 
     def set(self, key: str, value) -> None:
-        default, valid = _SCHEMA[key]
-        self.values[key] = value if valid(value) else default
+        self.set_many({key: value})
+
+    def set_many(self, changes) -> None:
+        """Validate and persist a group as one atomic in-memory update.
+
+        Unknown keys fail before mutation. Invalid known values retain the
+        established ``set`` behavior and normalize to that key's default.
+        """
+
+        items = list(changes.items())
+        for key, _value in items:
+            if key not in _SCHEMA:
+                raise KeyError(key)
+        candidate = dict(self.values)
+        for key, value in items:
+            default, valid = _SCHEMA[key]
+            candidate[key] = value if valid(value) else default
+        self.values = candidate
         self.save()
 
     # ------------------------------------------------------------- toggles

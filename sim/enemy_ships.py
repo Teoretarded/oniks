@@ -40,8 +40,8 @@ import math
 import numpy as np
 
 import sim.radar as _radar_mod
-from sim.ships import (BURN_SPEED_FRAC, BURN_TIME, HULL_DRAFT,
-                       LIST_MAX, LIST_RAMP_TIME, SHIP_TYPES, SINK_GONE_TIME,
+from sim.ships import (BURN_SPEED_FRAC, LIST_MAX, LIST_RAMP_TIME,
+                       SINK_GONE_TIME,
                        SINK_RATE, TURN_RATE, ST_ALIVE, ST_BURNING,
                        ST_GONE, ST_SINKING, Ship)
 
@@ -79,6 +79,15 @@ _TOMAHAWK_AMMO_DEFAULT = 8
 # builder.  At 400 m, diagonal excess over patrol_radius is only ~10 m, which
 # is well below the ~155 m slack the ship_length provides.
 _RACETRACK_HALF_WIDTH = 400.0
+
+# The rebuilt Burke mesh has a narrow mast/sensor crown above the historical
+# 30 m hull OBB. Keep this separate from the broad hull volume: making the
+# entire 20 x 155 m box taller would turn empty air over the decks into hull.
+_BURKE_TOPSIDE_CENTER = np.array([0.0, 34.75, 14.0], dtype=np.float64)
+_BURKE_TOPSIDE_HALF = np.array([4.5, 5.25, 5.0], dtype=np.float64)
+_BURKE_HULL_TYPES = frozenset({
+    "destroyer", "aaw_destroyer", "ground_attack_destroyer",
+})
 
 
 def _build_racetrack(anchor_xz, heading_deg, patrol_radius_m):
@@ -185,6 +194,25 @@ class Destroyer(Ship):
         self.sm6_ammo        = _SM6_AMMO_DEFAULT
         self.sm6_reload_s    = _SM6_RELOAD_S
         self.sm6_reload_timer = 0.0
+        # Ship.__init__ deliberately computes only the base-class volumes
+        # while subclass construction is incomplete. The Burke crown is now
+        # valid, so finish the broad-phase sphere from the actual compound set.
+        self._set_hit_reach(Destroyer.hit_obbs(self))
+
+    def hit_obbs(self):
+        """Hull plus the rebuilt Burke's mast/sensor crown.
+
+        Transport subclasses use dedicated meshes and deliberately retain
+        their normal hull OBB. Carrier supplies its own compound volumes in
+        ``sim.enemy_air.Carrier``.
+        """
+        volumes = list(super().hit_obbs())
+        if self.ship_type not in _BURKE_HULL_TYPES:
+            return tuple(volumes)
+        rot = volumes[0][2]
+        topside_center = self.pos + rot @ _BURKE_TOPSIDE_CENTER
+        volumes.append((topside_center, _BURKE_TOPSIDE_HALF.copy(), rot))
+        return tuple(volumes)
 
     # -------------------------------------------------------------------------
     # Navigation helpers

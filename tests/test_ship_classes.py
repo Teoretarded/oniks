@@ -83,12 +83,11 @@ def test_general_destroyer_numerically_matches_destroyer():
 
 
 def test_general_destroyer_obb_matches_destroyer():
-    from sim.ships import HULL_DRAFT
     g = GeneralDestroyer("g", ANCHOR)
     spec = SHIP_TYPES["destroyer"]
     _c, half, _r = g.obb()
-    assert np.allclose(half, [spec["beam"] / 2,
-                              (spec["height"] + HULL_DRAFT) / 2,
+    assert np.allclose(half, [g.collision_beam / 2,
+                              (g.collision_height + g.draft) / 2,
                               spec["length"] / 2])
 
 

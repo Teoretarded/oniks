@@ -168,6 +168,17 @@ def test_zircon_hi_lo_medium_range_hits():
     assert np.linalg.norm(m.impact_pos[[0, 2]] - target[[0, 2]]) < 600.0
 
 
+def test_zircon_uses_profile_specific_terminal_windows():
+    target = np.array([0.0, 0.0, 80_000.0])
+    hi = Missile(ZIRCON, np.array([0.0, 60.0, 0.0]), 0.0,
+                 "hi-lo", target)
+    low = Missile(ZIRCON, np.array([0.0, 60.0, 0.0]), 0.0,
+                  "lo-lo", target)
+    assert hi._final_pn_range == ZIRCON.final_pn_range_m
+    assert low._final_pn_range == ZIRCON.lo_final_pn_range_m
+    assert low._final_pn_range < hi._final_pn_range
+
+
 @pytest.mark.slow
 def test_zircon_arrives_hypersonic_not_crawling():
     """THE realism regression (two-sided): a 250 km hi-lo Zircon must ARRIVE

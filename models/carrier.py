@@ -1,195 +1,233 @@
-"""Procedural Nimitz-class aircraft carrier model.
+"""Procedural Nimitz-class aircraft carrier.
 
-Real scale: 333 m overall length, 76.8 m flight-deck beam (maximum),
-~41 m waterline beam (hull).
-Model space: forward = +Z (bow at +166.5 m), up = +Y,
-origin at the WATERLINE CENTER (y = 0 is the waterline, z = 0 midship).
+Reference dimensions are the US Navy's 332.85 m overall length, 40.84 m
+waterline beam and 76.8 m maximum flight-deck width.  Model space is +Z bow,
++Y up, +X starboard, with the origin at the waterline amidships.
 
-Key visual signatures reproduced in stylised low-poly:
-  - Massive slab hull with flat-topped flight deck.
-  - Overhanging ANGLED flight deck (the angled-deck section extends to port,
-    offset from the hull centreline — the carrier's most distinctive feature).
-  - Island superstructure starboard-aft, with a tall mast.
-  - Flight-deck markings: landing threshold stripe (dark green strip).
-
-Multiple Oniks hits needed to sink (high HP): reflected by the sheer
-mass of geometry (a very large mesh), but HP is a sim/bases.py concern,
-not a model concern.
-
-Draft modelled ~9 m (Nimitz draws ~11.9 m; the ocean hides the rest).
+The previous mesh was a 333 x 76.8 m rectangle plus a second rotated rectangle;
+its fake bow extended 15 m past the official length and its 60 m box-island hid
+the deck shape.  This version builds one recognizable flight-deck planform,
+tapered hull, compact island, elevators, four catapult tracks, arresting area,
+sponsons and deck markings.  Pure numpy / GL-free.
 """
 
 from __future__ import annotations
 
 import math
 
-from engine.meshdata import MeshBuilder, MeshData, make_box, make_cylinder, make_lathe
-from models.common import PALETTE, rot_x, rot_y, rot_z, sphere_profile
+import numpy as np
 
-# ---------------------------------------------------------------------------
-# Geometry constants — all real metres, +Z forward
-# ---------------------------------------------------------------------------
+from engine.meshdata import MeshBuilder, MeshData, make_box, make_cylinder
+from models.common import PALETTE, rot_x, rot_y
 
-_LENGTH   = 333.0   # m  overall length
-_HALF_L   = 166.5   # m  half length
-_HULL_BEAM = 41.0   # m  waterline hull beam
-_DECK_BEAM = 76.8   # m  max flight-deck beam (overhanging port)
-_DRAFT     =  9.0   # m  modelled draft below waterline
-_FREEBOARD =  7.5   # m  hull freeboard above waterline at midship
+_LENGTH = 333.0
+_HALF_L = _LENGTH * 0.5
+_HULL_BEAM = 40.84
+_DECK_BEAM = 76.8
+_DRAFT = 9.0                 # visual draft; the opaque ocean hides the keel
+_FREEBOARD = 7.5
 
-# Colour aliases
-_HULL  = PALETTE["haze_gray"]
-_DECK  = PALETTE["haze_gray_deck"]
-_SS    = PALETTE["haze_gray_dark"]    # island superstructure
+_HULL = PALETTE["haze_gray"]
+_DECK = PALETTE["haze_gray_deck"]
+_SS = PALETTE["haze_gray_dark"]
+_DARK = PALETTE["aircraft_dark"]
+_BLACK = PALETTE["radome"]
 _WHITE = PALETTE["radar_white"]
-_MARK  = PALETTE["mil_green_dark"]    # deck markings / runway lines
+_YELLOW = PALETTE["container_c"]
 
 
-def _hull_body(b: MeshBuilder) -> float:
-    """Add the main hull slab and return deck_y (top of flight deck base)."""
-    total_depth = _DRAFT + _FREEBOARD
-    half_total = total_depth * 0.5
+def _extruded_planform(points_xz, y0: float, y1: float, color) -> MeshData:
+    """Flat-shaded vertical extrusion of a convex XZ planform.
 
-    # Main rectangular hull box (waterline beam)
-    b.add_mesh(make_box(
-        (_HULL_BEAM, total_depth, _LENGTH), _HULL,
-        offset=(0.0, (_FREEBOARD - _DRAFT) * 0.5, 0.0),
-    ))
+    Input winding is normalized internally.  This small helper gives ships a
+    real bow/deck outline without importing GL or adding a general mesh library.
+    """
+    pts = [(float(x), float(z)) for x, z in points_xz]
+    if len(pts) < 3:
+        raise ValueError("planform needs at least three points")
+    area2 = sum(pts[i][0] * pts[(i + 1) % len(pts)][1]
+                - pts[(i + 1) % len(pts)][0] * pts[i][1]
+                for i in range(len(pts)))
+    # Clockwise in the usual XZ drawing gives +Y winding in XYZ space.
+    if area2 > 0.0:
+        pts.reverse()
 
-    # Bow bulge: taper the forward 30 m slightly with a smaller box on top
-    # (clipper-style: just a wedge box sticking above the main hull forward)
-    bow_taper_z = _HALF_L - 15.0   # start of bow taper
-    b.add_mesh(make_box(
-        (_HULL_BEAM - 4.0, _FREEBOARD * 0.6, 30.0), _HULL,
-        offset=(0.0, _FREEBOARD * 0.7, bow_taper_z + 15.0 - _HALF_L + _HALF_L),
-    ))
+    verts = []
+    idx = []
+    n = len(pts)
+    for x, z in pts:
+        verts.append((x, y1, z, 0.0, 1.0, 0.0, *color))
+    for i in range(1, n - 1):
+        idx.extend((0, i, i + 1))
+    bottom = len(verts)
+    for x, z in pts:
+        verts.append((x, y0, z, 0.0, -1.0, 0.0, *color))
+    for i in range(1, n - 1):
+        idx.extend((bottom, bottom + i + 1, bottom + i))
 
-    deck_y = _FREEBOARD + 0.5   # top of hull + deck plate thickness
-    return deck_y
+    for i in range(n):
+        j = (i + 1) % n
+        x0, z0 = pts[i]
+        x1, z1 = pts[j]
+        dx, dz = x1 - x0, z1 - z0
+        length = math.hypot(dx, dz)
+        nx, nz = -dz / length, dx / length
+        base = len(verts)
+        verts.extend(((x0, y0, z0, nx, 0.0, nz, *color),
+                      (x1, y0, z1, nx, 0.0, nz, *color),
+                      (x1, y1, z1, nx, 0.0, nz, *color),
+                      (x0, y1, z0, nx, 0.0, nz, *color)))
+        idx.extend((base, base + 1, base + 2,
+                    base, base + 2, base + 3))
+    return MeshData(np.asarray(verts, dtype=np.float32),
+                    np.asarray(idx, dtype=np.uint32))
+
+
+def _hull(b: MeshBuilder) -> float:
+    """Tapered waterline body; return flight-deck base height."""
+    hull_plan = (
+        (-15.5, -_HALF_L), (-20.0, -125.0), (-20.42, 70.0),
+        (-17.5, 128.0), (-7.5, 158.0), (0.0, _HALF_L),
+        (7.5, 158.0), (17.5, 128.0), (20.42, 70.0),
+        (20.0, -125.0), (15.5, -_HALF_L),
+    )
+    b.add_mesh(_extruded_planform(hull_plan, -_DRAFT, _FREEBOARD, _HULL))
+
+    # Dark hangar/elevator apertures break up the slab sides at oblique views.
+    for x in (-20.46, 20.46):
+        for z in (-92.0, -25.0, 45.0):
+            b.add_mesh(make_box((0.18, 3.0, 24.0), _BLACK,
+                                offset=(x, 4.6, z)))
+    return _FREEBOARD + 0.45
 
 
 def _flight_deck(b: MeshBuilder, deck_y: float) -> None:
-    """Flat flight deck slab spanning the full hull length.
-
-    The deck overhangs port (−X) by ~18 m beyond the hull beam,
-    and starboard (+X) by ~9 m, giving the 76.8 m total beam.
-    The slab is offset slightly to port relative to hull centreline.
-    """
-    # Full deck plate at the flight deck level
-    b.add_mesh(make_box(
-        (_DECK_BEAM, 0.6, _LENGTH), _DECK,
-        offset=(-(_DECK_BEAM * 0.5 - _HULL_BEAM * 0.5 - 9.0),
-                deck_y + 0.3,
-                0.0),
-    ))
-
-
-def _angled_deck(b: MeshBuilder, deck_y: float) -> None:
-    """The angled-deck landing area: a second deck plate offset to port and
-    rotated ~9 degrees relative to the ship's axis.
-
-    This is the most iconic carrier feature. The angled deck runs from about
-    z = −40 m (aft) to z = +80 m (forward of amidships), offset to port.
-    """
-    # Angled deck: approximately 250 m long, 28 m wide, angled ~9 deg to port.
-    angle_rad = math.radians(9.0)
-
-    # We represent it as a slightly wider, thinner box rotated about Y axis
-    # (rotation in the horizontal plane) and offset to port.
-    rot = rot_y(-angle_rad)   # −angle rotates +Z toward −X (port sweep)
-
-    b.add_mesh(
-        make_box((28.0, 0.3, 250.0), _DECK),
-        rotation=rot,
-        offset=(-12.0, deck_y + 0.62, 0.0),
+    """Asymmetric carrier planform with angled port landing area."""
+    # Widest port point = -40.0, widest starboard point = +36.8 => 76.8 m.
+    deck_plan = (
+        (-22.0, -_HALF_L), (-35.0, -132.0), (-40.0, -58.0),
+        (-34.0, 38.0), (-22.0, 132.0), (-8.0, 160.0),
+        (0.0, _HALF_L), (10.0, 160.0), (25.0, 137.0),
+        (33.0, 93.0), (36.8, 22.0), (34.0, -91.0),
+        (24.0, -_HALF_L),
     )
+    b.add_mesh(_extruded_planform(deck_plan, deck_y, deck_y + 0.65, _DECK))
 
-    # Landing threshold stripe (dark green band at the aft end of angle deck)
-    b.add_mesh(
-        make_box((28.0, 0.35, 8.0), _MARK),
-        rotation=rot,
-        offset=(-12.0, deck_y + 0.64, -85.0),
-    )
+    mark_y = deck_y + 0.69
+    # Angled landing strip and centerline (roughly 9 degrees to port).
+    angle = math.radians(-9.0)
+    b.add_mesh(make_box((25.0, 0.09, 225.0), PALETTE["warship_deck"]),
+               rotation=rot_y(angle), offset=(-10.0, mark_y, -20.0))
+    b.add_mesh(make_box((0.72, 0.11, 205.0), _WHITE),
+               rotation=rot_y(angle), offset=(-10.0, mark_y + 0.02, -19.0))
+    # Landing threshold and four arresting wires.
+    b.add_mesh(make_box((24.0, 0.12, 2.2), _WHITE), rotation=rot_y(angle),
+               offset=(-25.0, mark_y + 0.03, -117.0))
+    for i in range(4):
+        b.add_mesh(make_box((25.0, 0.09, 0.28), _YELLOW),
+                   rotation=rot_y(angle),
+                   offset=(-20.5 + i * 0.9, mark_y + 0.04,
+                           -83.0 + i * 5.0))
+
+    # Two bow and two waist catapult tracks.
+    for x in (-7.2, 7.2):
+        b.add_mesh(make_box((0.62, 0.10, 100.0), _WHITE,
+                            offset=(x, mark_y + 0.03, 108.0)))
+    for x, z in ((-17.0, 20.0), (-22.0, -18.0)):
+        b.add_mesh(make_box((0.58, 0.10, 100.0), _WHITE),
+                   rotation=rot_y(angle), offset=(x, mark_y + 0.03, z))
+
+    # Deck-edge safety stripe follows the most readable long edges.
+    for x, z, length, a in ((34.0, 65.0, 85.0, 0.0),
+                            (32.0, -105.0, 93.0, 0.0),
+                            (-34.0, -90.0, 70.0, angle)):
+        b.add_mesh(make_box((0.35, 0.08, length), _YELLOW),
+                   rotation=rot_y(a), offset=(x, mark_y + 0.02, z))
+
+    # Four deck-edge elevators: three starboard, one port.
+    elevator_c = PALETTE["warship_deck"]
+    for x, z in ((31.0, 93.0), (31.2, 18.0), (30.8, -92.0),
+                 (-34.5, -105.0)):
+        b.add_mesh(make_box((10.5, 0.14, 16.0), elevator_c,
+                            offset=(x, mark_y + 0.02, z)))
+        b.add_mesh(make_box((0.28, 0.16, 15.0), _WHITE,
+                            offset=(x, mark_y + 0.04, z)))
 
 
 def _island(b: MeshBuilder, deck_y: float) -> None:
-    """Island superstructure: starboard side, about z = −20 to +20 m of centre.
+    """Compact starboard island with integrated funnel and sensor mast."""
+    x0, z0 = 27.5, 14.0
+    base_y = deck_y + 0.65
 
-    Three stacked blocks + a prominent mast + radar rotodome.
-    The island sits on the starboard edge of the flight deck.
-    """
-    # Island x offset: starboard edge of flight deck ≈ _HULL_BEAM/2 + 9 m
-    # minus the island width ≈ 18 m → island centre at about +28 m from CL
-    island_x = 28.0   # starboard centre of island
-    island_z = -10.0  # z centre (slightly aft of midship)
+    # Stepped/faceted mass, far smaller than the former 18 x 60 m box.
+    b.add_mesh(make_box((15.0, 8.5, 30.0), _SS,
+                        offset=(x0, base_y + 4.25, z0)))
+    b.add_mesh(make_box((12.0, 5.0, 22.0), _SS,
+                        offset=(x0 - 0.5, base_y + 11.0, z0 + 2.0)))
+    b.add_mesh(make_box((9.0, 3.5, 15.0), _SS,
+                        offset=(x0 - 0.8, base_y + 15.25, z0 + 4.0)))
 
-    # Primary island block
-    blk1_h = 12.0
-    b.add_mesh(make_box(
-        (18.0, blk1_h, 60.0), _SS,
-        offset=(island_x, deck_y + blk1_h * 0.5, island_z),
-    ))
+    # Bridge window band, pane-separated on the forward face.
+    for x in np.linspace(x0 - 5.1, x0 + 4.2, 6):
+        b.add_mesh(make_box((1.2, 0.78, 0.22), _BLACK,
+                            offset=(float(x), base_y + 12.0, z0 + 13.1)))
 
-    # Secondary level (narrower, taller)
-    blk2_h = 8.0
-    b.add_mesh(make_box(
-        (14.0, blk2_h, 40.0), _SS,
-        offset=(island_x, deck_y + blk1_h + blk2_h * 0.5, island_z),
-    ))
-
-    # Mast column above the island
-    mast_base_y = deck_y + blk1_h + blk2_h
-    mast_h = 30.0
-    b.add_mesh(make_cylinder(0.6, mast_h, 12, _SS, axis="y",
-                             offset=(island_x, mast_base_y + mast_h * 0.5,
-                                     island_z)))
-
-    # Radar/antenna arm
-    b.add_mesh(make_cylinder(0.2, 14.0, 8, _SS, axis="x",
-                             offset=(island_x, mast_base_y + mast_h * 0.80,
-                                     island_z)))
-
-    # Radar ball at mast top
-    b.add_mesh(
-        make_lathe(sphere_profile(1.2, bands=8), 16, _WHITE),
-        offset=(island_x, mast_base_y + mast_h + 1.2, island_z),
-    )
+    # Integrated funnel with black cap, then a braced mast and yardarms.
+    b.add_mesh(make_box((6.0, 8.0, 7.0), _SS),
+               rotation=rot_x(math.radians(5.0)),
+               offset=(x0 + 0.2, base_y + 20.0, z0 - 2.0))
+    b.add_mesh(make_box((5.5, 0.8, 6.5), _BLACK,
+                        offset=(x0 + 0.2, base_y + 24.1, z0 - 2.3)))
+    mast_y = base_y + 24.0
+    for dx in (-1.3, 1.3):
+        b.add_mesh(make_cylinder(0.22, 16.0, 8, _SS, axis="y",
+                                 offset=(x0 + dx, mast_y + 8.0, z0 + 2.0)))
+    for yy, length in ((mast_y + 5.0, 10.0),
+                       (mast_y + 10.0, 14.0),
+                       (mast_y + 14.5, 8.0)):
+        b.add_mesh(make_cylinder(0.14, length, 8, _SS, axis="x",
+                                 offset=(x0, yy, z0 + 2.0)))
+    # Rectangular air-search sets are more characteristic than the old ball.
+    b.add_mesh(make_box((5.5, 2.3, 0.20), _DARK,
+                        offset=(x0, mast_y + 12.5, z0 + 2.2)))
+    b.add_mesh(make_box((0.20, 2.8, 4.2), _DARK,
+                        offset=(x0 + 1.6, mast_y + 7.5, z0 + 2.0)))
 
 
-def _sponsons(b: MeshBuilder, deck_y: float) -> None:
-    """Sponson pods fore and aft for CIWS and weapons mounts (simplified boxes)."""
-    # Forward sponson — port side
-    b.add_mesh(make_box(
-        (6.0, 1.0, 14.0), _SS,
-        offset=(-(_HULL_BEAM * 0.5 + 3.0), deck_y + 0.5, 140.0),
-    ))
-    # Aft sponson — starboard side
-    b.add_mesh(make_box(
-        (6.0, 1.0, 14.0), _SS,
-        offset=((_HULL_BEAM * 0.5 + 3.0), deck_y + 0.5, -140.0),
-    ))
+def _sponsons_and_defence(b: MeshBuilder, deck_y: float) -> None:
+    """Edge sponsons with small RAM/CIWS shapes and life-raft pods."""
+    placements = ((-23.5, 135.0), (28.0, -142.0),
+                  (-34.0, -112.0), (31.0, 105.0))
+    for i, (x, z) in enumerate(placements):
+        # A shallow inboard bridge makes each projecting weapons platform a
+        # real deck-edge sponson instead of an isolated rectangle in top view.
+        inner_x = math.copysign(17.0, x)
+        bridge_w = abs(x - inner_x) + 1.0
+        b.add_mesh(make_box((bridge_w, 0.9, 8.5), _SS,
+                            offset=((x + inner_x) * 0.5,
+                                    deck_y + 0.25, z)))
+        b.add_mesh(make_box((6.0, 1.1, 12.0), _SS,
+                            offset=(x, deck_y + 0.45, z)))
+        b.add_mesh(make_cylinder(0.72, 0.9, 12, _SS, axis="y",
+                                 offset=(x, deck_y + 1.25, z)))
+        if i % 2:
+            b.add_mesh(make_box((1.8, 1.4, 2.0), _DARK,
+                                offset=(x, deck_y + 2.3, z)))
+        else:
+            b.add_mesh(make_cylinder(0.58, 1.0, 12, _WHITE, axis="y",
+                                     offset=(x, deck_y + 2.0, z)))
+
+    for side in (-1.0, 1.0):
+        for z in (-55.0, -25.0, 55.0):
+            b.add_mesh(make_cylinder(0.55, 3.0, 10, PALETTE["container_c"],
+                                     axis="z", offset=(side * 20.2, 4.5, z)))
 
 
 def build_carrier() -> MeshData:
-    """Nimitz-class CVN: 333 m × 76.8 m flight deck, haze-gray.
-
-    Signature: overhanging angled flight deck, starboard island with tall mast.
-    Waterline origin (y = 0 at waterline, z = 0 at midship).
-    """
+    """Return the improved Nimitz-class CVN mesh."""
     b = MeshBuilder()
-
-    deck_y = _hull_body(b)
-
-    # Main flight deck slab
+    deck_y = _hull(b)
     _flight_deck(b, deck_y)
-
-    # Angled landing deck (the carrier's most distinctive feature)
-    _angled_deck(b, deck_y)
-
-    # Island superstructure with mast (starboard aft)
     _island(b, deck_y)
-
-    # Sponsons
-    _sponsons(b, deck_y)
-
+    _sponsons_and_defence(b, deck_y)
     return b.build()

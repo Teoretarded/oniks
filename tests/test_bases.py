@@ -76,6 +76,13 @@ class TestDefaults:
         s = _make_structure()
         assert s.alive is True
 
+    def test_tel_obb_uses_beam_on_x_and_length_on_z(self):
+        s = _make_structure("bastion_tel")
+        _center, half, _rot = s.obb()
+        length, beam, height = s.dims
+        assert half == pytest.approx((beam * 0.5, height * 0.5,
+                                      length * 0.5))
+
 
 # ---------------------------------------------------------------------------
 # Structure.hit()

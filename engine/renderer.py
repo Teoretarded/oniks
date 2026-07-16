@@ -56,6 +56,7 @@ LIT_FRAG = """
 in vec3 v_nrm; in vec3 v_col; in vec3 v_view_vec; in float v_flogz;
 uniform vec3 u_sun_color;
 uniform float u_log_depth_fcoef;
+uniform float u_hemi_gain;     // 1.0 everywhere but cinematic dark rigs
 out vec4 frag;
 """ + HAZE_GLSL + CLOUD_SHADOW_GLSL + """
 void main(){
@@ -75,7 +76,7 @@ void main(){
     vec3 hv = normalize(v + u_sun_dir);
     float spec = pow(max(dot(n, hv), 0.0), 48.0) * 0.25;
     float cshadow = cloud_shadow(v_view_vec);
-    vec3 col = v_col * (u_sun_color * ndl * cshadow + hemi)
+    vec3 col = v_col * (u_sun_color * ndl * cshadow + hemi * u_hemi_gain)
                + u_sun_color * spec * step(0.01, ndl) * cshadow;
     frag = vec4(apply_haze(col, v_view_vec, u_cam_alt), 1.0);
 }
@@ -117,10 +118,28 @@ class Renderer:
         self._model = np.zeros((4, 4), dtype=np.float32)
         self._model[3, 3] = 1.0
         self._u_model_loc = None       # lit-shader uniform location cache
+        # Atmospheric altitude offset: scenes whose local Y=0 is NOT sea
+        # level (cinematic maps: valley floor at 760+ m ASL) add their
+        # origin altitude so haze density falls off correctly.
+        self.alt_offset = 0.0
+        # Per-instance light rig (cinematic mood presets override these
+        # and restore them on exit; combat always runs the defaults).
+        self.sun_dir = SUN_DIR
+        self.sun_color = SUN_COLOR
+        self.haze_color = HAZE_COLOR
+        self.sun_haze_color = SUN_HAZE_COLOR
+        self.haze_density = HAZE_DENSITY
+        # Ambient scaling for dark rigs (cinematic NIGHT): hemi_gain
+        # multiplies every shader's hemispheric sky term, light_gain dims
+        # reflective particles (additive fire stays self-luminous).  Both
+        # are 1.0 outside cinematic mode — combat output is unchanged.
+        self.hemi_gain = 1.0
+        self.light_gain = 1.0
 
     def begin(self, camera, aspect) -> None:
         """Clear to haze color, store camera, compute proj/view_rot once."""
-        glClearColor(HAZE_COLOR[0], HAZE_COLOR[1], HAZE_COLOR[2], 1.0)
+        glClearColor(self.haze_color[0], self.haze_color[1],
+                     self.haze_color[2], 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self.camera = camera
         self.proj = camera.proj(aspect)
@@ -132,13 +151,14 @@ class Renderer:
         shader.use()
         shader.set_mat4("u_proj", self.proj)
         shader.set_mat4("u_view_rot", self.view_rot)
-        shader.set_vec3("u_sun_dir", SUN_DIR)
-        shader.set_vec3("u_sun_color", SUN_COLOR)
-        shader.set_vec3("u_haze_color", HAZE_COLOR)
-        shader.set_vec3("u_sun_haze_color", SUN_HAZE_COLOR)
-        shader.set_float("u_haze_density", HAZE_DENSITY)
-        shader.set_float("u_cam_alt", self.camera.eye[1])
+        shader.set_vec3("u_sun_dir", self.sun_dir)
+        shader.set_vec3("u_sun_color", self.sun_color)
+        shader.set_vec3("u_haze_color", self.haze_color)
+        shader.set_vec3("u_sun_haze_color", self.sun_haze_color)
+        shader.set_float("u_haze_density", self.haze_density)
+        shader.set_float("u_cam_alt", self.camera.eye[1] + self.alt_offset)
         shader.set_float("u_log_depth_fcoef", self.fcoef)
+        shader.set_float("u_hemi_gain", self.hemi_gain)
 
     def draw_mesh(self, mesh, pos_f64, rot3x3=None, scale=1.0) -> None:
         """Draw ``mesh`` at a float64 world position with the lit shader.

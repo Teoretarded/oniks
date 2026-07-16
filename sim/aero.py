@@ -84,3 +84,53 @@ def lag_gain(dt: float, tau: float) -> float:
     """First-order lag blend factor for one step (implicit-Euler form —
     unconditionally stable at any dt): a += (cmd - a) * lag_gain(dt, tau)."""
     return dt / (dt + tau)
+
+
+def limit_vector_scalar(x: float, y: float, z: float,
+                        limit: float) -> tuple[float, float, float]:
+    """Magnitude-limit a three-component vector without allocating arrays."""
+    n2 = x * x + y * y + z * z
+    if n2 > limit * limit and n2 > 0.0:
+        k = limit / math.sqrt(n2)
+        return x * k, y * k, z * k
+    return x, y, z
+
+
+def project_perpendicular_scalar(x: float, y: float, z: float,
+                                 vx: float, vy: float, vz: float
+                                 ) -> tuple[float, float, float]:
+    """Remove acceleration parallel to velocity.
+
+    Aerodynamic lift/control force may rotate the flight path but cannot do
+    work along it.  Thrust, parasite drag, and gravity own the longitudinal
+    energy equation.
+    """
+    v2 = vx * vx + vy * vy + vz * vz
+    if v2 < 1e-18:
+        return 0.0, 0.0, 0.0
+    along = (x * vx + y * vy + z * vz) / v2
+    return x - vx * along, y - vy * along, z - vz * along
+
+
+def autopilot_step_scalar(cmd_x: float, cmd_y: float, cmd_z: float,
+                          achieved_x: float, achieved_y: float,
+                          achieved_z: float, *, dt: float, tau: float,
+                          q: float, ref_area: float, mass: float,
+                          cl_max: float, structural_limit: float
+                          ) -> tuple[float, float, float]:
+    """One physically bounded acceleration-autopilot step.
+
+    The command and achieved states are both constrained by the smaller of
+    structural acceleration and instantaneous ``q*S*CLmax/m`` authority.
+    Clamping after the lag matters when dynamic pressure falls faster than
+    the stored fin/airframe response can decay.
+    """
+    aero_limit = max(0.0, q * ref_area * cl_max / max(mass, 1e-9))
+    cap = min(max(0.0, structural_limit), aero_limit)
+    cmd_x, cmd_y, cmd_z = limit_vector_scalar(
+        cmd_x, cmd_y, cmd_z, cap)
+    k = lag_gain(dt, tau)
+    achieved_x += (cmd_x - achieved_x) * k
+    achieved_y += (cmd_y - achieved_y) * k
+    achieved_z += (cmd_z - achieved_z) * k
+    return limit_vector_scalar(achieved_x, achieved_y, achieved_z, cap)

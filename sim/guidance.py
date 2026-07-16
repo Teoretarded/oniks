@@ -33,20 +33,47 @@ WAYPOINT_RADIUS = 2_500.0
 
 
 def pn_accel(mis_pos, mis_vel, tgt_pos, tgt_vel, n_gain=PN_GAIN):
-    """True 3D proportional navigation. Returns commanded accel (3,) float64,
-    perpendicular component only (drop any along-velocity component)."""
+    """True 3D proportional navigation.
+
+    ``a = N * Vc * (omega_LOS x v_hat)`` where ``Vc`` is the positive
+    closing speed.  The returned acceleration is perpendicular to missile
+    velocity, so guidance changes direction without creating kinetic energy.
+    A receding/non-closing target produces no PN command; midcourse/explicit
+    guidance must first establish a closing collision course.
+    """
     r = tgt_pos - mis_pos
     v_rel = tgt_vel - mis_vel
     r2 = float(r @ r)
     if r2 < 1.0:
         return np.zeros(3)
-    omega = np.cross(r, v_rel) / r2          # LOS rotation rate vector
-    # Sign note: with v_rel target-relative (tgt - mis), n * cross(v_rel, omega)
-    # already accelerates INTO the LOS rotation (verified by the head-on and
-    # crossing intercept tests); negating it steers away and diverges.
-    a = n_gain * np.cross(v_rel, omega)
-    vhat = mis_vel / max(np.linalg.norm(mis_vel), 1e-9)
-    return a - vhat * (a @ vhat)
+    speed = float(np.linalg.norm(mis_vel))
+    if speed < 1e-9:
+        return np.zeros(3)
+    rmag = math.sqrt(r2)
+    rhat = r / rmag
+    closing = max(0.0, -float(v_rel @ rhat))
+    if closing <= 0.0:
+        return np.zeros(3)
+    omega = np.cross(r, v_rel) / r2          # LOS angular-rate vector
+    vhat = mis_vel / speed
+    return n_gain * closing * np.cross(omega, vhat)
+
+
+def gravity_compensation_accel(vel, gravity=9.81):
+    """Aerodynamic acceleration that cancels only gravity perpendicular to
+    the flight path.
+
+    Cancelling world-vertical gravity outright lets lift do positive work in
+    a climb.  Real lift/autopilot acceleration is normal to velocity; the
+    along-track gravity component must remain so climbing spends energy and
+    descending regains it.
+    """
+    speed = float(np.linalg.norm(vel))
+    if speed < 1e-9:
+        return np.zeros(3)
+    vhat = vel / speed
+    up = np.array([0.0, 1.0, 0.0])
+    return gravity * (up - vhat * float(vhat[1]))
 
 
 def altitude_hold_accel(alt, vspeed, target_alt,

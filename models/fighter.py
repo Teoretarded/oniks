@@ -1,198 +1,128 @@
-"""Procedural F/A-18E Super Hornet-class fighter model.
+"""Procedural F/A-18E/F Super Hornet airframe.
 
-Real scale: 18.3 m long, 13.6 m wing span.
-Model space: forward = +Z (nose at +z_max), up = +Y,
-origin at the center of mass (mid-fuselage). Pure numpy, GL-free.
-
-Key visual signatures reproduced in stylised low-poly:
-  - Pointed nose leading to a broad, flat-sided fuselage.
-  - Leading-Edge Extension (LEX) strakes from cockpit to wing root —
-    the Super Hornet's most recognisable feature when seen from above.
-  - Twin-engine nacelles flanking the tail boom.
-  - Trapezoidal main wings swept back, positioned mid-fuselage.
-  - Twin canted vertical tails (cant ~27 deg outboard) — the
-    signature silhouette that distinguishes it from single-tail types.
-  - Horizontal stabilators mirrored port/starboard at the tail.
-  - Haze-gray paint throughout; dark exhausts.
-
-Density: at most 3× build_fast_aircraft() vertex count as per spec.
+Reference scale: 18.5 m long and 13.68 m span (model nominal 18.3 x 13.6).
+The mesh is designed to read correctly from plan, side, front and rear views:
+large LEX shoulders, rectangular side intakes, separated twin engines,
+outward-canted twin tails and all-moving stabilators.  Forward = +Z, up = +Y.
 """
 
 from __future__ import annotations
 
 import math
 
-from engine.meshdata import MeshBuilder, MeshData, make_box, make_cylinder, make_fin, make_lathe
-from models.common import PALETTE, rot_x, rot_y, rot_z
+from engine.meshdata import (MeshBuilder, MeshData, make_box, make_cylinder,
+                             make_fin, make_lathe)
+from models.common import PALETTE, rot_z
 
-# ---------------------------------------------------------------------------
-# Geometry constants — all in real metres, +Z forward
-# ---------------------------------------------------------------------------
-
-# Full length 18.3 m; origin at mid-fuselage (z = 0).
-# Nose tip at +9.15 m, tail end at -9.15 m.
-_HALF_L = 9.15          # m; half of 18.3 m total length
-_HALF_SPAN = 6.8        # m; half of 13.6 m wingspan (tip-to-tip)
-
-# Fuselage profile for make_lathe (z, radius) — circular cross-section
-# approximation; the real F/A-18E has a wider, flatter mid-section but the
-# lathe gives the right plan-view silhouette and is consistent with
-# build_fast_aircraft().
-_SEG = 22               # lathe/cylinder segments (GL-quality budget)
-
-_FUSELAGE_PROFILE = [
-    (-_HALF_L, 0.0),      # tail end (closed)
-    (-7.5, 0.55),
-    (-5.0, 0.72),
-    (-2.0, 0.82),
-    (1.5, 0.85),
-    (4.5, 0.80),
-    (6.5, 0.62),
-    (8.0, 0.40),
-    (_HALF_L, 0.0),       # nose tip (closed)
-]
-
-_NOSE_CAP = [
-    (7.0, 0.42),
-    (_HALF_L, 0.0),
-]
-
-# Colours
 _GREY = PALETTE["aircraft_grey"]
 _DARK = PALETTE["aircraft_dark"]
 _EXHAUST = PALETTE["exhaust_ring"]
-
-# Rotation helpers
-_ROT_MIRROR = rot_z(math.pi)   # flip +X wing to -X wing
-
-
-def _lex_strake(b: MeshBuilder) -> None:
-    """Leading-Edge Extension strakes from ~z=+4 (cockpit) to wing root at z≈+1.
-
-    Each strake is a thin trapezoidal plate (make_fin) mounted port/starboard
-    just below the fuselage spine, swept forward.  Root chord ~ 4 m, tip
-    chord ~ 1.5 m, span ~ 2.2 m, sweep 2.0 m.
-    """
-    # make_fin args: (root_chord, tip_chord, span, sweep, thickness, color)
-    # span extends in +X; chords along -Z (aft).
-    # We place the root leading edge at z = +4.5, x = 0.55 (just off the centreline).
-    # READABILITY: plate thicknesses are ~1.7x scale — a 0.12 m plate is
-    # invisible edge-on at gameplay distance (the whole planform vanished
-    # at level camera elevations; orbit critique 2026-07-03).
-    lex = make_fin(4.0, 1.5, 2.2, 2.0, 0.22, _GREY)
-    # Starboard (+X side)
-    b.add_mesh(lex, offset=(0.55, -0.30, 0.50))
-    # Port (-X side): mirror in X using rot_z(π)
-    b.add_mesh(lex, rotation=_ROT_MIRROR, offset=(-0.55, -0.30, 0.50))
+_SEG = 26
+_ROT_MIRROR = rot_z(math.pi)
 
 
-def _main_wings(b: MeshBuilder) -> None:
-    """Trapezoidal main wings, mid-fuselage, moderately swept.
-
-    Root chord 4.5 m, tip chord 1.6 m, semi-span 6.0 m, sweep 2.5 m.
-    Wing root leading edge at z ≈ +1.5 m, y ≈ −0.25 m.
-    """
-    wing = make_fin(4.5, 1.6, 6.0, 2.5, 0.34, _GREY)
-    # Starboard
-    b.add_mesh(wing, offset=(0.85, -0.25, 1.5))
-    # Port
-    b.add_mesh(wing, rotation=_ROT_MIRROR, offset=(-0.85, -0.25, 1.5))
+def _mirrored_plate(builder: MeshBuilder, plate: MeshData,
+                    offset: tuple[float, float, float]) -> None:
+    x, y, z = offset
+    builder.add_mesh(plate, offset=(x, y, z))
+    builder.add_mesh(plate, rotation=_ROT_MIRROR, offset=(-x, y, z))
 
 
-def _twin_tails(b: MeshBuilder) -> None:
-    """Twin canted vertical stabilisers — the Super Hornet signature.
+def _add_lex_and_wings(b: MeshBuilder) -> None:
+    # The LEX begins beside the cockpit and broadens into the wing root.  The
+    # old placement began behind the wing, losing the defining plan silhouette.
+    lex = make_fin(5.45, 2.55, 2.25, 2.70, 0.22, _GREY)
+    _mirrored_plate(b, lex, (0.52, -0.08, 4.55))
 
-    Each tail is canted ~27 deg outboard.  make_fin spans in +X (before
-    rotation we tilt the whole thing via rot_z).  We use rot_z to rotate
-    the fin from its natural +X span direction to a direction canted outboard,
-    then offset it to the correct tail position.
+    wing = make_fin(5.05, 1.35, 5.90, 2.70, 0.30, _GREY)
+    _mirrored_plate(b, wing, (0.90, -0.15, 1.75))
 
-    Tail geometry: root chord 3.2 m, tip chord 1.0 m, span 3.0 m, sweep 2.0 m.
-    """
-    # Cant angle outboard from vertical (27 degrees)
-    cant_deg = 27.0
-    cant_rad = math.radians(cant_deg)
-
-    # make_fin naturally lies in the XZ plane (span along +X, chord along -Z).
-    # We want it to stand upright (span along +Y) and canted outboard.
-    # Step 1: rotate span from +X to +Y  →  rot_z(-π/2)
-    # Step 2: cant outboard  →  rot_x(+cant_rad) for starboard (tips lean +X)
-    rot_upright = rot_z(-0.5 * math.pi)
-    rot_cant_stbd = rot_x(cant_rad)        # tips lean toward +X (outboard stbd)
-    rot_cant_port = rot_x(-cant_rad)       # tips lean toward -X (outboard port)
-
-    tail_fin = make_fin(3.2, 1.0, 3.0, 2.0, 0.30, _GREY)
-
-    # Starboard: x = +1.0, at the tail end
-    b.add_mesh(tail_fin,
-               rotation=rot_cant_stbd @ rot_upright,
-               offset=(1.00, 0.50, -5.8))
-    # Port: symmetric
-    b.add_mesh(tail_fin,
-               rotation=rot_cant_port @ rot_upright,
-               offset=(-1.00, 0.50, -5.8))
-
-
-def _horizontal_stabs(b: MeshBuilder) -> None:
-    """All-moving horizontal stabilators at the extreme tail, below the twin tails.
-
-    Root chord 2.8 m, tip chord 0.9 m, span 3.2 m, sweep 1.8 m.
-    """
-    stab = make_fin(2.8, 0.9, 3.2, 1.8, 0.26, _GREY)
-    b.add_mesh(stab, offset=(0.85, -0.55, -5.0))
-    b.add_mesh(stab, rotation=_ROT_MIRROR, offset=(-0.85, -0.55, -5.0))
-
-
-def _engine_nacelles(b: MeshBuilder) -> None:
-    """Twin General Electric F414 engine nacelles flanking the tail boom.
-
-    Each nacelle: a short cylinder with a dark exhaust nozzle ring at the aft end.
-    Nacelle length ~4.5 m, radius ~0.55 m, centred at z ≈ −4.5 m, x ≈ ±1.1 m.
-    """
+    # Empty wingtip launch rails remain part of the vehicle when stores are
+    # omitted.  They stay inside the nominal 13.6 m span.
     for sx in (1.0, -1.0):
-        # Nacelle body
-        b.add_mesh(make_cylinder(0.55, 4.5, _SEG, _GREY, axis="z",
-                                 offset=(sx * 1.10, -0.20, -4.50)))
-        # Dark exhaust nozzle band at the tail end
-        b.add_mesh(make_cylinder(0.52, 0.6, _SEG, _EXHAUST, axis="z",
-                                 offset=(sx * 1.10, -0.20, -6.60)))
+        b.add_mesh(make_box((0.14, 0.14, 1.55), _GREY,
+                            offset=(sx * 6.70, -0.16, -1.55)))
 
 
-def _cockpit(b: MeshBuilder) -> None:
-    """Raised canopy hump at the fuselage spine just ahead of the wing root."""
-    b.add_mesh(make_box((1.05, 0.62, 2.30), _DARK,
-                        offset=(0.0, 0.95, 3.90)))
+def _add_tail(b: MeshBuilder) -> None:
+    stabilator = make_fin(3.25, 0.82, 3.35, 1.65, 0.24, _GREY)
+    _mirrored_plate(b, stabilator, (0.78, -0.25, -4.95))
+
+    # A make_fin span begins along +X.  Rotating by 90-cant degrees gives an
+    # up/outboard span.  The former rot_x composition pointed the fins below
+    # the belly and leaned them fore/aft instead of outboard.
+    fin = make_fin(3.35, 1.05, 3.20, 1.75, 0.26, _GREY)
+    cant = math.radians(27.0)
+    b.add_mesh(fin, rotation=rot_z(math.pi * 0.5 - cant),
+               offset=(1.05, 0.34, -5.00))
+    b.add_mesh(fin, rotation=rot_z(math.pi * 0.5 + cant),
+               offset=(-1.05, 0.34, -5.00))
+
+
+def _add_engines_and_intakes(b: MeshBuilder) -> None:
+    # Tapered F414 nacelles own the rear silhouette; the centre fuselage ends
+    # ahead of them, avoiding the old single rocket-like tail point.
+    nacelle = [
+        (-2.70, 0.46), (-2.35, 0.59), (1.55, 0.62),
+        (2.05, 0.54), (2.20, 0.42),
+    ]
+    for sx in (1.0, -1.0):
+        x = sx * 0.95
+        b.add_mesh(make_lathe(nacelle, 22, _GREY),
+                   offset=(x, -0.20, -6.45))
+        b.add_mesh(make_cylinder(0.50, 0.40, 22, _EXHAUST, axis="z",
+                                 offset=(x, -0.20, -8.95)))
+
+        # Super Hornet's rectangular, outward-canted-looking inlet openings.
+        b.add_mesh(make_box((0.78, 0.68, 0.14), _DARK,
+                            offset=(sx * 1.05, -0.28, 1.82)))
+        # Short intake trunk keeps a 45-degree view from seeing a black card.
+        b.add_mesh(make_box((0.82, 0.76, 1.55), _GREY,
+                            offset=(sx * 1.05, -0.27, 1.05)))
+
+
+def _add_canopy(b: MeshBuilder, two_seat: bool) -> None:
+    if two_seat:
+        profile = [(-2.05, 0.0), (-1.70, 0.37), (0.85, 0.54),
+                   (1.45, 0.31), (1.70, 0.0)]
+        centre_z = 4.00
+    else:
+        profile = [(-1.38, 0.0), (-1.05, 0.38), (0.62, 0.52),
+                   (1.10, 0.29), (1.30, 0.0)]
+        centre_z = 4.35
+    b.add_mesh(make_lathe(profile, 20, _DARK),
+               offset=(0.0, 0.72, centre_z))
+
+    if two_seat:
+        # Canopy bow separating the tandem cockpits on the F/EA airframe.
+        b.add_mesh(make_box((1.02, 0.08, 0.10), _GREY,
+                            offset=(0.0, 1.16, 3.65)))
+
+
+def _build_fighter_airframe(two_seat: bool = False) -> MeshData:
+    """Private shared E/F airframe used by the fighter and Growler builders."""
+    b = MeshBuilder()
+
+    # Narrow nose/forward fuselage, ending before the separated exhausts.
+    fuselage = [
+        (-7.15, 0.32), (-5.7, 0.58), (-2.2, 0.76), (2.5, 0.79),
+        (5.2, 0.70), (7.25, 0.48), (8.45, 0.25), (9.15, 0.0),
+    ]
+    b.add_mesh(make_lathe(fuselage, _SEG, _GREY))
+    b.add_mesh(make_lathe([(7.20, 0.49), (8.45, 0.25), (9.15, 0.0)],
+                          _SEG, _DARK))
+
+    # Broad centrebody between the two intake/engine tunnels.
+    b.add_mesh(make_box((2.55, 0.62, 6.10), _GREY,
+                        offset=(0.0, -0.12, -1.55)))
+
+    _add_lex_and_wings(b)
+    _add_engines_and_intakes(b)
+    _add_tail(b)
+    _add_canopy(b, two_seat)
+    return b.build()
 
 
 def build_fighter() -> MeshData:
-    """F/A-18E Super Hornet-class fighter: 18.3 m × 13.6 m span, haze-gray.
-
-    Signature features: LEX strakes, twin canted tails, twin engine nacelles.
-    Model space: forward = +Z, up = +Y, origin at mid-fuselage waterline.
-    """
-    b = MeshBuilder()
-
-    # Main fuselage via surface of revolution
-    b.add_mesh(make_lathe(_FUSELAGE_PROFILE, _SEG, _GREY))
-    # Dark nose radome/sensor cap
-    b.add_mesh(make_lathe(_NOSE_CAP, _SEG, _DARK))
-
-    # LEX strakes — the Super Hornet's primary visual signature
-    _lex_strake(b)
-
-    # Main wings
-    _main_wings(b)
-
-    # Twin canted vertical tails
-    _twin_tails(b)
-
-    # Horizontal stabilators
-    _horizontal_stabs(b)
-
-    # Twin engine nacelles
-    _engine_nacelles(b)
-
-    # Cockpit canopy
-    _cockpit(b)
-
-    return b.build()
+    """Build the single-seat F/A-18E-class fighter mesh."""
+    return _build_fighter_airframe(two_seat=False)

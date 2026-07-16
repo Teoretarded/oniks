@@ -67,17 +67,24 @@ SKY_FRAG = """
 #version 330 core
 in vec3 v_dir;
 uniform vec3 u_sun_dir, u_sun_haze_color;
+uniform vec3 u_horizon_col, u_zenith_col, u_disc_col;
 out vec4 frag;
 void main(){
     vec3 dir = normalize(v_dir);
-    vec3 col = mix(vec3(0.70, 0.78, 0.86), vec3(0.18, 0.38, 0.62),
+    vec3 col = mix(u_horizon_col, u_zenith_col,
                    pow(max(dir.y, 0.0), 0.45));
     float sd = dot(dir, u_sun_dir);
-    col = mix(col, vec3(1.0), smoothstep(0.9996, 0.9999, sd));   // sun disc
-    col += pow(max(sd, 0.0), 32.0) * 0.25 * u_sun_haze_color;    // glow
+    col = mix(col, u_disc_col, smoothstep(0.9996, 0.9999, sd)); // sun disc
+    col += pow(max(sd, 0.0), 32.0) * 0.25 * u_sun_haze_color;   // glow
     frag = vec4(col, 1.0);
 }
 """
+
+# Default gradient: the daytime blue every non-cinematic mode has always
+# drawn (the uniforms exist so cinematic light moods can restage the sky).
+HORIZON_COL = (0.70, 0.78, 0.86)
+ZENITH_COL = (0.18, 0.38, 0.62)
+DISC_COL = (1.0, 1.0, 1.0)
 
 
 class Sky:
@@ -86,9 +93,21 @@ class Sky:
     def __init__(self):
         self.mesh = Mesh(build_sky_dome())
         self.shader = Shader(SKY_VERT, SKY_FRAG)
+        self.horizon_col = HORIZON_COL
+        self.zenith_col = ZENITH_COL
+        self.disc_col = DISC_COL
+
+    def set_colors(self, horizon=None, zenith=None, disc=None) -> None:
+        """Restage the dome for a light mood (None keeps a default)."""
+        self.horizon_col = horizon or HORIZON_COL
+        self.zenith_col = zenith or ZENITH_COL
+        self.disc_col = disc or DISC_COL
 
     def draw(self, renderer) -> None:
         renderer.set_common(self.shader)
+        self.shader.set_vec3("u_horizon_col", self.horizon_col)
+        self.shader.set_vec3("u_zenith_col", self.zenith_col)
+        self.shader.set_vec3("u_disc_col", self.disc_col)
         glDepthMask(GL_FALSE)
         glDisable(GL_CULL_FACE)            # dome is viewed from inside
         self.mesh.draw()
@@ -97,3 +116,4 @@ class Sky:
 
     def delete(self) -> None:
         self.mesh.delete()
+        self.shader.delete()

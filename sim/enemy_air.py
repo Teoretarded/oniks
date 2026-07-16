@@ -42,14 +42,13 @@ from __future__ import annotations
 
 import math
 import collections
-from typing import Optional, Union, List
+from typing import List, Optional
 
 import numpy as np
 
 import sim.radar as _radar_mod
 from sim.enemy_ships import Destroyer, _build_racetrack
-from sim.ships import (BURN_TIME, SHIP_TYPES, ST_ALIVE, ST_BURNING,
-                       TURN_RATE as SHIP_TURN_RATE)
+from sim.ships import BURN_TIME, SHIP_TYPES, ST_ALIVE, ST_BURNING
 
 # ---------------------------------------------------------------------------
 # Carrier ship registration
@@ -441,8 +440,65 @@ class Carrier(Destroyer):
         self.speed  = spec["speed"]
         self.hp     = spec["hp"]
 
+        # The visual hull reaches -9..+7.5 m; its flight deck and 48.6 m
+        # island remain separate volumes while the subsystem frame reaches the
+        # full island top. Recompute only after every carrier override landed.
+        self._configure_type_hit_geometry()
+        self.recompute_hit_reach()
+
         # Silent radar — carrier does not emit in Phase 5a.
         self.radar.emitting = False
+
+    def hit_obbs(self):
+        """Hull, flight deck, and starboard island collision volumes.
+
+        The rebuilt carrier's 76.8 m flight deck and 48.6 m island extend far
+        beyond its 40 m waterline hull box. Thin, separate volumes follow the
+        visible geometry without inflating the full 333 m hull into empty air.
+        All offsets use the canonical ship-local frame (+Z bow, +X starboard)
+        and share the hull rotation so listing/sinking stays exact.
+        """
+        hull = self.obb()
+        rot = hull[2]
+        # Mesh extents: deck x=-40.0..+36.8, y=7.95..8.60, z=+-166.5;
+        # the extra 0.2 m catches the painted tracks/wires above its skin.
+        deck_local = np.array([-1.6, 8.40, 0.0], dtype=np.float64)
+        deck_half = np.array([38.4, 0.45, 166.5], dtype=np.float64)
+        # Compact island/mast: x=19.5..35.5, y=8.6..48.6, z=-1..29.
+        island_local = np.array([27.5, 28.6, 14.0], dtype=np.float64)
+        island_half = np.array([8.0, 20.0, 15.0], dtype=np.float64)
+        deck = (self.pos + rot @ deck_local, deck_half, rot)
+        island = (self.pos + rot @ island_local, island_half, rot)
+        # Four localized deck-edge defence sponsons rise above the thin deck.
+        # Keep them separate so clean air over the rest of the deck stays air.
+        sponson_boxes = (
+            ((-21.5, 9.35, 135.0), (5.0, 1.65, 6.1)),
+            ((23.75, 9.35, -142.0), (7.25, 1.65, 6.1)),
+            ((-26.75, 9.35, -112.0), (10.25, 1.65, 6.1)),
+            ((25.25, 9.35, 105.0), (8.75, 1.65, 6.1)),
+        )
+        sponsons = tuple((
+            self.pos + rot @ np.asarray(center, dtype=np.float64),
+            np.asarray(half, dtype=np.float64), rot,
+        ) for center, half in sponson_boxes)
+        aperture_boxes = tuple(
+            ((side * 20.60, 4.60, z), (0.20, 1.55, 12.1))
+            for side in (-1.0, 1.0)
+            for z in (-92.0, -25.0, 45.0)
+        )
+        apertures = tuple((
+            self.pos + rot @ np.asarray(center, dtype=np.float64),
+            np.asarray(half, dtype=np.float64), rot,
+        ) for center, half in aperture_boxes)
+        raft_boxes = (
+            ((side * 20.2, 4.5, -55.0), (0.56, 0.56, 1.51))
+            for side in (-1.0, 1.0)
+        )
+        rafts = tuple((
+            self.pos + rot @ np.asarray(center, dtype=np.float64),
+            np.asarray(half, dtype=np.float64), rot,
+        ) for center, half in raft_boxes)
+        return (hull, deck, island, *sponsons, *apertures, *rafts)
 
     # Carrier is not air-borne.
     is_air = False

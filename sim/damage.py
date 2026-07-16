@@ -1,8 +1,9 @@
 """Damage: segment-vs-OBB hit test and warhead application (pure numpy, GL-free).
 
 The missile moves several meters per 120 Hz step at terminal speed, so impacts
-are detected with a swept segment (prev_pos -> pos) against the ship hull OBB —
-a point-in-box sample would tunnel straight through a beam-on hull.
+are detected with a swept segment (prev_pos -> pos) against each ship's hull
+OBB or compound hit volumes — a point sample would tunnel through a beam-on
+hull.
 """
 
 import math
@@ -15,8 +16,8 @@ from sim.ships import BURN_TIME, ST_ALIVE, ST_BURNING, ST_SINKING
 _EPS = 1e-12
 
 
-def segment_hits_obb(p0, p1, center, half, rot3x3):
-    """True if segment p0->p1 intersects the oriented box.
+def segment_obb_entry_fraction(p0, p1, center, half, rot3x3):
+    """Return the segment's entry fraction into an OBB, or ``None``.
 
     The segment is transformed into the box's local frame (rot.T @ (p - center))
     and clipped against the three axis slabs [-half, +half] with the standard
@@ -29,7 +30,7 @@ def segment_hits_obb(p0, p1, center, half, rot3x3):
     for i in range(3):
         if abs(d[i]) < _EPS:
             if abs(q0[i]) > half[i]:
-                return False                      # parallel and outside the slab
+                return None                       # parallel and outside the slab
         else:
             ta = (-half[i] - q0[i]) / d[i]
             tb = (half[i] - q0[i]) / d[i]
@@ -38,8 +39,14 @@ def segment_hits_obb(p0, p1, center, half, rot3x3):
             t_enter = max(t_enter, ta)
             t_exit = min(t_exit, tb)
             if t_enter > t_exit:
-                return False
-    return True
+                return None
+    return t_enter
+
+
+def segment_hits_obb(p0, p1, center, half, rot3x3):
+    """True if segment p0->p1 intersects the oriented box."""
+    return segment_obb_entry_fraction(
+        p0, p1, center, half, rot3x3) is not None
 
 
 def apply_missile_hits(missiles, ships, effects_out, damage_model="legacy"):
@@ -50,8 +57,8 @@ def apply_missile_hits(missiles, ships, effects_out, damage_model="legacy"):
     ("ship_hit", pos) effect is appended for particles/audio.
 
     A conservative sphere prefilter rejects nearly every pair before the
-    OBB math (Task 22 perf): a hit needs a segment point inside the hull
-    box, which lies within ``ship.hit_reach`` of ``ship.pos``, and every
+    OBB math (Task 22 perf): a hit needs a segment point inside a hit volume,
+    which lies within ``ship.hit_reach`` of ``ship.pos``, and every
     segment point is within the step length of ``m.pos`` — so any pair
     farther apart than the sum cannot possibly hit. Ship positions are
     pulled into plain floats once per call (Task GATE perf: this runs per
@@ -87,9 +94,24 @@ def apply_missile_hits(missiles, ships, effects_out, damage_model="legacy"):
             if ship is getattr(m, "launch_platform", None):
                 continue        # a deck-launched SAM starts INSIDE its own
                 #                 ship's OBB — never a self-hit (Phase 2)
-            center, half, rot = ship.obb()
-            if not segment_hits_obb(m.prev_pos, m.pos, center, half, rot):
+            # Most ships expose one historical hull OBB. Rebuilt silhouettes
+            # may expose a small compound set (for example a carrier's wide,
+            # thin flight deck and offset island). The fallback keeps older
+            # test/integration doubles that only implement obb() valid.
+            hit_obbs = getattr(ship, "hit_obbs", None)
+            volumes = hit_obbs() if hit_obbs is not None else (ship.obb(),)
+            entries = [
+                t for center, half, rot in volumes
+                if (t := segment_obb_entry_fraction(
+                    m.prev_pos, m.pos, center, half, rot)) is not None
+            ]
+            if not entries:
                 continue
+            # Compound volumes can overlap. Subsystem forensics/damage must
+            # start at the first real surface crossed, not the segment midpoint
+            # or the entry of an unrelated broad hull box.
+            t_entry = min(entries)
+            entry_world = m.prev_pos + (m.pos - m.prev_pos) * t_entry
             impact = (m.prev_pos + m.pos) * 0.5
             m.alive = False
             m.phase = PH_DEAD
@@ -106,7 +128,8 @@ def apply_missile_hits(missiles, ships, effects_out, damage_model="legacy"):
                 # Deferred import keeps the legacy path's import graph (and
                 # module-load order) byte-identical when the flag is off.
                 from sim import damage_model as _dm
-                _dm.resolve_hit(ship, m, impact, effects_out)
+                _dm.resolve_hit(
+                    ship, m, impact, effects_out, entry_world=entry_world)
             else:
                 ship.hp -= 1
                 if ship.hp > 0:

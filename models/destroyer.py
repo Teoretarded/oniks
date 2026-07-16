@@ -111,25 +111,22 @@ def _weather_deck(b: MeshBuilder, deck_y: float) -> None:
 
 def _vls_field(b: MeshBuilder, z_center: float, cells: int,
                deck_y: float) -> None:
-    """Mk 41 VLS cells: a flat grid plate at deck level.
+    """Mk 41 VLS cells: individual hatch plates at deck level.
 
     cells=32 → one 4×8 block; cells=64 → two 4×8 blocks side by side.
-    Each block is 5 m wide × 8.5 m long, 0.4 m proud of the deck.
+    Individual lids retain the signature grid in high-angle renders.
     """
-    panel_h = 0.5
-    panel_color = PALETTE["aircraft_dark"]   # cell field reads as a dark grid
-    #             inset (deck-tone made both fields invisible)
-    if cells == 32:
-        b.add_mesh(make_box(
-            (5.0, panel_h, 8.5), panel_color,
-            offset=(0.0, deck_y + panel_h * 0.5, z_center),
-        ))
-    else:  # 64-cell: two parallel rows
-        for dx in (-3.0, 3.0):
-            b.add_mesh(make_box(
-                (5.0, panel_h, 8.5), panel_color,
-                offset=(dx, deck_y + panel_h * 0.5, z_center),
-            ))
+    panel_color = PALETTE["aircraft_dark"]
+    block_centers = (0.0,) if cells == 32 else (-2.65, 2.65)
+    for bx in block_centers:
+        for ix in range(4):
+            for iz in range(8):
+                x = bx + (ix - 1.5) * 1.02
+                z = z_center + (iz - 3.5) * 0.92
+                b.add_mesh(make_box(
+                    (0.80, 0.18, 0.70), panel_color,
+                    offset=(x, deck_y + 0.18, z),
+                ))
 
 
 def _gun_turret(b: MeshBuilder, deck_y: float) -> None:
@@ -288,6 +285,58 @@ def _ciws_mount(b: MeshBuilder, x: float, z: float, deck_y: float) -> None:
     )
 
 
+def _helo_deck(b: MeshBuilder, deck_y: float) -> None:
+    """Twin hangar, doors and a stern-contained helicopter landing deck."""
+    dark = PALETTE["aircraft_dark"]
+    # Hangar aft face is z=-61, leaving a real flight deck before the transom.
+    b.add_mesh(make_box(
+        (18.0, 6.0, 26.0), _SS,
+        offset=(0.0, deck_y + 3.0, -48.0),
+    ))
+    for x in (-4.4, 4.4):
+        b.add_mesh(make_box(
+            (7.6, 4.2, 0.22), dark,
+            offset=(x, deck_y + 2.35, -61.1),
+        ))
+    b.add_mesh(make_box(
+        (19.0, 0.30, 16.5), PALETTE["warship_deck"],
+        offset=(0.0, deck_y + 0.15, -69.2),
+    ))
+
+    # Broken circle + H is cheap geometry and makes the stern legible overhead.
+    y = deck_y + 0.35
+    for k in range(8):
+        a = 2.0 * math.pi * k / 8.0
+        b.add_mesh(make_box((0.24, 0.08, 2.3), _WHITE),
+                   rotation=rot_y(-a),
+                   offset=(math.sin(a) * 4.0, y,
+                           -69.2 + math.cos(a) * 4.0))
+    b.add_mesh(make_box((5.0, 0.08, 0.24), _WHITE,
+                        offset=(0.0, y + 0.01, -69.2)))
+    for x in (-2.45, 2.45):
+        b.add_mesh(make_box((0.22, 0.08, 4.2), _WHITE,
+                            offset=(x, y + 0.01, -69.2)))
+
+
+def _side_details(b: MeshBuilder, deck_y: float) -> None:
+    """RHIB recesses, torpedo tubes, anchors and life-raft canisters."""
+    dark = PALETTE["radome"]
+    for x in (-9.1, 9.1):
+        b.add_mesh(make_box((0.24, 2.3, 12.0), dark,
+                            offset=(x, deck_y + 1.5, -10.0)))
+        for z in (-22.0, -17.0):
+            b.add_mesh(make_cylinder(0.20, 2.2, 8, _SS, axis="x"),
+                       rotation=rot_z(math.radians(9.0)),
+                       offset=(x * 0.92, deck_y + 1.0, z))
+        for z in (-33.0, -27.0, 25.0):
+            b.add_mesh(make_cylinder(0.28, 1.5, 8, _WHITE, axis="z",
+                                     offset=(x * 0.96,
+                                             deck_y + 1.25, z)))
+    for x in (-5.5, 5.5):
+        b.add_mesh(make_cylinder(0.52, 0.22, 12, dark, axis="z",
+                                 offset=(x, 4.0, 76.7)))
+
+
 # ---------------------------------------------------------------------------
 # Public builder
 # ---------------------------------------------------------------------------
@@ -309,8 +358,8 @@ def build_destroyer() -> MeshData:
     # Forward 32-cell VLS (Mk 41, frames fwd of bridge)
     _vls_field(b, z_center=40.0, cells=32, deck_y=deck_y)
 
-    # Aft 64-cell VLS (Mk 41, large block aft of amidships)
-    _vls_field(b, z_center=-20.0, cells=64, deck_y=deck_y)
+    # Aft 64-cell VLS (Mk 41), immediately forward of the twin hangars.
+    _vls_field(b, z_center=-27.0, cells=64, deck_y=deck_y)
 
     # 5-inch gun turret on the forecastle
     _gun_turret(b, deck_y)
@@ -329,14 +378,7 @@ def build_destroyer() -> MeshData:
     # CIWS #2 — aft port
     _ciws_mount(b, x=-6.0, z=-42.0, deck_y=deck_y)
 
-    # Hangar / helo deck aft
-    b.add_mesh(make_box(
-        (18.0, 4.0, 20.0), _SS,
-        offset=(0.0, deck_y + 2.0, -60.0),
-    ))
-    b.add_mesh(make_box(
-        (19.0, 0.3, 28.0), PALETTE["mil_green_dark"],
-        offset=(0.0, deck_y + 0.15, -68.0),
-    ))
+    _helo_deck(b, deck_y)
+    _side_details(b, deck_y)
 
     return b.build()

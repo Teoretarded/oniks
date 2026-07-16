@@ -37,10 +37,10 @@ HP_S300_TEL: int = 2
 HP_RADAR_STATION: int = 1
 
 # Default OBB dims (length, beam, height) in metres.
-# - Bastion/S-300 TEL: based on the MAZ-543 / MZKT-7930 TEL chassis:
-#     length ~14 m (cab + body), width ~3.3 m (fenders out to ~3.5 m),
-#     height ~5–6 m to canister tops.  Rounded to (14, 3.5, 6).
-DIMS_TEL: tuple[float, float, float] = (14.0, 3.5, 6.0)
+# - Bastion/S-300 TEL: complete launch-state mesh envelope.  Raised packs
+#     approach 10 m and the S-300 rear overhang reaches z=-7.8 m, so this
+#     deliberately covers more than the low travel-state chassis alone.
+DIMS_TEL: tuple[float, float, float] = (15.6, 4.0, 10.0)
 
 # - Radar station: the models/structures.py slab is 12×12 m, the tower
 #   reaches 1.2 + 7 + 7 + 3.4*2 = ~22.4 m.  OBB footprint stretched to
@@ -126,7 +126,10 @@ class Structure:
         pos so the slab-test helper sees a box centred at mid-height.
         """
         length, beam, height = self.dims
-        half = np.array([length * 0.5, height * 0.5, beam * 0.5],
+        # Model convention is +Z forward/length and +X lateral/beam.  Keep the
+        # simulation volume on those same axes so a long TEL is not represented
+        # by a fourteen-metre-wide, three-metre-long box.
+        half = np.array([beam * 0.5, height * 0.5, length * 0.5],
                         dtype=np.float64)
         # Centre at mid-height of the structure (Y floor = pos[1])
         center = self.pos + np.array([0.0, height * 0.5, 0.0],

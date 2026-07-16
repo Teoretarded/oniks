@@ -31,6 +31,7 @@ from OpenGL.GL import (
     glUniform1i,
     glUniform2f,
     glUniform3f,
+    glUniform4f,
     glUniformMatrix4fv,
     glUseProgram,
 )
@@ -75,6 +76,14 @@ class Shader:
     def use(self) -> None:
         glUseProgram(self.program)
 
+    def delete(self) -> None:
+        """Free the GL program (idempotent). Owners of per-session shaders
+        must call this from their dispose path — programs are not GC'd."""
+        if self.program:
+            glDeleteProgram(self.program)
+            self.program = 0
+            self._locs.clear()
+
     def _loc(self, name: str) -> int:
         loc = self._locs.get(name)
         if loc is None:
@@ -99,6 +108,12 @@ class Shader:
         loc = self._loc(name)
         if loc != -1:
             glUniform2f(loc, float(v[0]), float(v[1]))
+
+    def set_vec4(self, name: str, v) -> None:
+        loc = self._loc(name)
+        if loc != -1:
+            glUniform4f(loc, float(v[0]), float(v[1]), float(v[2]),
+                        float(v[3]))
 
     def set_float(self, name: str, x) -> None:
         loc = self._loc(name)

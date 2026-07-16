@@ -37,21 +37,19 @@ ship_type is still "destroyer" and whose every magazine/dim/HP matches today's
 Destroyer exactly, so sample_fleet / the duel / the smoke determinism check /
 the default battle stay bit-identical (all new fleet-mixer counts default 0).
 
-DEFERRED: new MESHES are a later model pass — every class reuses the existing
-"destroyer" mesh (ship_type "flagship"/"aaw_destroyer"/"ground_attack_destroyer"
-register their dims/HP in SHIP_TYPES, but the renderer falls back to the
-destroyer mesh until a dedicated hull lands).
+The AAW and ground-attack variants explicitly share the Burke exterior because
+their distinction is loadout.  The larger Flagship has a dedicated
+Ticonderoga-style mesh matched to its own dimensions and subsystem grid.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from sim.enemy_defense import SM2_MAX_INFLIGHT, TRACK_FORM_S
 from sim.enemy_ships import (Destroyer, _CIWS_AMMO_DEFAULT, _SM2_AMMO_DEFAULT,
                              _SM6_AMMO_DEFAULT, _TOMAHAWK_AMMO_DEFAULT)
-from sim.ships import HULL_DRAFT, SHIP_TYPES
+from sim.ships import SHIP_TYPES
 
 
 @dataclass(frozen=True)
@@ -78,8 +76,8 @@ class ShipClassDef:
 
 # --- SHIP_TYPES registration (dims/HP) ---------------------------------------
 # The general destroyer reuses the existing "destroyer" entry verbatim (byte-
-# identical default fleet).  The new hulls register their own dims/HP; the
-# renderer falls back to the destroyer mesh until a dedicated model ships.
+# identical default fleet). The doctrinal Burke variants share that hull;
+# Flagship registers its own dimensions and dedicated model.
 
 # Air-defense escort: a Burke-flight-III-class AAW hull — same dimensions as
 # the general destroyer (it IS a Burke), HP 3.  Its difference is loadout +
@@ -190,17 +188,10 @@ class _ClassedDestroyer(Destroyer):
         self.height = spec["height"]
         self.speed = spec["speed"]
         self.hp = spec["hp"]
-        # Ship.__init__ computed hit_reach from the BASE "destroyer" dims; now
-        # that the dims may have changed (only the Flagship's do — AAW/Ground-
-        # Attack reuse the destroyer hull), recompute the OBB bounding-sphere
-        # reach with the SAME formula Ship.__init__ uses so damage.py's pair
-        # prefilter (a conservative reject of any pair farther apart than the
-        # sum of reaches) never under-reaches the true farthest OBB corner.
-        # GeneralDestroyer keeps the destroyer dims, so this reproduces the
-        # legacy value EXACTLY -> the byte-identical default is preserved.
-        self.hit_reach = (0.5 * math.sqrt(
-            self.beam ** 2 + (self.height + HULL_DRAFT) ** 2 + self.length ** 2)
-            + 0.5 * (self.height - HULL_DRAFT))
+        # Install the final type's visible draft/collision/damage frames only
+        # after every dimension override, then cover its compound volumes.
+        self._configure_type_hit_geometry()
+        self.recompute_hit_reach()
         # Per-unit fire-control knobs (read via getattr with fallback by the
         # controller, so a plain Destroyer is unaffected).
         self.sm2_max_inflight = int(cdef.sm2_max_inflight)

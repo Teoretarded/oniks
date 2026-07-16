@@ -4,8 +4,8 @@ import pytest
 
 from sim.aircraft import Aircraft
 from sim.contacts import AIR_UPDATE_PERIODS, ContactBoard, UPDATE_PERIODS
-from sim.ships import (BURN_TIME, HULL_DRAFT, SHIP_TYPES, ST_ALIVE, ST_BURNING,
-                       ST_GONE, ST_SINKING, Ship)
+from sim.ships import (BURN_TIME, SHIP_TYPES, ST_ALIVE, ST_BURNING, ST_GONE,
+                       ST_SINKING, Ship)
 
 
 def _dist_to_polyline(p_xz, pts):
@@ -132,12 +132,13 @@ def test_obb_dimensions_and_orientation():
     ship = Ship("s", "warship", [(0.0, 0.0), (10_000.0, 0.0)], 0.5)  # heading east
     spec = SHIP_TYPES["warship"]
     center, half, rot = ship.obb()
-    assert np.allclose(half, [spec["beam"] / 2,
-                              (spec["height"] + HULL_DRAFT) / 2,
+    assert np.allclose(half, [ship.collision_beam / 2,
+                              (ship.collision_height + ship.draft) / 2,
                               spec["length"] / 2])
     assert np.allclose(rot @ np.array([0.0, 0.0, 1.0]), [1.0, 0.0, 0.0], atol=1e-9)
     # box spans -draft .. +height around the waterline center
-    assert center[1] == pytest.approx((spec["height"] - HULL_DRAFT) / 2)
+    assert center[1] == pytest.approx(
+        (ship.collision_height - ship.draft) / 2)
     assert np.allclose(center[[0, 2]], ship.pos[[0, 2]])
 
 

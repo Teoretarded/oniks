@@ -511,6 +511,16 @@ class CinematicState(GameState):
                         lo = mid
                 hit = p + d * hi
                 break
+        if hit is not None:
+            # The bisection's low end can sit OUTSIDE the world (the ray
+            # entered it mid-segment) where the border-clamped sampler
+            # invents ground — nudge a near-miss inside, refuse the rest
+            # (GPT-5.6 review 2026-07-16: landed at x = -8008).
+            hit[0] = float(np.clip(hit[0], wx0 + 1.0, wx1 - 1.0))
+            hit[2] = float(np.clip(hit[2], wz0 + 1.0, wz1 - 1.0))
+            q = p + d * hi
+            if math.hypot(q[0] - hit[0], q[2] - hit[2]) > step + 1.0:
+                hit = None
         if hit is None:
             self._say("NO GROUND THERE")
             return

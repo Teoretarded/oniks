@@ -61,25 +61,42 @@ class _MovingTarget:
         self.pos = self.pos + self.vel * dt
 
 
-def _flyoff(sam_def, target, max_t=320.0):
+def _flyoff(sam_def, target, max_t=320.0, track_update_s=None):
     """Step the real flight model against ``target`` (static or moving) and
     report apogee, closest approach, terminal-handover altitude, outcome."""
     w = _World()
-    m = SamMissile(sam_def, LAUNCH.copy(), target)
+    track_pos = target.pos.copy()
+    track_vel = target.velocity().copy()
+
+    def estimate():
+        return track_pos.copy(), track_vel.copy()
+
+    m = SamMissile(
+        sam_def, LAUNCH.copy(), target,
+        contact_estimate_fn=(estimate if track_update_s is not None else None))
     apogee = 0.0
     closest = float("inf")
     handover_alt = None
+    altitude_48 = None
+    next_track_t = 0.0
     while m.alive and m.t < max_t:
         if hasattr(target, "update"):
             target.update(DT)
+        if (track_update_s is not None
+                and m.t + 1e-12 >= next_track_t):
+            np.copyto(track_pos, target.pos)
+            np.copyto(track_vel, target.velocity())
+            next_track_t = m.t + track_update_s
         m.update(DT, w)
         if handover_alt is None and m.phase >= SPH_TERMINAL:
             handover_alt = float(m.pos[1])
         apogee = max(apogee, float(m.pos[1]))
         closest = min(closest, float(np.linalg.norm(m.pos - target.pos)))
+        if altitude_48 is None and m.t >= 48.0:
+            altitude_48 = float(m.pos[1])
     return dict(apogee=apogee, closest=closest, t=m.t,
                 killed=m.killed_target, self_destructed=m.self_destructed,
-                handover_alt=handover_alt)
+                handover_alt=handover_alt, altitude_48=altitude_48)
 
 
 # --- the headline: a clearly higher arc ---------------------------------------
@@ -144,3 +161,19 @@ def test_40n6_dive_established_before_terminal_handover():
     assert r["handover_alt"] <= r["apogee"] - 5_000.0, (
         f"40N6 handed over at apogee (wallow): apogee {r['apogee']:.0f} m, "
         f"handover {r['handover_alt']:.0f} m")
+
+
+def test_40n6_long_crossing_shot_preserves_loft_and_kills():
+    """Regression for the live 340 km low-snake trajectory.
+
+    The previous all-infeasible ranking held the round below 1 km at T+48 s
+    with ~300 km still to go.  A long crossing shot must retain the online
+    balanced-energy loft and remain inside the honest 40N6 envelope.
+    """
+    target = _MovingTarget([0.0, 6_500.0, 340_000.0],
+                           [230.0, 0.0, 0.0])
+    r = _flyoff(N40N6, target, max_t=460.0, track_update_s=5.0)
+    assert r["killed"], (
+        f"40N6 missed 340 km crossing target by {r['closest']:.0f} m")
+    assert r["altitude_48"] is not None and r["altitude_48"] >= 20_000.0
+    assert 25_000.0 <= r["apogee"] <= 40_000.0

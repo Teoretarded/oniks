@@ -67,6 +67,9 @@ CAP_LEN = 0.16
 RING_R = TUBE_R + 0.035        # clamp ring radius (proud of the barrel)
 RING_LEN = 0.12
 RING_RUNS = (-0.5, 1.6, 3.7, 5.8)   # ring stations along the tube axis
+# Extra narrow seams reproduce the strongly segmented TPK silhouette while
+# retaining RING_RUNS as the public/reference set used by older tests/tools.
+DETAIL_RING_RUNS = (0.55, 2.65, 4.75, 6.72)
 DOME_DEPTH = 0.30              # black dome bottom cap bulge
 
 # Outriggers: 4 jack boxes clear of the tires and the erected block
@@ -109,12 +112,20 @@ def _tube_block(dark_green: tuple) -> MeshData:
                                      PALETTE["canvas_khaki"], axis="z",
                                      offset=(off[0], off[1],
                                              MOUTH_RUN - CAP_LEN * 0.5)))
+            b.add_mesh(make_cylinder(CAP_R * 0.92, 0.045, SEG,
+                                     PALETTE["canvas_khaki"], axis="z",
+                                     offset=(off[0], off[1],
+                                             MOUTH_RUN - 0.023)))
             b.add_mesh(dome, offset=off)
             # clamp rings segmenting the barrel
-            for zr in RING_RUNS:
+            for zr in RING_RUNS + DETAIL_RING_RUNS:
                 b.add_mesh(make_cylinder(RING_R, RING_LEN, SEG, ring_c,
                                          axis="z",
                                          offset=(off[0], off[1], zr)))
+            # Narrow external cable/umbilical conduit on each outer barrel.
+            b.add_mesh(make_box((0.07, 0.10, 6.75), dark_green,
+                                offset=(off[0] + math.copysign(TUBE_R, off[0]),
+                                        off[1] - 0.38, 2.25)))
     # inter-tube frame: a + of plates between the four tubes at 3 stations
     green = PALETTE["s300_green"]
     for zs in (-0.7, 2.6, 5.2):
@@ -122,7 +133,82 @@ def _tube_block(dark_green: tuple) -> MeshData:
                             offset=(0.0, PAIR_DY * 0.5, zs)))
         b.add_mesh(make_box((0.14, PAIR_DY + 2.0 * TUBE_R, 0.30), green,
                             offset=(0.0, PAIR_DY * 0.5, zs)))
+    # Erecting spine and U-shaped umbilical bridge between the four tubes.
+    b.add_mesh(make_box((0.26, PAIR_DY + 1.15, 7.35), dark_green,
+                        offset=(0.0, PAIR_DY * 0.5, 2.15)))
+    b.add_mesh(make_box((1.42, 0.12, 0.20), dark_green,
+                        offset=(0.0, PAIR_DY + TUBE_R - 0.08, 6.32)))
+    for sx in (-1.0, 1.0):
+        b.add_mesh(make_box((0.12, 0.40, 0.20), dark_green,
+                            offset=(sx * 0.65, PAIR_DY + TUBE_R - 0.25, 6.32)))
     return b.build()
+
+
+def _add_maz_cab(b: MeshBuilder, green: tuple, dark: tuple) -> None:
+    """Asymmetric MAZ-7910 nose: left crew cab, right engine housing."""
+    front_z = CHASSIS_L * 0.5
+    cab_z = front_z - CAB_L * 0.5
+
+    # The 5P85's split nose is its most important non-tube identifier.
+    driver_x = -0.78
+    b.add_mesh(make_box((1.36, CAB_H, CAB_L), green,
+                        offset=(driver_x, FRAME_TOP + CAB_H * 0.5, cab_z)))
+    b.add_mesh(make_box((1.52, 1.48, CAB_L - 0.08), green,
+                        offset=(0.72, FRAME_TOP + 0.74, cab_z - 0.02)))
+
+    # Sloped two-pane glazing on the driver module, side window, and door.
+    for x in (-1.06, -0.52):
+        b.add_mesh(make_box((0.44, 0.58, 0.065), PALETTE["radome"]),
+                   rotation=rot_x(math.radians(5.0)),
+                   offset=(x, CAB_TOP - 0.57, front_z + 0.025))
+    b.add_mesh(make_box((0.055, 0.52, 0.90), PALETTE["radome"],
+                        offset=(-1.48, CAB_TOP - 0.61, cab_z + 0.12)))
+    b.add_mesh(make_box((0.045, 1.00, 0.96), dark,
+                        offset=(-1.49, 1.88, cab_z - 0.48)))
+
+    # Right-side radiator grille: deep recess plus vertical slats.
+    b.add_mesh(make_box((1.24, 0.66, 0.055), PALETTE["tire"],
+                        offset=(0.72, 2.02, front_z + 0.03)))
+    for x in np.linspace(0.18, 1.26, 7):
+        b.add_mesh(make_box((0.045, 0.59, 0.075), dark,
+                            offset=(float(x), 2.02, front_z + 0.07)))
+
+    # Bumper, lamps, tow bar, roof lamp and mirror.
+    b.add_mesh(make_box((CHASSIS_W, 0.28, 0.24), dark,
+                        offset=(0.0, FRAME_BOT + 0.14, front_z + 0.10)))
+    b.add_mesh(make_cylinder(0.065, 2.10, 10, dark, axis="x",
+                             offset=(0.0, 0.92, front_z + 0.08)))
+    for x in (-1.05, 1.06):
+        b.add_mesh(make_cylinder(0.15, 0.075, 12, PALETTE["radar_white"],
+                                 axis="z", offset=(x, 1.45, front_z + 0.14)))
+    b.add_mesh(make_cylinder(0.13, 0.20, 12, PALETTE["radar_white"], axis="y",
+                             offset=(-0.82, CAB_TOP + 0.10, cab_z + 0.35)))
+    b.add_mesh(make_cylinder(0.025, 0.30, 8, dark, axis="x",
+                             offset=(-1.61, 2.70, cab_z + 0.34)))
+    b.add_mesh(make_box((0.055, 0.38, 0.22), PALETTE["radome"],
+                        offset=(-1.76, 2.70, cab_z + 0.34)))
+
+
+def _add_f3s_cabin(b: MeshBuilder, green: tuple, dark: tuple) -> None:
+    """Electronics cabin with the canvas cover and tie-downs seen on 5P85S."""
+    b.add_mesh(make_box((F3S_W, F3S_H, F3S_L), green,
+                        offset=(0.0, FRAME_TOP + F3S_H * 0.5, F3S_Z)))
+    b.add_mesh(make_wedge((F3S_W, F3S_ROOF_H, F3S_L), green,
+                          offset=(0.0, FRAME_TOP + F3S_H + F3S_ROOF_H * 0.5,
+                                  F3S_Z)))
+    canvas = PALETTE["canvas_khaki"]
+    for sx in (-1.0, 1.0):
+        b.add_mesh(make_box((0.055, F3S_H - 0.16, F3S_L - 0.14), canvas,
+                            offset=(sx * (F3S_W * 0.5 + 0.02),
+                                    FRAME_TOP + F3S_H * 0.5, F3S_Z)))
+        # Three vertical tie-down straps per side.
+        for zz in (F3S_Z - 0.78, F3S_Z, F3S_Z + 0.78):
+            b.add_mesh(make_box((0.065, F3S_H - 0.08, 0.055), dark,
+                                offset=(sx * (F3S_W * 0.5 + 0.055),
+                                        FRAME_TOP + F3S_H * 0.5, zz)))
+    b.add_mesh(make_box((F3S_W - 0.16, F3S_H - 0.12, 0.055), canvas,
+                        offset=(0.0, FRAME_TOP + F3S_H * 0.5,
+                                F3S_Z - F3S_L * 0.5 - 0.02)))
 
 
 def build_s300_tel(elevation_deg: float = 0.0) -> MeshData:
@@ -130,34 +216,27 @@ def build_s300_tel(elevation_deg: float = 0.0) -> MeshData:
     green = PALETTE["s300_green"]
     dark = PALETTE["mil_green_dark"]
 
-    # flat bed + boxy flat-front cab + dark windshield band proud of the face
-    b.add_mesh(make_box((CHASSIS_W, FRAME_TOP - FRAME_BOT, CHASSIS_L), green,
-                        offset=(0.0, (FRAME_BOT + FRAME_TOP) * 0.5, 0.0)))
-    b.add_mesh(make_box((CAB_W, CAB_H, CAB_L), green,
-                        offset=(0.0, FRAME_TOP + CAB_H * 0.5,
-                                CHASSIS_L * 0.5 - CAB_L * 0.5)))
-    b.add_mesh(make_box((2.55, 0.62, 0.08), PALETTE["radome"],
-                        offset=(0.0, CAB_TOP - 0.55, CHASSIS_L * 0.5 + 0.02)))
-    # side windows: dark plates on both cab flanks
-    for sx in (1.0, -1.0):
-        b.add_mesh(make_box((0.08, 0.55, 1.1), PALETTE["radome"],
-                            offset=(sx * (CAB_W * 0.5 + 0.02), CAB_TOP - 0.58,
-                                    CHASSIS_L * 0.5 - 0.85)))
-    # front bumper lip below the cab face
-    b.add_mesh(make_box((CHASSIS_W, 0.28, 0.25), dark,
-                        offset=(0.0, FRAME_BOT + 0.14, CHASSIS_L * 0.5 + 0.1)))
-    # F3S electronics cabin directly behind the cab: a near-cab-tall box
-    # with a sloped roof wedge dropping toward the cab (5P85S "master")
-    b.add_mesh(make_box((F3S_W, F3S_H, F3S_L), green,
-                        offset=(0.0, FRAME_TOP + F3S_H * 0.5, F3S_Z)))
-    b.add_mesh(make_wedge((F3S_W, F3S_ROOF_H, F3S_L), green,
-                          offset=(0.0, FRAME_TOP + F3S_H + F3S_ROOF_H * 0.5,
-                                  F3S_Z)))
+    # Twin ladder rails with a thin deck, rather than one featureless slab.
+    b.add_mesh(make_box((CHASSIS_W, 0.24, CHASSIS_L), green,
+                        offset=(0.0, FRAME_TOP - 0.12, 0.0)))
+    for sx in (-1.0, 1.0):
+        b.add_mesh(make_box((0.34, FRAME_TOP - FRAME_BOT, CHASSIS_L - 0.25),
+                            dark,
+                            offset=(sx * 0.92,
+                                    (FRAME_BOT + FRAME_TOP) * 0.5, -0.05)))
+    for zc in (-5.35, -3.0, -0.5, 2.0, 4.75):
+        b.add_mesh(make_box((2.36, 0.14, 0.24), dark,
+                            offset=(0.0, 0.78, zc)))
+
+    _add_maz_cab(b, green, dark)
+    _add_f3s_cabin(b, green, dark)
 
     # 8 wheels + mudguard strips over each axle pair
     for za in AXLE_Z:
         for sx in (1.0, -1.0):
             b.add_mesh(make_cylinder(TIRE_R, TIRE_W, 18, PALETTE["tire"],
+                                     axis="x", offset=(sx * TIRE_X, TIRE_R, za)))
+            b.add_mesh(make_cylinder(0.27, TIRE_W + 0.06, 14, dark,
                                      axis="x", offset=(sx * TIRE_X, TIRE_R, za)))
     for zc in ((AXLE_Z[0] + AXLE_Z[1]) * 0.5, (AXLE_Z[2] + AXLE_Z[3]) * 0.5):
         for sx in (1.0, -1.0):
@@ -180,11 +259,21 @@ def build_s300_tel(elevation_deg: float = 0.0) -> MeshData:
     b.add_mesh(make_box((2.3, 0.22, 0.45), dark,
                         offset=(0.0, FRAME_TOP + 0.11, 0.8)))
 
-    # 4 outrigger jacks
+    # Four auto-levelling jacks: stowed close to the chassis in travel and
+    # lowered onto pads with the tube block erect.
+    deployed = abs(float(elevation_deg)) > 5.0
     for zr in RIG_Z:
         for sx in (1.0, -1.0):
-            b.add_mesh(make_box(RIG_SIZE, dark,
-                                offset=(sx * RIG_X, RIG_SIZE[1] * 0.5, zr)))
+            if deployed:
+                b.add_mesh(make_box((0.68, 0.18, 0.34), dark,
+                                    offset=(sx * 1.60, 0.98, zr)))
+                b.add_mesh(make_box((0.18, 0.94, 0.18), dark,
+                                    offset=(sx * 1.82, 0.49, zr)))
+                b.add_mesh(make_box((0.34, 0.08, 0.46), PALETTE["tire"],
+                                    offset=(sx * 1.82, 0.04, zr)))
+            else:
+                b.add_mesh(make_box((0.24, 0.84, 0.44), dark,
+                                    offset=(sx * 1.42, 0.88, zr)))
     return b.build()
 
 

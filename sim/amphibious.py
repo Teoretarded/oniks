@@ -44,8 +44,8 @@ import math
 import numpy as np
 
 from sim.enemy_ships import Destroyer
-from sim.ships import (HULL_DRAFT, SHIP_TYPES, ST_ALIVE, ST_BURNING, ST_GONE,
-                       ST_SINKING, Ship)
+from sim.ships import (SHIP_TYPES, ST_ALIVE, ST_BURNING, ST_GONE, ST_SINKING,
+                       Ship)
 
 # ---------------------------------------------------------------------------
 # Geometry / timing constants (research-grounded; the landing economy)
@@ -67,6 +67,7 @@ LAUNCH_LINE_RANGE_M = 45_000.0    # m from the base: transports splash here
 # air-cushion craft (the "hard to catch close in" sprinter).
 TRANSPORT_SPEED_MPS = 11.0        # ~21 kn LHD-class beeline
 LCAC_SPEED_MPS      = 18.0        # ~35 kn air-cushion sprint to the beach
+LCAC_DRAFT_M        = 1.0         # shallow skirt/cushion contact envelope
 
 # How many LCACs each transport disgorges at the launch line.
 LCAC_PER_TRANSPORT = 3
@@ -100,8 +101,7 @@ TRANSPORT_STATE_LABELS = {
 # ---------------------------------------------------------------------------
 # A slow LHD/LST-class amphibious ship: large/long, modest HP (a soft-skinned
 # auxiliary, not a warship — easier to sink than a Burke once you reach it).
-# The renderer falls back to the existing destroyer/ship mesh until a dedicated
-# hull lands (DEFERRED).
+# The renderer now owns a dedicated 200 m amphibious-transport mesh.
 SHIP_TYPES["transport"] = dict(
     length=200.0, beam=32.0, height=28.0, speed=TRANSPORT_SPEED_MPS, hp=2)
 
@@ -156,11 +156,8 @@ class Transport(Destroyer):
         self.height = spec["height"]
         self.speed = spec["speed"]
         self.hp = spec["hp"]
-        # Recompute the OBB bounding-sphere reach for the NEW dims with the SAME
-        # formula Ship.__init__ uses (damage.py's pair prefilter relies on it).
-        self.hit_reach = (0.5 * math.sqrt(
-            self.beam ** 2 + (self.height + HULL_DRAFT) ** 2 + self.length ** 2)
-            + 0.5 * (self.height - HULL_DRAFT))
+        self._configure_type_hit_geometry()
+        self.recompute_hit_reach()
         # The emitter contract: a transport carries NO radar mount.  The
         # Destroyer ctor built one (self.radar); drop it to None so the world's
         # guarded self.ships radar walks (ELINT/_emitters/RWR) skip it and it is
@@ -238,7 +235,7 @@ class Transport(Destroyer):
             if self.sink_elapsed >= SINK_GONE_TIME:
                 self.state = ST_GONE
             return
-        from sim.ships import BURN_SPEED_FRAC, BURN_TIME
+        from sim.ships import BURN_SPEED_FRAC
         if self.state == ST_BURNING:
             self.burn_timer -= dt
             if self.burn_timer <= 0.0:
@@ -322,6 +319,10 @@ class Lcac(Ship):
             (sx + math.sin(heading) * 100.0, sz + math.cos(heading) * 100.0),
         ]
         super().__init__(lcac_id, "lcac", stub_lane, lane_t0=0.0)
+        # Ensure the registered shallow skirt and 4.6 m visual mast envelope
+        # own the final collision frame, then cover its exact volume.
+        self._configure_type_hit_geometry()
+        self.recompute_hit_reach()
         self.pos = np.array([sx, 0.0, sz], dtype=np.float64)
         self.heading = heading
         self._box_xz = (bx, bz)

@@ -83,7 +83,11 @@ ROUNDS_PER_SECOND = 75.0    # rd/s muzzle rate during a burst
 # ~0.50 kill-per-burst at 800 m, ~0.15 at the 2 km edge, vs a missile-sized
 # (2.6 m effective radius) target.
 TRACK_SIGMA_MRAD = 3.06     # mrad RMS per-axis tracking error
-TRACK_TAU_S = 2.0           # s OU correlation (FCS solution persistence)
+TRACK_TAU_S = 1.0           # s OU correlation (FCS solution persistence).
+#   1.0 s vs the 1.5 s burst cadence -> consecutive bursts are nearly
+#   independent (corr ~0.22): a closing engagement gets honest repeated
+#   tries, matching the old per-burst ramp CUMULATIVELY too (the M4-B
+#   "a lone swarm round never leaks given ammo" contract broke at tau 2).
 LETHAL_DISP_MRAD = 1.45     # mrad: dispersion-stream lethal radius growth
 
 # Effective target radius when the target does not expose ``.radius``:

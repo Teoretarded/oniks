@@ -24,6 +24,11 @@ import pygame
 
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE, TITLE_SIZE
 from game.keybinds import (ACTIONS, RESERVED_KEYS, key_display, normalize_key)
+from game.weather_composer import (CUSTOM_DEFAULTS, CUSTOM_PREF_KEYS,
+                                   LAYER_CARDS, QUICK_WEATHER_PRESETS,
+                                   canonical_custom_tuple,
+                                   custom_selection, cycle_custom_value,
+                                   toggle_custom_value, weather_summary)
 
 # --- Visual-language palette: "WARDROOM DUSK" ------------------------------------
 # Normative: Assets of oinks/ui_design/handoff/ONIKS-UI-SPEC.md (locked 2a).
@@ -148,15 +153,30 @@ from game.ui_prefs import DEFAULTS as PREF_DEFAULTS
 SETTINGS_TABS = ("KEYBINDS", "GRAPHICS")
 SETTINGS_HEADER_GFX = "SETTINGS / GRAPHICS"
 SETTINGS_FOOTER_GFX = "LEFT/RIGHT CHANGE   TAB SWITCH TAB   ESC BACK   R RESET ROW"
+SETTINGS_HEADER_WEATHER = "SETTINGS / WEATHER COMPOSER"
+SETTINGS_FOOTER_WEATHER = ("UP/DN SELECT   LT/RT STYLE   SPACE TOGGLE   "
+                           "ENTER APPLY   ESC CANCEL")
 # (label, ui_prefs key, ordered values). Values cycle LEFT/RIGHT and wrap;
 # every one is validated by the ui_prefs schema, so a stale file can never
 # render an impossible state.
 GRAPHICS_ROWS = (
+    ("CLOUD RENDERER", "cloud_renderer", ("legacy", "v2")),
+    ("CLOUD QUALITY (V2)", "cloud_quality",
+     ("off", "low", "med", "high", "ultra")),
     ("PARTICLE DENSITY", "particle_density", ("low", "med", "high", "ultra")),
     ("EXHAUST TRAILS", "exhaust_trails", (False, True)),
     ("LAUNCH SMOKE", "launch_smoke", ("minimal", "full")),
     ("LAUNCH CINEMA (MAP)", "launch_cinema", (False, True)),
     ("MAP LAYOUT", "map_layout", ("board", "classic")),
+)
+
+WEATHER_COMPOSER_ACTION = "weather_composer"
+# Display/focus entries keep one compact action row where the old weather
+# cycle lived. GRAPHICS_ROWS remains the persisted preference-row contract.
+GRAPHICS_ENTRIES = (
+    GRAPHICS_ROWS[:2]
+    + (("WEATHER COMPOSER", WEATHER_COMPOSER_ACTION, None),)
+    + GRAPHICS_ROWS[2:]
 )
 
 
@@ -720,6 +740,16 @@ class MenuState(_ListScreen):
 
     items = MAIN_ITEMS
 
+    def handle_event(self, ev) -> None:
+        # The inspection lab is intentionally absent from MAIN_ITEMS and the
+        # rebind registry.  Raw F3 is claimed only on this screen, leaving the
+        # in-battle F3 bug-report action untouched.
+        if (self._pending is None and ev.type == pygame.KEYDOWN
+                and ev.key == pygame.K_F3):
+            self.app.open_testing_lab()
+            return
+        super().handle_event(ev)
+
     def _escape(self) -> None:
         self.app.running = False
 
@@ -927,6 +957,12 @@ class SettingsState(GameState):
         self.tab = 0
         self._gfx_focus = 0
         self._gfx_rects: list = []      # (gfx_focus_index, rect) from render
+        # WEATHER COMPOSER is a draft subview: nothing persists until APPLY.
+        self._weather_open = False
+        self._weather_focus = 0
+        self._weather_rects: list = []
+        self._weather_draft_override = "battle"
+        self._weather_draft = dict(CUSTOM_DEFAULTS)
 
     def enter(self) -> None:
         pygame.event.set_grab(False)
@@ -944,6 +980,11 @@ class SettingsState(GameState):
         self.tab = 0
         self._gfx_focus = 0
         self._gfx_rects = []
+        self._weather_open = False
+        self._weather_focus = 0
+        self._weather_rects = []
+        self._weather_draft_override = "battle"
+        self._weather_draft = dict(CUSTOM_DEFAULTS)
 
     def effective_time_scale(self) -> float:
         return 0.0
@@ -951,6 +992,12 @@ class SettingsState(GameState):
     # --------------------------------------------------------------- input
 
     def handle_event(self, ev) -> None:
+        if self._weather_open:
+            if ev.type == pygame.KEYDOWN:
+                self._weather_nav_key(ev.key)
+            else:
+                self._weather_mouse(ev)
+            return
         if ev.type == pygame.KEYDOWN:
             if self.listening is not None:
                 self._capture(ev.key)
@@ -1076,7 +1123,7 @@ class SettingsState(GameState):
         return getattr(self.app, "ui_prefs", None)
 
     def _gfx_focusables(self) -> list:
-        return [key for _, key, _ in GRAPHICS_ROWS] + ["BACK"]
+        return [key for _, key, _ in GRAPHICS_ENTRIES] + ["BACK"]
 
     def _gfx_nav_key(self, key: int) -> None:
         items = self._gfx_focusables()
@@ -1093,12 +1140,20 @@ class SettingsState(GameState):
                 if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     self.app.audio.ui_click()
                     self._back()
+            elif target == WEATHER_COMPOSER_ACTION:
+                if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    self._open_weather_composer()
             else:
                 self._gfx_cycle(target, -1 if key == pygame.K_LEFT else 1)
         elif key == pygame.K_r:
             target = items[self._gfx_focus]
             prefs = self._prefs()
-            if target != "BACK" and prefs is not None:
+            if target == WEATHER_COMPOSER_ACTION and prefs is not None:
+                prefs.set_many({"cloud_weather_override": "battle",
+                                **CUSTOM_DEFAULTS})
+                self._flash = [target, PRESS_FLASH_S]
+                self.app.audio.ui_click()
+            elif target != "BACK" and prefs is not None:
                 prefs.set(target, PREF_DEFAULTS[target])
                 self._flash = [target, PRESS_FLASH_S]
                 self.app.audio.ui_click()
@@ -1130,6 +1185,8 @@ class SettingsState(GameState):
             if target == "BACK":
                 self.app.audio.ui_click()
                 self._back()
+            elif target == WEATHER_COMPOSER_ACTION:
+                self._open_weather_composer()
             else:
                 self._gfx_cycle(target, 1)
 
@@ -1137,6 +1194,131 @@ class SettingsState(GameState):
         for idx, (x0, y0, x1, y1) in self._gfx_rects:
             if x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1:
                 return idx
+        return None
+
+    # ------------------------------------------- WEATHER COMPOSER subview
+
+    def _open_weather_composer(self) -> None:
+        prefs = self._prefs()
+        if prefs is None:
+            return
+        override = prefs.get("cloud_weather_override")
+        self._weather_draft_override = (
+            override if override in QUICK_WEATHER_PRESETS else "battle")
+        self._weather_draft = custom_selection(prefs)
+        self._weather_open = True
+        self._weather_focus = 0
+        self._weather_rects = []
+        self.app.audio.ui_click()
+
+    def _cancel_weather_composer(self) -> None:
+        self._weather_open = False
+        self._weather_rects = []
+        self.app.audio.ui_click()
+
+    def _apply_weather_composer(self) -> None:
+        prefs = self._prefs()
+        if prefs is not None:
+            # Canonicalization before the single write makes the persisted
+            # Low/Mid/High/Convective ordering explicit and testable.
+            values = canonical_custom_tuple(self._weather_draft)
+            changes = {key: value
+                       for key, value in zip(CUSTOM_PREF_KEYS, values)}
+            changes["cloud_weather_override"] = self._weather_draft_override
+            prefs.set_many(changes)
+            self._flash = [WEATHER_COMPOSER_ACTION, PRESS_FLASH_S]
+        self._weather_open = False
+        self._weather_rects = []
+        self.app.audio.ui_click()
+
+    def _weather_card(self):
+        index = self._weather_focus - 1
+        return LAYER_CARDS[index] if 0 <= index < len(LAYER_CARDS) else None
+
+    def _weather_cycle_card(self, card, delta: int) -> None:
+        current = self._weather_draft[card.key]
+        self._weather_draft[card.key] = cycle_custom_value(
+            card.key, current, delta)
+        self._weather_draft_override = "custom"
+        self.app.audio.ui_click()
+
+    def _weather_toggle_card(self, card) -> None:
+        self._weather_draft[card.key] = toggle_custom_value(
+            card.key, self._weather_draft[card.key])
+        self._weather_draft_override = "custom"
+        self.app.audio.ui_click()
+
+    def _weather_nav_key(self, key: int) -> None:
+        count = 1 + len(LAYER_CARDS) + 2       # quick + cards + apply/cancel
+        if key in (pygame.K_UP, pygame.K_DOWN, pygame.K_TAB):
+            delta = -1 if key == pygame.K_UP else 1
+            self._weather_focus = move_selection(
+                self._weather_focus, delta, count)
+            self.app.audio.ui_click()
+        elif key in (pygame.K_LEFT, pygame.K_RIGHT):
+            delta = -1 if key == pygame.K_LEFT else 1
+            if self._weather_focus == 0:
+                self._weather_draft_override = cycle_value(
+                    QUICK_WEATHER_PRESETS, self._weather_draft_override, delta)
+                self.app.audio.ui_click()
+            else:
+                card = self._weather_card()
+                if card is not None:
+                    self._weather_cycle_card(card, delta)
+        elif key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER):
+            card = self._weather_card()
+            if card is not None:
+                self._weather_toggle_card(card)
+            elif self._weather_focus == 0:
+                # Quick means quick: ENTER commits the highlighted preset.
+                self._apply_weather_composer()
+            elif self._weather_focus == 1 + len(LAYER_CARDS):
+                self._apply_weather_composer()
+            else:
+                self._cancel_weather_composer()
+        elif key == pygame.K_r:
+            card = self._weather_card()
+            if card is not None:
+                self._weather_draft[card.key] = CUSTOM_DEFAULTS[card.key]
+                self._weather_draft_override = "custom"
+            else:
+                self._weather_draft_override = "battle"
+                self._weather_draft = dict(CUSTOM_DEFAULTS)
+            self.app.audio.ui_click()
+        elif key == pygame.K_ESCAPE:
+            self._cancel_weather_composer()
+
+    def _weather_mouse(self, ev) -> None:
+        if ev.type == pygame.MOUSEMOTION:
+            hit = self._weather_hit(ev.pos)
+            if hit is not None:
+                self._weather_focus = hit[0]
+            return
+        if ev.type != pygame.MOUSEBUTTONDOWN or ev.button not in (1, 3):
+            return
+        hit = self._weather_hit(ev.pos)
+        if hit is None:
+            return
+        focus, kind, payload = hit
+        self._weather_focus = focus
+        if kind == "quick":
+            self._weather_draft_override = payload
+            self.app.audio.ui_click()
+        elif kind == "card":
+            card = next(c for c in LAYER_CARDS if c.key == payload)
+            if ev.button == 1:
+                self._weather_toggle_card(card)
+            else:
+                self._weather_cycle_card(card, -1)
+        elif kind == "apply":
+            self._apply_weather_composer()
+        elif kind == "cancel":
+            self._cancel_weather_composer()
+
+    def _weather_hit(self, pos):
+        for focus, kind, payload, (x0, y0, x1, y1) in self._weather_rects:
+            if x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1:
+                return focus, kind, payload
         return None
 
     # -------------------------------------------------------------- render
@@ -1158,7 +1340,9 @@ class SettingsState(GameState):
         head_lh = text.line_height(HEADER_SIZE)
         small_lh = text.line_height(SMALL_SIZE)
         body_lh = text.line_height(BODY_SIZE)
-        header = SETTINGS_HEADER if self.tab == 0 else SETTINGS_HEADER_GFX
+        header = (SETTINGS_HEADER if self.tab == 0
+                  else (SETTINGS_HEADER_WEATHER if self._weather_open
+                        else SETTINGS_HEADER_GFX))
         text.draw_text(x, 48, header, ACCENT, HEADER_SIZE)
         rule_y = 48 + head_lh + 8
         draw_header_rule(text, x, rule_y, COL_W)
@@ -1231,6 +1415,10 @@ class SettingsState(GameState):
         """GRAPHICS tab body: ui_prefs rows (label left, value right with
         chevrons on focus) + BACK + footer. Same plate/row grammar as the
         keybinds tab — Wardroom Dusk, flat plates, no glow."""
+        if self._weather_open:
+            self._render_weather_composer(x, panel_y, panel_h, small_lh,
+                                          body_lh, w, h)
+            return
         text = self.text
         prefs = self._prefs()
         self._gfx_rects = []
@@ -1243,7 +1431,7 @@ class SettingsState(GameState):
         text.draw_lines([(x + PAD, div_y), (x + COL_W - PAD, div_y)],
                         (*LINE_COL, 1.0), 1.0)
         y = div_y + 6
-        for i, (label, key, _values) in enumerate(GRAPHICS_ROWS):
+        for i, (label, key, _values) in enumerate(GRAPHICS_ENTRIES):
             focused = self._gfx_focus == i
             if focused:
                 text.draw_rect(x, y, COL_W, ROW_H, (*BG2, 1.0))
@@ -1253,9 +1441,17 @@ class SettingsState(GameState):
             ty = y + (ROW_H - body_lh) // 2
             text.draw_text(x + PAD, ty, label,
                            ACCENT if focused else MUTED)
-            value = graphics_value_label(prefs.get(key)) if prefs is not None \
-                else "--"
-            if focused:
+            if key == WEATHER_COMPOSER_ACTION:
+                value = (weather_summary(
+                    prefs.get("cloud_weather_override"),
+                    custom_selection(prefs)) if prefs is not None else "--")
+                limit = COL_W * 0.52
+                while text.text_width(value) > limit and len(value) > 6:
+                    value = value[:-4].rstrip() + "..."
+            else:
+                value = graphics_value_label(prefs.get(key)) \
+                    if prefs is not None else "--"
+            if focused and key != WEATHER_COMPOSER_ACTION:
                 value = f"< {value} >"
             vw2 = text.text_width(value)
             text.draw_text(x + COL_W - PAD - 8 - vw2, ty, value,
@@ -1267,7 +1463,7 @@ class SettingsState(GameState):
         by = panel_y + panel_h + PAD
         bw_px = text.text_width(BACK_LABEL) + 2 * PAD
         bx = x + COL_W - bw_px
-        back_focused = self._gfx_focus == len(GRAPHICS_ROWS)
+        back_focused = self._gfx_focus == len(GRAPHICS_ENTRIES)
         col = ACCENT if back_focused else MUTED
         if back_focused:
             text.draw_rect(bx, by, bw_px, BTN_H, (*BG2, 1.0))
@@ -1275,13 +1471,138 @@ class SettingsState(GameState):
                          (bx, by + BTN_H), (bx, by)], (*col, 1.0), 1.0)
         blh = text.line_height(BODY_SIZE)
         text.draw_text(bx + PAD, by + (BTN_H - blh) // 2, BACK_LABEL, col)
-        self._gfx_rects.append((len(GRAPHICS_ROWS),
+        self._gfx_rects.append((len(GRAPHICS_ENTRIES),
                                 (bx, by, bx + bw_px, by + BTN_H)))
         fy = h - FOOTER_MARGIN - small_lh
         text.draw_text(x, fy, SETTINGS_FOOTER_GFX, ACCENT_DIM, SMALL_SIZE)
         gvw = text.text_width(GAME_VERSION, SMALL_SIZE)
         text.draw_text(x + COL_W - gvw, fy, GAME_VERSION, DISABLED,
                        SMALL_SIZE)
+        text.flush(w, h)
+
+    def _render_weather_composer(self, x, panel_y, panel_h, small_lh,
+                                 body_lh, w, h) -> None:
+        """Compact quick-preset strip + independently selectable layer cards."""
+        text = self.text
+        self._weather_rects = []
+        left, right = x + PAD, x + COL_W - PAD
+        inner_w = right - left
+
+        y = panel_y + 10
+        text.draw_text(left, y, "QUICK PRESET", MUTED, SMALL_SIZE)
+        y += small_lh + 5
+        quick_labels = {
+            "battle": "BATTLE", "clear": "CLEAR", "fair": "FAIR",
+            "partly cloudy": "PARTLY", "overcast": "OVERCAST",
+            "high cirrus": "CIRRUS", "towering cumulus": "TOWERING",
+            "thunderstorm": "STORM", "custom": "CUSTOM",
+        }
+        chip_h, chip_gap = 24, 5
+        cx, cy = left, y
+        for value in QUICK_WEATHER_PRESETS:
+            label = quick_labels[value]
+            chip_w = text.text_width(label, SMALL_SIZE) + 14
+            if cx + chip_w > right:
+                cx = left
+                cy += chip_h + chip_gap
+            selected = self._weather_draft_override == value
+            if selected:
+                text.draw_rect(cx, cy, chip_w, chip_h, (*BG2, 1.0))
+            border = ACCENT if selected else LINE_COL
+            text.draw_lines([(cx, cy), (cx + chip_w, cy),
+                             (cx + chip_w, cy + chip_h),
+                             (cx, cy + chip_h), (cx, cy)],
+                            (*border, 1.0), 1.0)
+            tw = text.text_width(label, SMALL_SIZE)
+            text.draw_text(cx + (chip_w - tw) * 0.5,
+                           cy + (chip_h - small_lh) * 0.5,
+                           label, TEXT_COL if selected else MUTED, SMALL_SIZE)
+            self._weather_rects.append(
+                (0, "quick", value, (cx, cy, cx + chip_w, cy + chip_h)))
+            cx += chip_w + chip_gap
+        chips_bottom = cy + chip_h
+
+        buttons_y = panel_y + panel_h - PAD - BTN_H
+        summary_h = 38
+        summary_y = buttons_y - 8 - summary_h
+        cards_top = chips_bottom + 10
+        cards_bottom = summary_y - 8
+        card_gap = 9
+        card_w = (inner_w - card_gap) * 0.5
+        card_h = max(58.0, (cards_bottom - cards_top - card_gap) * 0.5)
+
+        for i, card in enumerate(LAYER_CARDS):
+            row, col_i = divmod(i, 2)
+            rx = left + col_i * (card_w + card_gap)
+            ry = cards_top + row * (card_h + card_gap)
+            focus = i + 1
+            focused = self._weather_focus == focus
+            current = self._weather_draft[card.key]
+            enabled = current != "off"
+            if enabled or focused:
+                fill = BG2 if focused else BG1
+                text.draw_rect(rx, ry, card_w, card_h, (*fill, 0.90))
+            border = ACCENT if focused else BELIEF if enabled else LINE_COL
+            text.draw_lines([(rx, ry), (rx + card_w, ry),
+                             (rx + card_w, ry + card_h),
+                             (rx, ry + card_h), (rx, ry)],
+                            (*border, 1.0), 1.5 if focused else 1.0)
+            if focused:
+                text.draw_rect(rx, ry, FOCUS_BAR_W, card_h,
+                               (*ACCENT, 1.0))
+            text.draw_text(rx + 10, ry + 7, card.title,
+                           ACCENT if focused else MUTED, SMALL_SIZE)
+            aw = text.text_width(card.altitude, SMALL_SIZE)
+            text.draw_text(rx + card_w - 10 - aw, ry + 7, card.altitude,
+                           FAINT, SMALL_SIZE)
+            state = current.upper()
+            if focused:
+                state = f"< {state} >"
+            sw = text.text_width(state)
+            text.draw_text(rx + (card_w - sw) * 0.5,
+                           ry + max(27, (card_h - body_lh) * 0.62),
+                           state, TEXT_COL if enabled else DISABLED)
+            self._weather_rects.append(
+                (focus, "card", card.key,
+                 (rx, ry, rx + card_w, ry + card_h)))
+
+        # One readable result line below the cards.
+        summary = weather_summary(self._weather_draft_override,
+                                  self._weather_draft)
+        while text.text_width(summary, SMALL_SIZE) > inner_w - 18 \
+                and len(summary) > 8:
+            summary = summary[:-4].rstrip() + "..."
+        text.draw_rect(left, summary_y, inner_w, summary_h,
+                       (*PLATE_INK, 0.92))
+        text.draw_lines([(left, summary_y), (right, summary_y)],
+                        (*LINE_COL, 1.0), 1.0)
+        text.draw_text(left + 9, summary_y + (summary_h - small_lh) * 0.5,
+                       summary, TEXT_COL, SMALL_SIZE)
+
+        button_gap = 8
+        button_w = 104
+        apply_x = right - button_w * 2 - button_gap
+        for focus, kind, label, bx in (
+                (1 + len(LAYER_CARDS), "apply", "APPLY", apply_x),
+                (2 + len(LAYER_CARDS), "cancel", "CANCEL",
+                 apply_x + button_w + button_gap)):
+            focused = self._weather_focus == focus
+            col = ACCENT if focused else MUTED
+            if focused:
+                text.draw_rect(bx, buttons_y, button_w, BTN_H, (*BG2, 1.0))
+            text.draw_lines([(bx, buttons_y), (bx + button_w, buttons_y),
+                             (bx + button_w, buttons_y + BTN_H),
+                             (bx, buttons_y + BTN_H), (bx, buttons_y)],
+                            (*col, 1.0), 1.0)
+            lw = text.text_width(label)
+            text.draw_text(bx + (button_w - lw) * 0.5,
+                           buttons_y + (BTN_H - body_lh) * 0.5, label, col)
+            self._weather_rects.append(
+                (focus, kind, kind,
+                 (bx, buttons_y, bx + button_w, buttons_y + BTN_H)))
+
+        fy = h - FOOTER_MARGIN - small_lh
+        text.draw_text(x, fy, SETTINGS_FOOTER_WEATHER, ACCENT_DIM, SMALL_SIZE)
         text.flush(w, h)
 
     def _draw_entry(self, entry, x, y, focused, small_lh, body_lh) -> None:

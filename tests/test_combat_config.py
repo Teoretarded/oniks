@@ -429,6 +429,16 @@ def test_clamp_config_map_preset_round_trip():
     assert clamp_config().map_preset == 0
 
 
+def test_weather_preset_default_names_and_clamp():
+    from world.combat_config import (CLAMP_WEATHER_PRESET,
+                                     WEATHER_PRESET_NAMES)
+    assert CombatConfig().weather_preset == 1
+    assert WEATHER_PRESET_NAMES[1] == "FAIR"
+    assert len(WEATHER_PRESET_NAMES) == 7
+    assert clamp_config(weather_preset=-9).weather_preset == 0
+    assert clamp_config(weather_preset=99).weather_preset == 6
+
+
 def test_default_is_frozen():
     """Frozen dataclass: cannot assign fields."""
     with pytest.raises((AttributeError, TypeError)):

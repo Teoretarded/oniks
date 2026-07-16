@@ -59,3 +59,24 @@ def test_no_sim_module_imports_clouds():
     offenders = [p.name for p in sim_dir.glob("*.py")
                  if pat.search(p.read_text(encoding="utf-8", errors="ignore"))]
     assert offenders == []
+
+
+def test_clouds_use_render_weather_clock_not_sim_time():
+    root = Path(__file__).resolve().parents[1]
+    sandbox = (root / "game" / "sandbox.py").read_text(encoding="utf-8")
+    assert "self._cloud_time = 0.0" in sandbox
+    assert "weather_dt = min(max(float(dt_real), 0.0), 0.05)" in sandbox
+    assert "self._cloud_time += weather_dt" in sandbox
+    assert "self.weather_effects.advance(weather_dt" in sandbox
+    assert "clouds.draw(self.renderer, self.camera, self.world.sim_time)" not in sandbox
+    assert "bind_shadow_uniforms(self.renderer.lit, 6, self.camera,\n                                        self.world.sim_time)" not in sandbox
+
+
+def test_cloud_wind_is_slow_and_shared_with_shadows():
+    root = Path(__file__).resolve().parents[1]
+    clouds = (root / "world" / "clouds.py").read_text(encoding="utf-8")
+    shaderlib = (root / "engine" / "shaderlib.py").read_text(encoding="utf-8")
+    assert re.search(r"const float WIND_MS\s*=\s*3\.0;", clouds)
+    assert "uniform vec2 u_cloud_wind_xz;" in shaderlib
+    assert "uniform float u_cloud_tile_m;" in shaderlib
+    assert "u_cloud_time * 18.0" not in shaderlib
