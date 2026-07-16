@@ -31,6 +31,7 @@ GL-touching module (imports world.sky etc.) — never imported by unit tests.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 
@@ -39,16 +40,18 @@ from engine.camera import Camera
 from engine.mesh import Mesh
 from engine.meshdata import make_box, make_cylinder
 from engine.particles import Effects, ParticleRenderer
-from engine.text import TextRenderer
+from engine.text import SMALL_SIZE, TextRenderer
 from game.cameras import (LAUNCHER_LOOK_UP, CameraRig, StaticSubject,
                           next_subject, subject_cycle_order)
 from game.controls import (PLATFORMS_SANDBOX, SandboxControls,
                            next_platform)
-from game.hud import HUD
+from game.hud import HUD, world_to_screen
 from game.salvo import (RIPPLE_INTERVAL_S, SALVO_MODES, SalvoQueue,
                        next_salvo_mode, ready_tube_count, tot_delays)
 from game.states import GameState
 from game.timewarp import event_drop
+from game.weather_effects import (WeatherEffectsController,
+                                  WeatherOverlayRenderer)
 from game import tactical_map
 from game.tactical_map import TacticalMap
 from models.aircraft_model import build_fast_aircraft, build_patrol_aircraft
@@ -60,12 +63,15 @@ from models.missiles import (build_40n6, build_48n6, build_57e6,
                              build_tomahawk, build_zircon)
 from models.oniks import build_oniks, build_oniks_nose_cap
 from models.s300 import build_s300_tel
-from models.ships_models import build_cargo, build_tanker, build_warship
+from models.ships_models import (build_cargo, build_lcac, build_tanker,
+                                 build_transport, build_warship)
+from models.support_assets import build_sam_pad
 from models.structures import (build_fuel_depot, build_harbor,
                                build_radar_station)
 from sim.aircraft import AC_FALLING, AC_GONE
 from sim.a2a import IrMissile
 from sim.arsenal import N40N6
+from sim.damage_model import fireball_radius_m
 from sim.missile import (PH_BOOST, PH_CLIMB, PH_CRUISE, PH_DESCENT, PH_EJECT,
                          PH_PITCHOVER, PH_RIDEOUT, PH_TERMINAL)
 from sim.physics import GRAVITY
@@ -111,8 +117,10 @@ MISSILE_MESH_ALIAS = {
 # (same rationale as MISSILE_MESH_ALIAS; the destroyer fallback stays for
 # genuinely unknown types).
 SHIP_MESH_ALIAS = {
-    "transport": "cargo",
-    "lcac":      "warship",
+    # Both doctrinal variants are Arleigh Burke hulls; their loadout and
+    # fire-control behavior differ, not their exterior geometry.
+    "aaw_destroyer": "destroyer",
+    "ground_attack_destroyer": "destroyer",
 }
 
 
@@ -191,6 +199,14 @@ SPLASH_SCALE = 1.4             # clean water impact
 
 SHIP_HIT_SPLASH_MAX_Y = 8.0    # hull hits below this height also splash
 
+# Magazine cook-off representative blast yield (kg TNT-eq).  The event tuple
+# carries only a position, so the effect uses one representative yield:
+# 250 kg sits between the 120 kg hull-breaking threshold
+# (sim/damage_model.COOK_SINK_TNT_KG) and a full Burke SM-2 magazine
+# (~430 kg via cookoff_tnt_kg(24)).  fireball_radius_m turns it into the
+# physical Hopkinson-Cranz fireball radius the effect scales from.
+MAGAZINE_REP_TNT_KG = 250.0
+
 
 class _NullTrail:
     """add_point sink for the EXHAUST TRAILS=OFF graphics pref — callers
@@ -265,11 +281,10 @@ HINT_ARM_NO_EMITTER = "KH-31P: SELECT AN EMITTER"
 HINT_ASBM_SEL = "BASTION-K ASBM SELECTED - lofted top-attack"
 HINT_ASBM_NO_SHIP = "BASTION-K: NO SHIP CONTACT TO TARGET"
 HINT_ASBM_STALE = "BASTION-K: SHIP TRACK STALE - LOFT MAY MISS A MOVER"
-# Zircon fuel-limited effective reach vs a surface target (measured,
-# tools/probe_zircon_traj.py): hi-lo ~250 km, lo-lo ~150 km — past these it
-# coasts fuel-starved and splashes short. Warn the player instead of a silent whiff.
-ZIRCON_RANGE_HILO_M = 250_000.0
-ZIRCON_RANGE_LOLO_M = 150_000.0
+# Zircon reach remeasured with the online planner and early seeker tracking:
+# the high profile reaches 380 km; sea-level drag limits lo-lo to 140 km.
+ZIRCON_RANGE_HILO_M = 380_000.0
+ZIRCON_RANGE_LOLO_M = 140_000.0
 HINT_RADAR_EMITTING = "RADAR: EMITTING"
 HINT_RADAR_SILENT = "RADAR: SILENT"
 HINT_RADAR_DESTROYED = "RADAR: DESTROYED"
@@ -374,18 +389,25 @@ class SandboxState(GameState):
         from world.ocean import sea_amp_scale
         self._sea_amp = sea_amp_scale(
             getattr(getattr(self.world, "_config", None), "sea_state", 3))
-        # F3-P4 volumetric clouds: seeded per battle ([seed, 17] — a new
-        # seed is a new sky), npz-cached so only the FIRST battle on a
-        # seed pays the ~5 s bake (under the BUILDING WORLD frame).
-        from world.clouds import Clouds
-        self.clouds = Clouds(
-            int(getattr(getattr(self.world, "_config", None), "seed", 0)))
+        # Cloud V2 is constructed beside the frozen legacy path. Graphics
+        # settings (or ONIKS_CLOUD_RENDERER for probes) can switch live; any
+        # V2 construction/pass failure falls back inside CloudsV2.
+        self.clouds = None
+        self._cloud_signature = None
+        self._sync_cloud_renderer(force=True)
+        self._cloud_time = 0.0       # render weather clock; not sim-time warp
         # M3-F4: render the ACTIVE map field so the 3D coast/islands match the
         # field the sim masks LOS with. CombatWorld carries a per-preset
         # height_field; the sandbox WorldState has none (default map).
         self.terrain = Terrain(field=getattr(self.world, "height_field", None))
         self.effects = Effects(seed=4)
         self.particles = ParticleRenderer()
+        # Visual-only weather: deterministic render-time darkness/rain and
+        # lightning/thunder. It owns no physics and samples each view camera.
+        _, _, weather_seed, weather_preset = self._cloud_signature
+        self.weather_effects = WeatherEffectsController(
+            weather_seed, weather_preset)
+        self.weather_overlay = WeatherOverlayRenderer()
         self.controls = SandboxControls(self)
         self.text = TextRenderer()      # shared by the HUD and the map
         self.hud = HUD(self.text)
@@ -418,6 +440,8 @@ class SandboxState(GameState):
         #                                 tracks: a missile, a TEL
         #                                 StaticSubject or a contact entity
         self.map_open = False           # M toggles the tactical map
+        self.flight_computer_debug = False  # F5 in a 3-D missile camera
+        self._fc_debug_subject = None
         self.tactical_map = TacticalMap(self)
         # Map texture pixels build in a daemon thread (seconds of numpy):
         # kicked here, under the BUILDING WORLD frame, so the first M press
@@ -485,7 +509,9 @@ class SandboxState(GameState):
                                          PALETTE["exhaust_ring"]))
         self._ship_meshes = {"cargo": Mesh(build_cargo()),
                              "tanker": Mesh(build_tanker()),
-                             "warship": Mesh(build_warship())}
+                             "warship": Mesh(build_warship()),
+                             "transport": Mesh(build_transport()),
+                             "lcac": Mesh(build_lcac())}
         builders = {"radar": build_radar_station, "depot": build_fuel_depot,
                     "harbor": build_harbor}
         self._site_draws = []
@@ -510,9 +536,7 @@ class SandboxState(GameState):
         # CombatState replaces these with the multi-launcher battery layout).
         self._tel_positions = [self._tel_pos]
         # S-300 battery: pad slab + permanently erected 4-tube TEL + 48N6
-        self._mesh_sam_pad = Mesh(make_box(SAM_PAD_SIZE, PALETTE["concrete"],
-                                           offset=(0.0, -SAM_PAD_SIZE[1] * 0.5,
-                                                   0.0)))
+        self._mesh_sam_pad = Mesh(build_sam_pad())
         self._mesh_s300_tel = Mesh(build_s300_tel(elevation_deg=90.0))
         self._missile_meshes = {
             "tomahawk": Mesh(build_tomahawk()),
@@ -614,6 +638,38 @@ class SandboxState(GameState):
         new = prefs.toggle_launch_cinema()
         self.show_hint("LAUNCH CINEMA: " + ("ON" if new else "OFF"))
         self.app.audio.ui_click()
+
+    def toggle_flight_computer_debug(self) -> bool:
+        """F5 in a 3-D missile view: show the real online rollout set."""
+        m = self.followed
+        fc = getattr(m, "_fc", None) if m is not None else None
+        if (fc is None or not getattr(m, "alive", False)
+                or not hasattr(fc, "set_debug_enabled")):
+            self.show_hint("FLIGHT COMPUTER: FOLLOW A MISSILE")
+            return False
+        self.flight_computer_debug = not self.flight_computer_debug
+        self._sync_flight_computer_debug()
+        state = "ON" if self.flight_computer_debug else "OFF"
+        self.show_hint(f"FLIGHT COMPUTER PATHS: {state}")
+        self.app.audio.ui_click()
+        return self.flight_computer_debug
+
+    def _sync_flight_computer_debug(self) -> None:
+        """Move optional rollout collection with the current camera subject."""
+        m = self.followed
+        fc = getattr(m, "_fc", None) if m is not None else None
+        wanted = (m if self.flight_computer_debug and not self.map_open
+                  and getattr(m, "alive", False)
+                  and fc is not None
+                  and hasattr(fc, "set_debug_enabled") else None)
+        old = self._fc_debug_subject
+        if old is not wanted:
+            old_fc = getattr(old, "_fc", None) if old is not None else None
+            if old_fc is not None and hasattr(old_fc, "set_debug_enabled"):
+                old_fc.set_debug_enabled(False)
+            self._fc_debug_subject = wanted
+        if wanted is not None:
+            wanted._fc.set_debug_enabled(True)
 
     def toggle_battery_panel(self) -> None:
         """O (battery_panel binding): toggle the EXPANDED per-battery STATUS
@@ -1286,6 +1342,17 @@ class SandboxState(GameState):
                 # the structure's secondary blast stacks on the warhead's.
                 self.effects.explosion(pos, EXPLOSION_SCALE_SHIP)
                 self.app.audio.boom(pos)
+            elif kind == "magazine_detonation":
+                # The Moskva-class cook-off (sim/damage_model._catastrophe).
+                # The paired "ship_hit" event already fired the warhead-scale
+                # explosion; this is the magazine going up ON TOP of it —
+                # double flash, fireball dome, black wall, ejecta arcs.
+                self.effects.magazine_detonation(
+                    pos, fireball_radius_m(MAGAZINE_REP_TNT_KG),
+                    water=pos[1] < SHIP_HIT_SPLASH_MAX_Y)
+                self.app.audio.boom(pos)
+                self.app.audio.play("boom_far", pos=pos)
+                self.rig.kick_shake(SHAKE_SLAM, pos=pos)
             elif kind in ("ciws_burst", "pantsir_gun"):
                 # Shell burst near the target: a few grey flak puffs, no
                 # audio (the gun is kilometers away from any camera that
@@ -1571,8 +1638,84 @@ class SandboxState(GameState):
             self.clouds.delete()
         self.sky.delete()
         self.particles.delete()
+        self.weather_overlay.delete()
         self.tactical_map.delete()
         self.text.delete()
+
+    # ------------------------------------------------------------ cloud V2
+
+    def _desired_cloud_signature(self):
+        prefs = getattr(self.app, "ui_prefs", None)
+        pref_backend = (prefs.get("cloud_renderer") if prefs is not None
+                        else "legacy")
+        pref_quality = (prefs.get("cloud_quality") if prefs is not None
+                        else "high")
+        pref_weather = (prefs.get("cloud_weather_override")
+                        if prefs is not None else "battle")
+        backend = os.getenv("ONIKS_CLOUD_RENDERER", pref_backend).lower()
+        quality = os.getenv("ONIKS_CLOUD_QUALITY", pref_quality).lower()
+        weather_override = os.getenv(
+            "ONIKS_CLOUD_WEATHER", pref_weather).lower()
+        if backend not in ("legacy", "v2", "off"):
+            backend = pref_backend
+        if quality not in ("off", "low", "med", "high", "ultra"):
+            quality = pref_quality
+        config = getattr(self.world, "_config", None)
+        seed = int(getattr(config, "seed", 0))
+        weather = int(getattr(config, "weather_preset", 1))
+        if weather_override == "custom" and prefs is not None:
+            from game.weather_composer import (compose_custom_weather,
+                                                custom_selection)
+            weather = compose_custom_weather(custom_selection(prefs))
+        elif weather_override != "battle":
+            try:
+                from sim.atmosphere import weather_preset
+                weather = weather_preset(weather_override)
+            except ValueError:
+                pass
+        return backend, quality, seed, weather
+
+    @staticmethod
+    def _create_cloud_renderer(signature):
+        backend, quality, seed, weather = signature
+        if backend == "off" or quality == "off":
+            return None
+        if backend == "v2":
+            try:
+                from world.clouds_v2 import CloudsV2
+                return CloudsV2(seed, quality=quality,
+                                weather_preset=weather)
+            except Exception as exc:
+                print(f"[clouds] V2 construction failed; using legacy: {exc}")
+        from world.clouds import Clouds
+        clouds = Clouds(seed)
+        clouds.backend_name = "legacy"
+        return clouds
+
+    def _sync_cloud_renderer(self, force: bool = False) -> None:
+        signature = self._desired_cloud_signature()
+        if not force and signature == self._cloud_signature:
+            return
+        replacement = self._create_cloud_renderer(signature)
+        old = self.clouds
+        self.clouds = replacement
+        self._cloud_signature = signature
+        if hasattr(self, "weather_effects"):
+            self.weather_effects.configure(signature[2], signature[3])
+        if old is not None:
+            old.delete()
+
+    def _draw_clouds(self, view_id: str) -> None:
+        clouds = self.clouds
+        if clouds is None:
+            return
+        if hasattr(clouds, "using_v2"):
+            # No explicit dimensions: V2 captures the real GL viewport,
+            # including the launch-cinema offset, and isolates its history.
+            clouds.draw(self.renderer, self.camera, self._cloud_time,
+                        view_id=view_id)
+        else:
+            clouds.draw(self.renderer, self.camera, self._cloud_time)
 
     # --------------------------------------------------------------- render
 
@@ -1580,15 +1723,27 @@ class SandboxState(GameState):
         # Fresh UI hit/tag registry every frame: draw sites re-register
         # their rects below (mouse parity + F3 tagging + overlap oracle).
         self.ui.begin_frame()
+        self._sync_cloud_renderer()
+        weather_dt = min(max(float(dt_real), 0.0), 0.05)
+        self._cloud_time += weather_dt
         self.controls.update(dt_real)            # free-cam flies in real time
         self.rig.update(dt_real, self.followed)
+        self._sync_flight_computer_debug()
         if self.hint_left > 0.0:
             self.hint_left = max(0.0, self.hint_left - dt_real)
         audio = self.app.audio
         audio.set_listener(self.camera.eye)      # gains follow the camera
+        weather = self.weather_effects.advance(weather_dt, self.camera.eye)
+        for cue in weather.thunder:
+            # Controller already applies long-range thunder attenuation and
+            # speed-of-sound delay; flat play avoids the explosion 12 km cap.
+            if cue.gain > 0.01:
+                audio.play("boom_far", gain=cue.gain)
         audio.update_loops(self._loop_sources())
         w, h = self.window.size()
-        self._draw_scene(w, h)
+        self._draw_scene(w, h, view_id="main")
+        if not self.map_open and self.flight_computer_debug:
+            self._draw_flight_computer_debug(w, h)
         if self.map_open:
             self.tactical_map.update(dt_real)   # arrow-key panning
             self.tactical_map.draw(w, h)
@@ -1604,6 +1759,73 @@ class SandboxState(GameState):
                 self._draw_launch_pip(w, h)
         elif self.hud_visible:
             self.hud.draw(self, w, h)
+        elif self.flight_computer_debug:
+            self.text.flush(w, h)
+
+    def _draw_flight_computer_debug(self, w: int, h: int) -> None:
+        """Project the production planner's candidate rollouts over 3-D."""
+        m = self._fc_debug_subject
+        fc = getattr(m, "_fc", None) if m is not None else None
+        snapshot = getattr(fc, "debug_snapshot", None)
+        if snapshot is None:
+            return
+
+        selected_col = (0.45, 1.00, 0.78, 0.95)
+        feasible_col = (0.25, 0.72, 1.00, 0.48)
+        rejected_col = (1.00, 0.35, 0.20, 0.38)
+        for candidate in snapshot.candidates:
+            color = (selected_col if candidate.selected else
+                     feasible_col if candidate.feasible else rejected_col)
+            width = 3.0 if candidate.selected else 1.25
+            segment = []
+            for point in candidate.path_world:
+                projected = world_to_screen(self, point, w, h)
+                if projected is None:
+                    if len(segment) >= 2:
+                        self.text.draw_lines(segment, color, width)
+                    segment = []
+                    continue
+                segment.append(projected)
+            if len(segment) >= 2:
+                self.text.draw_lines(segment, color, width)
+
+        # Compact live ledger: the numbers are the same rollout values used
+        # for selection, not a separate HUD approximation.
+        panel_w = min(460, max(330, w - 32))
+        line_h = self.text.line_height(SMALL_SIZE)
+        panel_h = 58 + line_h * len(snapshot.candidates)
+        x, y = max(16, w - panel_w - 16), 16
+        self.text.draw_rect(x, y, panel_w, panel_h, (0.03, 0.06, 0.07, 0.88))
+        self.text.draw_lines(
+            [(x, y), (x + panel_w, y), (x + panel_w, y + panel_h),
+             (x, y + panel_h), (x, y)], selected_col, 1.0)
+        gamma_deg = math.degrees(snapshot.gamma_command_rad)
+        accel_g = snapshot.path_accel_mps2 / GRAVITY
+        self.text.draw_text(
+            x + 10, y + 7,
+            f"FLIGHT COMPUTER // PLAN {snapshot.plan_id}",
+            selected_col, SMALL_SIZE)
+        self.text.draw_text(
+            x + 10, y + 7 + line_h,
+            (f"SELECT {snapshot.selected.upper()}  "
+             f"R {snapshot.route_range_m / 1000.0:.1f}KM  "
+             f"GAMMA {gamma_deg:+.1f}DEG  AN {accel_g:+.2f}G"),
+            (0.88, 0.88, 0.80, 1.0), SMALL_SIZE)
+        row_y = y + 12 + 2 * line_h
+        for candidate in snapshot.candidates:
+            color = (selected_col if candidate.selected else
+                     feasible_col if candidate.feasible else rejected_col)
+            marker = ">" if candidate.selected else " "
+            status = "OK" if candidate.feasible else "NO"
+            self.text.draw_text(
+                x + 10, row_y,
+                (f"{marker}{candidate.name.upper():9s} {status} "
+                 f"VT {candidate.terminal_speed_mps:4.0f} "
+                 f"DE {candidate.energy_margin_jkg / 1000.0:+6.0f}K "
+                 f"DH {candidate.terminal_altitude_error_m:+6.0f} "
+                 f"C {candidate.cost:5.1f}"),
+                color, SMALL_SIZE)
+            row_y += line_h
 
     def _launch_pip_active(self) -> bool:
         """The map LAUNCH CINEMA PiP runs only while the pref is ON and a
@@ -1642,7 +1864,7 @@ class SandboxState(GameState):
         cam = self.camera
         self.camera = self._pip_cam
         try:
-            self._draw_scene(pw, ph)
+            self._draw_scene(pw, ph, view_id="pip")
         finally:
             self.camera = cam
             gl.glDisable(gl.GL_SCISSOR_TEST)
@@ -1663,9 +1885,9 @@ class SandboxState(GameState):
         """The 3D scene exactly as last framed — no input/rig/audio updates,
         no HUD/map overlay. The pause menu draws this, then dims it."""
         w, h = self.window.size()
-        self._draw_scene(w, h)
+        self._draw_scene(w, h, view_id="main")
 
-    def _draw_scene(self, w: int, h: int) -> None:
+    def _draw_scene(self, w: int, h: int, view_id: str = "main") -> None:
         self.renderer.begin(self.camera, w / h)
         self._bind_cloud_shadows()
         self.sky.draw(self.renderer)
@@ -1681,17 +1903,20 @@ class SandboxState(GameState):
         # F3-P4 volumetric clouds: after opaque geometry, before particles.
         # Tradeoff: rare behind-cloud plumes may shine through faintly; common
         # missile/exhaust particles no longer vanish behind later cloud draws.
-        if self.clouds is not None:
-            self.clouds.draw(self.renderer, self.camera, self.world.sim_time)
+        self._draw_clouds(view_id)
         self.particles.draw(self.renderer, self.effects)
+        self.weather_overlay.draw(
+            self.weather_effects.sample(self.camera.eye),
+            self.weather_effects.time,
+            self.weather_effects.overlay_seed)
 
     def _bind_cloud_shadows(self) -> None:
         clouds = self.clouds
         if clouds is not None and getattr(clouds, "enabled", False):
             clouds.bind_shadow_uniforms(self.renderer.lit, 6, self.camera,
-                                        self.world.sim_time)
+                                        self._cloud_time)
             clouds.bind_shadow_uniforms(self.ocean.shader, 6, self.camera,
-                                        self.world.sim_time)
+                                        self._cloud_time)
             return
         self.renderer.lit.use()
         self.renderer.lit.set_float("u_cloud_amt", 0.0)
@@ -1703,11 +1928,8 @@ class SandboxState(GameState):
             if ship.state == ST_GONE:
                 continue
             rot = rot_y(ship.heading) @ rot_z(ship.list_angle)
-            # M5 #1: a Transport / LCAC has no dedicated mesh yet (DEFERRED) —
-            # render on the closest existing hull: a TRANSPORT is a boxy
-            # merchant (cargo mesh), an LCAC a small craft (warship mesh) —
-            # a landing force must never read as a destroyer squadron.  Any
-            # other unknown type still falls back to the destroyer hull.
+            # Dedicated hulls exist for transports and LCACs. Any genuinely
+            # unknown ship type still falls back to the destroyer silhouette.
             mesh = self._ship_meshes.get(ship.ship_type)
             if mesh is None:
                 alias = SHIP_MESH_ALIAS.get(ship.ship_type)

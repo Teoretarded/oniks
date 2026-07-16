@@ -40,7 +40,8 @@ TRAIL_COL0 = np.array([0.97, 0.96, 0.94])   # fresh exhaust: near white
 TRAIL_COL1 = np.array([0.72, 0.73, 0.76])   # aged: pale blue-gray
 
 # Pool capacities (struct-of-arrays slots)
-SMOKE_CAP = 6000             # alpha-blended smoke
+SMOKE_CAP = 12000            # alpha-blended smoke (cinematic salvos: two
+                             # simultaneous 40N6 columns fit with headroom)
 FIRE_CAP = 3000              # additive fire / flash
 SPRAY_CAP = 3000             # alpha-blended water spray (ballistic)
 
@@ -66,6 +67,20 @@ EXPL_FIREBALL_COUNT = 36
 EXPL_SMOKE_COUNT = 60
 EXPL_FIREBALL_SPEED = 26.0   # m/s radial scatter at scale=1
 EXPL_SMOKE_RISE = 16.0       # m/s initial column rise at scale=1
+
+# Magazine detonation (one-shot; the Moskva/Hood-class cook-off event from
+# sim/damage_model._catastrophe).  Sized by the FIREBALL RADIUS the caller
+# derives from the Hopkinson-Cranz law (sim.damage_model.fireball_radius_m —
+# the game layer owns that import; this module stays sim-free).  Counts are
+# deliberately heavier than `explosion`: this is the loudest single event
+# in the game and must read bigger than any warhead hit.
+MAG_FIREBALL_COUNT = 90      # additive fireball sprites
+MAG_COLUMN_COUNT = 110       # black column smoke
+MAG_SURGE_COUNT = 40         # radial ground/deck surge ring
+MAG_EJECTA_COUNT = 48        # ballistic ejecta arcs (spray pool: gravity)
+MAG_EJECTA_SPEED = (35.0, 95.0)   # m/s radial ejecta launch band
+MAG_COLUMN_RISE = 26.0       # m/s initial column rise
+MAG_SURGE_SPEED = (18.0, 42.0)    # m/s horizontal surge expansion
 
 # Splash (white spray ring + central column)
 SPLASH_COUNT = 56
@@ -147,24 +162,35 @@ class ParticlePool:
         self.size1 = np.zeros(n, dtype=np.float32)
         self.col0 = np.zeros((n, 3), dtype=np.float32)
         self.col1 = np.zeros((n, 3), dtype=np.float32)
+        # Cinematic extensions (defaults reproduce the legacy look bit-for-
+        # bit: alpha 1->0 linear, no fade-in, no velocity stretch).
+        self.alpha0 = np.ones(n, dtype=np.float32)
+        self.alpha1 = np.zeros(n, dtype=np.float32)
+        self.fade_in = np.zeros(n, dtype=np.float32)
+        self.stretch = np.zeros(n, dtype=np.float32)
         self.alive = np.zeros(n, dtype=bool)
         self._hi = 0                            # 1 + highest live slot index
         self._free_hint = 0                     # every slot below is alive
         self._quads = np.empty((n, 4, 10), dtype=np.float32)  # build buffer
 
     def emit(self, n, pos, pos_jitter, vel_mean, vel_jitter, life,
-             size01, col01, rng) -> np.ndarray:
+             size01, col01, rng, alpha01=(1.0, 0.0), fade_in=0.0,
+             stretch=0.0) -> np.ndarray:
         """Spawn up to ``n`` particles (clamped to free slots).
 
         pos: (3,) world center; pos_jitter: gaussian sigma (scalar or per
         axis). vel_mean: (3,) m/s; vel_jitter: gaussian sigma. life: seconds,
         scalar or (lo, hi) sampled uniform. size01 = (birth, death) world
-        size m; col01 = (birth_rgb, death_rgb). Returns the slot indices of
-        the emitted particles (callers may post-shape e.g. splash rings).
-        """
+        size m; col01 = (birth_rgb, death_rgb). Optional cinema controls:
+        alpha01 = (birth, death) opacity, ``fade_in`` seconds of smoothstep
+        ramp (kills sprite pop-in), ``stretch`` seconds of velocity smear
+        (build_quads elongates the quad along the projected velocity).
+        Returns the slot indices of the emitted particles (callers may
+        post-shape e.g. splash rings)."""
         if int(n) == 1:                         # hot path: plume/fire feeds
             return self._emit_one(pos, pos_jitter, vel_mean, vel_jitter,
-                                  life, size01, col01, rng)
+                                  life, size01, col01, rng, alpha01,
+                                  fade_in, stretch)
         # Lowest free slots: dead slots inside the occupied prefix first,
         # then fresh slots right after it — identical indices to a full
         # ~alive scan (every slot >= _hi is free) without touching the
@@ -194,12 +220,17 @@ class ParticlePool:
         self.size1[free] = np.float32(size01[1]) * scale
         self.col0[free] = np.asarray(col01[0], dtype=np.float32)
         self.col1[free] = np.asarray(col01[1], dtype=np.float32)
+        self.alpha0[free] = np.float32(alpha01[0])
+        self.alpha1[free] = np.float32(alpha01[1])
+        self.fade_in[free] = np.float32(fade_in)
+        self.stretch[free] = np.float32(stretch)
         self.alive[free] = True
         self._hi = max(self._hi, int(free[-1]) + 1)
         return free
 
     def _emit_one(self, pos, pos_jitter, vel_mean, vel_jitter, life,
-                  size01, col01, rng) -> np.ndarray:
+                  size01, col01, rng, alpha01=(1.0, 0.0), fade_in=0.0,
+                  stretch=0.0) -> np.ndarray:
         """Single-particle emit without k-sized array machinery (Task 22
         perf: exhaust/fire feeds emit 1 particle per missile per substep).
         Identical sampling — the same rng draws in the same order — and the
@@ -233,13 +264,25 @@ class ParticlePool:
         self.size1[i] = size01[1] * scale
         self.col0[i] = col01[0]
         self.col1[i] = col01[1]
+        self.alpha0[i] = alpha01[0]
+        self.alpha1[i] = alpha01[1]
+        self.fade_in[i] = fade_in
+        self.stretch[i] = stretch
         alive[i] = True
         if i >= self._hi:
             self._hi = i + 1
         return np.array([i], dtype=np.intp)
 
-    def update(self, dt, drag=0.15, gravity=0.0, buoyancy=0.0) -> None:
-        """Vectorized step: age, kill life<=0, drag, vertical accel, move."""
+    def update(self, dt, drag=0.15, gravity=0.0, buoyancy=0.0,
+               wind=None) -> None:
+        """Vectorized step: age, kill life<=0, drag, vertical accel, move.
+
+        ``wind`` (3,) m/s makes drag relax velocity toward the AMBIENT
+        FLOW instead of toward zero — long-lived smoke keeps drifting on
+        the wind while its own motion decays (cinematic columns).  It may
+        also be a CALLABLE ``wind(ys) -> (n, 3) float32`` taking particle
+        heights, for altitude-dependent flow (a launch column rides the
+        valley breeze at the pad and the jet-level westerlies at 5 km)."""
         n = self._hi
         if n == 0:
             return
@@ -250,7 +293,17 @@ class ParticlePool:
         np.logical_and(alive, life > 0.0, out=alive)
         self._free_hint = 0          # deaths can open slots anywhere
         if drag:
-            vel *= np.float32(np.exp(-drag * dt))
+            k = np.float32(np.exp(-drag * dt))
+            if wind is None:
+                vel *= k
+            else:
+                if callable(wind):
+                    w = np.asarray(wind(self.pos[:n, 1]), dtype=np.float32)
+                else:
+                    w = np.asarray(wind, dtype=np.float32)
+                vel -= w
+                vel *= k
+                vel += w
         acc = np.float32((buoyancy - gravity) * dt)
         if acc:
             vel[:, 1] += acc
@@ -283,17 +336,54 @@ class ParticlePool:
                       * frac)
         col = self.col0[idx] + (self.col1[idx] - self.col0[idx]) \
             * frac[:, None]
-        alpha = 1.0 - frac
+        a0 = self.alpha0[idx]
+        alpha = a0 + (self.alpha1[idx] - a0) * frac
+        fade = self.fade_in[idx]
+        has_fade = fade > 0.0
+        if has_fade.any():
+            age = self.max_life[idx] * frac
+            t = np.clip(np.divide(age, fade,
+                                  out=np.ones_like(age),
+                                  where=has_fade), 0.0, 1.0)
+            alpha = alpha * (t * t * (3.0 - 2.0 * t))
 
         right = np.asarray(cam_right, dtype=np.float32)
         up = np.asarray(cam_up, dtype=np.float32)
         out = self._quads[:m]
         h = half[:, None]
-        for c, (ox, oy, u, v) in enumerate(((-1, -1, 0, 0), (1, -1, 1, 0),
-                                            (1, 1, 1, 1), (-1, 1, 0, 1))):
-            out[:, c, 0:3] = rel + (ox * h) * right + (oy * h) * up
-            out[:, c, 3] = u
-            out[:, c, 4] = v
+        stretch = self.stretch[idx]
+        if stretch.any():
+            # Velocity-stretched sprites: elongate along the projected
+            # velocity (hot jets, dust sheets) with aspect capped 4:1.
+            vel = self.vel[idx]
+            vr = vel @ right
+            vu = vel @ up
+            speed_p = np.hypot(vr, vu)
+            safe = np.maximum(speed_p, 1e-6)
+            lx = (vr / safe)[:, None]
+            ly = (vu / safe)[:, None]
+            axis_l = lx * right + ly * up
+            axis_s = -ly * right + lx * up
+            long_h = np.minimum(half + speed_p * stretch * 0.5,
+                                half * 4.0)[:, None]
+            keep = (stretch <= 0.0)[:, None]
+            axis_l = np.where(keep, right, axis_l)
+            axis_s = np.where(keep, up, axis_s)
+            long_h = np.where(keep, h, long_h)
+            for c, (ox, oy, u, v) in enumerate(
+                    ((-1, -1, 0, 0), (1, -1, 1, 0),
+                     (1, 1, 1, 1), (-1, 1, 0, 1))):
+                out[:, c, 0:3] = (rel + (ox * long_h) * axis_l
+                                  + (oy * h) * axis_s)
+                out[:, c, 3] = u
+                out[:, c, 4] = v
+        else:
+            for c, (ox, oy, u, v) in enumerate(
+                    ((-1, -1, 0, 0), (1, -1, 1, 0),
+                     (1, 1, 1, 1), (-1, 1, 0, 1))):
+                out[:, c, 0:3] = rel + (ox * h) * right + (oy * h) * up
+                out[:, c, 3] = u
+                out[:, c, 4] = v
         out[:, :, 5:8] = col[:, None, :]
         out[:, :, 8] = alpha[:, None]
         out[:, :, 9] = half[:, None] * 2.0
@@ -603,6 +693,66 @@ class Effects:
         if water:
             self.splash(pos, rng=r, scale=s)
 
+    def magazine_detonation(self, pos, fireball_r, rng=None,
+                            water=False) -> None:
+        """Magazine cook-off: THE catastrophic one-shot (Moskva/Hood class).
+
+        ``fireball_r`` is the physical fireball radius in meters — the caller
+        derives it from the blast yield via sim.damage_model.fireball_radius_m
+        (Hopkinson-Cranz cube-root law); every sprite size below scales off
+        it so a bigger magazine genuinely reads bigger.  Deliberately heavier
+        than ``explosion``: double flash, a dense fireball dome, a tall black
+        column with a radial deck surge, and ballistic ejecta arcs falling
+        under gravity (the spray pool).  ``water`` adds the sea splash ring.
+        """
+        r = self.rng if rng is None else rng
+        fr = max(float(fireball_r), 8.0)
+        # Double flash: an instant white sheet far wider than the fireball,
+        # then a slightly longer orange core — the two-beat signature every
+        # magazine-explosion video shows before the smoke wall forms.
+        self.fire.emit(3, pos, 0.15 * fr, (0.0, 0.0, 0.0), 0.0, 0.10,
+                       (2.8 * fr, 5.0 * fr),
+                       ((1.0, 0.99, 0.94), (1.0, 0.75, 0.35)), r)
+        self.fire.emit(4, pos, 0.20 * fr, (0.0, 6.0, 0.0), 4.0, (0.25, 0.5),
+                       (1.6 * fr, 3.2 * fr),
+                       ((1.0, 0.92, 0.62), (1.0, 0.45, 0.10)), r)
+        # Fireball dome: dense radial scatter, sized to the physical radius.
+        self.fire.emit(self._n(MAG_FIREBALL_COUNT), pos, 0.30 * fr,
+                       (0.0, 0.9 * fr, 0.0), 1.1 * fr, (0.6, 1.5),
+                       (0.55 * fr, 1.5 * fr),
+                       ((1.0, 0.80, 0.34), (0.72, 0.16, 0.02)), r)
+        # Black column + cap: long-lived, rises on pool buoyancy; the birth
+        # size already spans the fireball so the smoke wall swallows it.
+        self.smoke.emit(self._n(MAG_COLUMN_COUNT), pos, 0.35 * fr,
+                        (0.0, MAG_COLUMN_RISE, 0.0), 0.5 * fr,
+                        (6.0, 14.0), (0.8 * fr, 3.4 * fr),
+                        ((0.10, 0.09, 0.09), (0.34, 0.33, 0.34)), r)
+        # Radial surge ring hugging the deck/ground plane.
+        idx = self.smoke.emit(self._n(MAG_SURGE_COUNT), pos, 0.25 * fr,
+                              (0.0, 2.0, 0.0), 1.5, (3.0, 6.5),
+                              (0.5 * fr, 2.2 * fr),
+                              ((0.28, 0.26, 0.25), (0.45, 0.44, 0.45)), r)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            speed = r.uniform(MAG_SURGE_SPEED[0], MAG_SURGE_SPEED[1],
+                              len(idx))
+            self.smoke.vel[idx, 0] = (np.sin(ang) * speed).astype(np.float32)
+            self.smoke.vel[idx, 2] = (np.cos(ang) * speed).astype(np.float32)
+        # Ballistic ejecta: hot fragments arcing out and FALLING (the spray
+        # pool integrates gravity), fading white-hot -> ember grey.
+        idx = self.spray.emit(self._n(MAG_EJECTA_COUNT), pos, 0.15 * fr,
+                              (0.0, 0.8 * MAG_EJECTA_SPEED[1], 0.0),
+                              10.0, (2.5, 5.0), (0.10 * fr, 0.30 * fr),
+                              ((1.0, 0.86, 0.55), (0.45, 0.40, 0.38)), r)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            speed = r.uniform(MAG_EJECTA_SPEED[0], MAG_EJECTA_SPEED[1],
+                              len(idx))
+            self.spray.vel[idx, 0] = (np.sin(ang) * speed).astype(np.float32)
+            self.spray.vel[idx, 2] = (np.cos(ang) * speed).astype(np.float32)
+        if water:
+            self.splash(pos, rng=r, scale=max(2.0, fr / 12.0))
+
     def splash(self, pos, rng=None, scale=1.0) -> None:
         """White spray: radial ring + tall central column, gravity-ballistic."""
         r = self.rng if rng is None else rng
@@ -640,33 +790,41 @@ layout(location=0) in vec3 a_pos;   // camera-relative, size folded in
 layout(location=1) in vec2 a_uv;
 layout(location=2) in vec4 a_col;
 uniform mat4 u_proj, u_view_rot;
-uniform float u_log_depth_fcoef;
-out vec2 v_uv; out vec4 v_col; out vec3 v_view_vec;
+out vec2 v_uv; out vec4 v_col; out vec3 v_view_vec; out float v_flogz;
 void main(){
     v_uv = a_uv; v_col = a_col; v_view_vec = a_pos;
     gl_Position = u_proj * u_view_rot * vec4(a_pos, 1.0);
-    gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * u_log_depth_fcoef - 1.0) * gl_Position.w;
+    // Exact per-pixel log depth (the engine's LOCKED convention): vertex-
+    // interpolated log z mis-sorted plumes against the log-depth terrain
+    // in cinematic scenes (GPT-5.6 review 2026-07-16).
+    gl_Position.z = 0.0;
+    v_flogz = 1.0 + gl_Position.w;
 }
 """
 
 PARTICLE_FRAG = """
 #version 330 core
-in vec2 v_uv; in vec4 v_col; in vec3 v_view_vec;
+in vec2 v_uv; in vec4 v_col; in vec3 v_view_vec; in float v_flogz;
 uniform sampler2D u_tex;
 uniform int u_additive;
+uniform float u_log_depth_fcoef;
+uniform float u_light_gain;    // scene light on REFLECTIVE particles:
+                               // 1.0 everywhere but cinematic dark rigs
 out vec4 frag;
 """ + HAZE_GLSL + """
 void main(){
+    gl_FragDepth = log2(max(v_flogz, 1e-6)) * (u_log_depth_fcoef * 0.5);
     float a = texture(u_tex, v_uv).r * v_col.a;
     if (a < 0.004) discard;
     vec3 col = v_col.rgb;
     if (u_additive == 1) {
         // Additive sprites must not scatter haze color in: attenuate only.
+        // (Fire is self-luminous: the night rig does not dim it.)
         float h = max(u_cam_alt + v_view_vec.y * 0.5, 0.0);
         float density = u_haze_density * exp(-h / 6000.0);
         col *= exp(-density * length(v_view_vec));
     } else {
-        col = apply_haze(col, v_view_vec, u_cam_alt);
+        col = apply_haze(col * u_light_gain, v_view_vec, u_cam_alt);
     }
     frag = vec4(col, a);
 }
@@ -752,22 +910,29 @@ class ParticleRenderer:
         smoke = effects.smoke.build_quads(eye, right, up)
         spray = effects.spray.build_quads(eye, right, up)
         fire = effects.fire.build_quads(eye, right, up)
+        fog_pool = getattr(effects, "fog", None)   # cinematic terrain fog
+        fog = (fog_pool.build_quads(eye, right, up)
+               if fog_pool is not None else np.empty((0, 10), np.float32))
         strips = [t.build_strip(eye) for t in effects.trails]
         strips = [s for s in strips if len(s)]
-        if not (len(smoke) or len(spray) or len(fire) or strips):
+        if not (len(smoke) or len(spray) or len(fire) or len(fog)
+                or strips):
             return
 
         renderer.set_common(self.shader)     # binds shader + frame uniforms
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex)
         self.shader.set_int("u_tex", 0)
+        self.shader.set_float("u_light_gain",
+                              getattr(renderer, "light_gain", 1.0))
         gl.glEnable(gl.GL_BLEND)
         gl.glDepthMask(gl.GL_FALSE)
         gl.glDisable(gl.GL_CULL_FACE)        # billboards have no back side
 
         self.shader.set_int("u_additive", 0)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        for strip in strips:
+        self._draw_quads(fog)              # fog first: it sits behind
+        for strip in strips:               # the launch smoke visually
             self._draw_strip(strip)
         self._draw_quads(smoke)
         self._draw_quads(spray)
@@ -813,3 +978,4 @@ class ParticleRenderer:
             self.quad_vao = self.strip_vao = 0
             self.quad_vbo = self.quad_ebo = self.strip_vbo = 0
             self.tex = 0
+            self.shader.delete()
