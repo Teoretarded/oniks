@@ -313,3 +313,123 @@ def list_scenes(root: str = SCENES_ROOT) -> list:
             out.append((name, meta.get("title", name.upper()),
                         meta.get("subtitle", ""), os.path.join(root, name)))
     return out
+
+
+# ---------------------------------------------------------------- silo survey
+
+def _winmax(a: np.ndarray, r: int) -> np.ndarray:
+    """Dense (2r+1)-window maximum via shifted maxima (small r only)."""
+    out = a.copy()
+    n0, n1 = a.shape
+    for dj in range(-r, r + 1):
+        j0, j1 = max(dj, 0), min(n0 + dj, n0)
+        s0, s1 = max(-dj, 0), min(n0 - dj, n0)
+        for di in range(-r, r + 1):
+            i0, i1 = max(di, 0), min(n1 + di, n1)
+            t0, t1 = max(-di, 0), min(n1 - di, n1)
+            np.maximum(out[s0:s1, t0:t1], a[j0:j1, i0:i1],
+                       out=out[s0:s1, t0:t1])
+    return out
+
+
+def survey_silo_candidates(dtm: np.ndarray, obstacle: np.ndarray,
+                           cell: float, x0: float, z0: float,
+                           spawn_xz, avoid_xz=None,
+                           dist_range=(1200.0, 3200.0),
+                           box_m: float = 36.0, relief_max: float = 2.5,
+                           band_lo: float = -40.0, band_hi: float = 140.0,
+                           prefer_dist: float = 1800.0):
+    """Ranked silo sites from the core grids (pure arrays, zero RNG).
+
+    A silo compound wants a ~36 m flat, obstacle-free pad on the valley
+    floor: local relief under ``relief_max`` over the box, no LiDAR
+    obstacle cells, ``dist_range`` metres from the spawn (visible but
+    not in your lap), height within [band_lo, band_hi] of the spawn
+    (never up a wall / down a gorge), and away from ``avoid_xz`` (the
+    S-300 pad).  Returns [(score, x, z)] sorted best-first; the caller
+    validates finalists at full resolution (obstacles + line of sight).
+    """
+    step = max(1, int(round(8.0 / cell)))
+    d = dtm[::step, ::step].astype(np.float32)
+    ob = (obstacle[::step, ::step] > 0)
+    csz = cell * step
+    r = max(1, int(round(box_m * 0.5 / csz)))
+    hi = _winmax(d, r)
+    lo = -_winmax(-d, r)
+    relief = hi - lo
+    obs_any = _winmax(ob.astype(np.float32), r) > 0.0
+
+    nz, nx = d.shape
+    xs = x0 + np.arange(nx, dtype=np.float64) * csz
+    zs = z0 + np.arange(nz, dtype=np.float64) * csz
+    gx, gz = np.meshgrid(xs, zs)
+    sx, sz = float(spawn_xz[0]), float(spawn_xz[1])
+    dist = np.hypot(gx - sx, gz - sz)
+    # Spawn height from the decimated grid (nearest cell is plenty).
+    si = int(np.clip(round((sx - x0) / csz), 0, nx - 1))
+    sj = int(np.clip(round((sz - z0) / csz), 0, nz - 1))
+    dh = d - float(d[sj, si])
+
+    ok = ((relief <= relief_max) & (~obs_any)
+          & (dist >= dist_range[0]) & (dist <= dist_range[1])
+          & (dh >= band_lo) & (dh <= band_hi))
+    if avoid_xz is not None:
+        ok &= (np.hypot(gx - float(avoid_xz[0]),
+                        gz - float(avoid_xz[1])) >= 250.0)
+    # Keep the box fully inside the core.
+    m = r + 1
+    ok[:m, :] = ok[-m:, :] = False
+    ok[:, :m] = ok[:, -m:] = False
+    if not ok.any():
+        # Fallback pass: drop the distance window, keep it flat + clear.
+        ok = (relief <= relief_max) & (~obs_any) & (dist >= 400.0)
+        ok[:m, :] = ok[-m:, :] = False
+        ok[:, :m] = ok[:, -m:] = False
+        if not ok.any():
+            return []
+    score = relief + np.abs(dist - prefer_dist) * 0.002
+    j, i = np.nonzero(ok)
+    order = np.argsort(score[j, i], kind="stable")
+    return [(float(score[j[k], i[k]]), float(xs[i[k]]), float(zs[j[k]]))
+            for k in order[:400]]
+
+
+def survey_silo_site(scene, eye_h: float = 1.7) -> tuple:
+    """Pick THE silo site for a scene: best-ranked candidate that also
+    passes full-resolution obstacle checks over the compound box and a
+    bare-earth line-of-sight from the spawn (the whole mode is
+    WATCHING — same rule the S-300 pad bake uses).  Deterministic."""
+    (sx, sz), _yaw = scene.spawn_pos_yaw()
+    avoid = None
+    if scene.s300 is not None:
+        avoid = (float(scene.s300["x"]), float(scene.s300["z"]))
+    cands = survey_silo_candidates(scene._dtm, scene._obstacle,
+                                   scene._cell, scene.x0, scene.z0,
+                                   (sx, sz), avoid_xz=avoid)
+    eye = np.array([sx, scene.ground_h(sx, sz) + eye_h, sz])
+    best_fallback = None
+    for _score, cx, cz in cands:
+        if best_fallback is None:
+            best_fallback = (cx, cz)
+        # Full-res obstacle check across the compound box.
+        clear = True
+        for dx in (-16.0, 0.0, 16.0):
+            for dz in (-16.0, 0.0, 16.0):
+                if scene.blocked(cx + dx, cz + dz):
+                    clear = False
+                    break
+            if not clear:
+                break
+        if not clear:
+            continue
+        # Terrain LOS: spawn eye to a point above the tube mouth.
+        tgt = np.array([cx, scene.ground_h(cx, cz) + 4.0, cz])
+        seen = True
+        for f in np.linspace(0.06, 0.97, 48):
+            p = eye + (tgt - eye) * f
+            if scene.ground_h(float(p[0]), float(p[2])) > p[1] + 0.5:
+                seen = False
+                break
+        if seen:
+            return (cx, cz)
+    return best_fallback if best_fallback is not None else (sx + 400.0, sz)

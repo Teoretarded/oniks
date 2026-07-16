@@ -35,6 +35,15 @@ PALETTE = dict(
     oniks_body=(0.70, 0.72, 0.67), oniks_wing=(0.63, 0.65, 0.60),
     intake_black=(0.04, 0.04, 0.05), tail_red=(0.55, 0.11, 0.09),
     tube_ring=(0.34, 0.37, 0.33), canvas_khaki=(0.47, 0.42, 0.30),
+    # ICBM reference builds (docs/research/icbm_reference_2026-07-17.md):
+    # Minuteman III off-white stack with near-black interstage bands and
+    # a dark Mk21 shroud; Sarmat green-black thermal coat with the pale
+    # nose-cap seam; weathered silo steel/concrete + the dark tube bore.
+    icbm_white=(0.84, 0.83, 0.80), icbm_band=(0.12, 0.12, 0.13),
+    shroud_dark=(0.22, 0.21, 0.23),
+    sarmat_dark=(0.11, 0.13, 0.11), sarmat_nose=(0.72, 0.70, 0.66),
+    silo_door=(0.46, 0.45, 0.43), silo_rail=(0.30, 0.30, 0.32),
+    silo_bore=(0.03, 0.03, 0.04),
 )
 
 
