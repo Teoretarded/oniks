@@ -92,6 +92,60 @@ def wait_l0(state, timeout_s: float = 45.0) -> None:
             return
 
 
+def stand_on_crest(state, rings=(1000, 1100, 1200, 1300, 900)) -> None:
+    """Real gunner behaviour: find walkable ground on a ring around the
+    pad with a genuinely clear sight line to the canister top (checked
+    with the rig's own occlusion march, eye height AND launch height).
+    Pass close rings for the eject-window Starstreak shot."""
+    w = state.walker
+    rig = state.weapons
+    pad = state._pad
+    tube_top = pad + np.array([0.0, 12.0, 0.0])
+    d = np.array([pad[0] - w.x, pad[2] - w.z])
+    dist = float(np.linalg.norm(d))
+    d /= dist
+    perp = np.array([-d[1], d[0]])
+    # Keep >= 900 m standoff (a shorter Starstreak shot arrives still in
+    # boost, before the fins can pull the gathering arc back down), and
+    # sweep sideways onto the valley-side rises for a sight line over
+    # the moraine mounds.
+    _ = dist, perp
+    sc = state.scene
+    cands = []
+    for r_ring in rings:
+        for a_deg in range(0, 360, 12):
+            a = math.radians(a_deg)
+            x = float(pad[0]) + math.sin(a) * r_ring
+            z = float(pad[2]) + math.cos(a) * r_ring
+            if not (sc.x0 + 40 <= x <= sc.x1 - 40
+                    and sc.z0 + 40 <= z <= sc.z1 - 40):
+                continue
+            cands.append((math.hypot(x - w.x, z - w.z), x, z, r_ring))
+    cands.sort()                        # nearest to the spawn first
+    for _dspawn, x, z, r_ring in cands:
+        g0 = float(sc.ground_h(x, z))
+        # walkable ground only — no perching on the valley wall (from a
+        # cliff face the muzzle fires into rock)
+        if not all(abs(float(sc.ground_h(x + dx, z + dz)) - g0) < 1.3
+                   for dx, dz in ((4, 0), (-4, 0), (0, 4), (0, -4))):
+            continue
+        eye = np.array([x, g0 + 1.7, z])
+        low = np.array([x, g0 + 0.9, z])
+        # the eye must see the tube top AND the lower line must clear too
+        # (the round leaves at ~1.5 m and sags before the fins bite)
+        if rig._los_clear(state, eye, tube_top) \
+                and rig._los_clear(state, low, tube_top):
+            w.x, w.z = float(x), float(z)
+            w.y = g0
+            w.vx = w.vy = w.vz = 0.0
+            w.on_ground = True
+            print(f"[audit] firing position: ring {r_ring} m, "
+                  f"{_dspawn:0.0f} m from spawn, LOS clear", flush=True)
+            return
+    print("[audit] WARNING: no LOS-clear spot found; staying at spawn",
+          flush=True)
+
+
 def main() -> None:
     scene = sys.argv[1] if len(sys.argv) > 1 else "lauterbrunnen"
     app = App(hidden=True)
@@ -125,9 +179,11 @@ def main() -> None:
     # Shoot INSIDE the honest window — early boost, before the target
     # outruns the Igla (a 16 g climb-out is uncatchable from behind
     # once it passes the Igla's own speed).
+    stand_on_crest(state)                   # clear line to the pad first
+    run_s(state, 0.5)
     equip(state, "igla_s")
     state._fire()                           # the target leaves the tube
-    run_s(state, 0.2)                       # still hanging in cold eject
+    run_s(state, 0.7)
     tgt = state.launch
     aim_at(state, tgt.pos)
     click(state, 2)                         # MMB designate
@@ -162,6 +218,46 @@ def main() -> None:
     print(f"igla kill: {killed}", flush=True)
     run_s(state, 1.5)
     shot(app, "25_after_intercept_smoke")
+
+    # ---- 3b. Starstreak vs a fresh launch: the ONLY winnable shot is
+    # the cold-eject window — pre-aimed from close standoff, fired the
+    # instant the round leaves the tube, killed before its motor takes
+    # it away. By ~0.6 s the window is shut (physics, not a timer).
+    stand_on_crest(state, rings=(400, 450, 500, 550))
+    run_s(state, 0.4)
+    equip(state, "starstreak")
+    pad_top = state._pad + np.array([0.0, state._tube_top + 3.0, 0.0])
+    aim_at(state, pad_top)                   # pre-aimed at the tube
+    run_s(state, 0.2)
+    state._fire()
+    run_s(state, 0.1)
+    tgt2 = state.launches[-1]
+    aim_at(state, tgt2.pos)
+    click(state, 2)                          # beam onto the round
+    assert rig.seek_state == "lock", "beam designation failed"
+    click(state, 1)                          # fire immediately
+    run_s(state, 0.5)
+    aim_at(state, tgt2.pos)
+    frames(state, 2, sim=False)
+    shot(app, "26_starstreak_ride")
+    kill2 = False
+    last_fo = None
+    for _ in range(int(10.0 / PHYS_DT / 2)):
+        if not rig.flyouts:
+            kill2 = tgt2.done
+            break
+        last_fo = rig.flyouts[0]
+        aim_at(state, tgt2.pos)              # the operator rides the beam
+        frames(state, 1)                     # steer EVERY frame
+    frames(state, 2, sim=False)
+    shot(app, "27_starstreak_kill")
+    miss = None if last_fo is None else last_fo.rnd.miss_dist
+    print(f"starstreak kill: {kill2} (closest "
+          f"{'?' if miss is None else round(miss, 2)} m)", flush=True)
+    run_s(state, 1.2)
+    aim_at(state, tgt2.pos)
+    frames(state, 2, sim=False)
+    shot(app, "28_kill_debris_smoke")
 
     # ---- 4. Starstreak onto a distant valley ground point (ride the aim)
     equip(state, "starstreak")

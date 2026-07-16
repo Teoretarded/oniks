@@ -66,7 +66,12 @@ class _BeamPoint:
     def move(self, pos, dt):
         p = np.asarray(pos, dtype=np.float64)
         if dt > 1e-6:
-            self.vel = (p - self.pos) / dt
+            raw = (p - self.pos) / dt
+            # Tracker filtering: the raw finite difference of a
+            # hand-steered point is jumpy, and the dart's CLOS
+            # feedforward differentiates it — low-pass keeps the
+            # guidance from amplifying aim jitter.
+            self.vel = self.vel * 0.7 + raw * 0.3
         self.pos = p
 
 
@@ -364,18 +369,27 @@ class WeaponRig:
         st._queue_sound("pop", muzzle, gain=0.8)
         st._say(f"{s.label} AWAY")
 
+    BEAM_CAPTURE_DEG = 0.7   # aiming-unit auto-track gate half-angle
+
     def _beam_point(self, st):
-        """Where the beam rests: along the aim ray, ranged to the
-        designated track when there is one (the aiming unit ranges the
-        target — aim error then displaces the beam by angle x range,
-        which is exactly the SACLOS skill demand), else the terrain hit,
-        else max range."""
+        """Where the beam rests. With a designated track: while the aim
+        stays inside the aiming unit's capture cone the auto-tracker
+        holds the beam ON the target (this also keeps render-rate aim
+        quantization out of the dart's guidance derivatives); drift
+        outside the cone and the beam follows the raw aim away — keep
+        the diamond in the reticle or lose the shot. Without a track:
+        the terrain hit under the aim, else max range."""
         eye = self._eye(st)
         aim = self._aim(st)
         if self.track is not None and not getattr(self.track, "done",
                                                   False):
-            rng = float(np.linalg.norm(
-                np.asarray(self.track.pos, dtype=np.float64) - eye))
+            rel = np.asarray(self.track.pos, dtype=np.float64) - eye
+            rng = float(np.linalg.norm(rel))
+            if rng > 1e-6:
+                ang = math.degrees(math.acos(float(np.clip(
+                    np.dot(aim, rel / rng), -1.0, 1.0))))
+                if ang <= self.BEAM_CAPTURE_DEG:
+                    return rel + eye
             return eye + aim * rng
         hit = self._ray_ground(st)
         if hit is not None:

@@ -155,8 +155,11 @@ WEAPONS = (
         id="starstreak", label="STARSTREAK HVM", nation="UK",
         blurb="LASER BEAM RIDER - MACH 3.5, THREE TUNGSTEN DARTS",
         length_m=1.40, diameter_m=0.130, mass_kg=14.0, warhead_kg=2.7,
-        eject_v=40.0, ignite_dist_m=4.0,
-        boost_s=1.4, boost_thrust_n=13000.0,
+        eject_v=55.0, ignite_dist_m=4.0,
+        # Mach 3.5 within ~350 m of the muzzle (the fastest SHORAD in
+        # service): a ~0.6 s second-stage burn near 190 g axial, then
+        # the darts separate and coast.
+        boost_s=0.6, boost_thrust_n=27600.0,
         sustain_s=0.0, sustain_thrust_n=0.0,
         peak_speed_ms=1190.0, range_m=7000.0, min_range_m=300.0,
         ceiling_m=5000.0, life_s=12.0,
@@ -164,7 +167,9 @@ WEAPONS = (
         nav_gain=4.0, g_limit=20.0, aoa_max_deg=10.0, cn_alpha=10.0,
         prox_radius_m=0.0, lock_range_m=7000.0, lock_range_ground_m=7000.0,
         reload_s=6.0, ads_fov_deg=26.0,
-        super_elev_deg=3.0,      # the beam gathers the round, not an arc
+        super_elev_deg=1.5,      # beam riders launch nearly ON the line;
+                                 # a whisker of gathering elevation keeps
+                                 # the q-starved first 200 m off the turf
         dart_sep=True, dart_mass_kg=2.7,
         dart_area_m2=3.0 * math.pi * 0.011 ** 2, dart_cd_scale=0.42,
         dart_g_limit=20.0, dart_spread_m=1.5,
@@ -238,6 +243,7 @@ class ManpadsRound:
         self._occ_left = 0.0
         self._rel_prev = None          # relative position after last step
         self._tvel_prev = None         # beam: point velocity, last step
+        self._at_lp = None             # beam: filtered line acceleration
         # The warhead does not care what it was AIMED at: everything the
         # caller lists here is fuse-checked with the same segment test (a
         # beam round threading a flying S-300 must frag it).
@@ -345,7 +351,7 @@ class ManpadsRound:
             if tpos1 is not None:
                 rel1 = tpos1 - self.pos
                 self._rel_prev = rel1
-                miss = _segment_min_dist(rel0, rel1)
+                miss = _body_miss(self.target, rel0, rel1)
                 if self.miss_dist is None or miss < self.miss_dist:
                     self.miss_dist = miss
                 kill = s.prox_radius_m + s.diameter_m \
@@ -390,14 +396,13 @@ class ManpadsRound:
             self._vrel_prev[id(v)] = rel1
             if rel0 is None:
                 continue
-            length = getattr(getattr(v, "variant", None), "length_m", None)
             radius = getattr(v, "radius", None)
             if radius is None:
-                radius = float(length) * 0.3 if length else 0.5
+                radius = _body_radius(v)
             kill = s.prox_radius_m + s.diameter_m + float(radius)
             if self.darts:
                 kill += s.dart_spread_m
-            if _segment_min_dist(rel0, rel1) <= kill:
+            if _body_miss(v, rel0, rel1) <= kill:
                 self.done = True
                 self.hit = True
                 self.victim = v
@@ -421,17 +426,15 @@ class ManpadsRound:
         return None, None
 
     def _target_radius(self) -> float:
-        """Effective target radius: an explicit .radius wins; otherwise a
-        sphere-ization of the airframe from its variant length (a 7.5 m
-        S-300 round is NOT a half-meter point)."""
+        """Effective target radius around the fuse geometry: an explicit
+        .radius wins; airframes with a known axis are handled as capsules
+        by _body_miss and only need their body radius here."""
         if self.target is None:
             return 0.0
         r = getattr(self.target, "radius", None)
         if r is not None:
             return float(r)
-        length = getattr(getattr(self.target, "variant", None),
-                         "length_m", None)
-        return float(length) * 0.3 if length else 0.5
+        return _body_radius(self.target)
 
     def _guidance(self, tpos, tvel, vdir, q, area, mass,
                   events) -> np.ndarray:
@@ -479,8 +482,21 @@ class ManpadsRound:
             # CLOS: the dart follows the LINE including its acceleration
             # (classic APN feedforward). An IR seeker can't observe target
             # acceleration — only the beam computer on the ground can.
+            # The raw double-derivative of a HAND-steered point is mostly
+            # aim quantization noise (the sight updates slower than the
+            # sim), so it is low-passed (~50 ms tracker filter) and
+            # bounded at the real target-acceleration scale — unfiltered
+            # it saturates the fins alternately up/down and the round
+            # flies ballistic.
             if self._tvel_prev is not None and self._dt_hint > 1e-6:
-                a_t = (tvel - self._tvel_prev) / self._dt_hint
+                raw = (tvel - self._tvel_prev) / self._dt_hint
+                if self._at_lp is None:
+                    self._at_lp = np.zeros(3)
+                self._at_lp = self._at_lp * 0.92 + raw * 0.08
+                a_t = self._at_lp
+                n_at = float(np.linalg.norm(a_t))
+                if n_at > 160.0:
+                    a_t = a_t * (160.0 / n_at)
                 a_cmd = a_cmd + 0.5 * s.nav_gain \
                     * (a_t - los * float(np.dot(a_t, los)))
             self._tvel_prev = tvel.copy()
@@ -535,3 +551,61 @@ def _segment_min_dist(r0: np.ndarray, r1: np.ndarray) -> float:
     u = -float(np.dot(r0, d)) / dd
     u = min(max(u, 0.0), 1.0)
     return float(np.linalg.norm(r0 + d * u))
+
+
+def _body_radius(obj) -> float:
+    """Fuse radius of a target's BODY (not its length — the length is
+    the capsule in _body_miss): ~7% of length matches the slender
+    airframes here (48N6: 7.5 m long, 0.52 m across)."""
+    length = getattr(getattr(obj, "variant", None), "length_m", None)
+    return max(float(length) * 0.07, 0.2) if length else 0.5
+
+
+def _body_miss(obj, rel0: np.ndarray, rel1: np.ndarray) -> float:
+    """Miss distance from the relative path to the target BODY: a capsule
+    along the airframe axis when known, else the center point."""
+    length = getattr(getattr(obj, "variant", None), "length_m", None)
+    axis = getattr(obj, "axis", None)
+    if length is not None and axis is not None:
+        a = np.asarray(axis, dtype=np.float64)
+        n = float(np.linalg.norm(a))
+        if n > 1e-9:
+            return _capsule_min_dist(rel0, rel1, a / n,
+                                     float(length) * 0.5)
+    return _segment_min_dist(rel0, rel1)
+
+
+def _capsule_min_dist(r0: np.ndarray, r1: np.ndarray, axis: np.ndarray,
+                      half_len: float) -> float:
+    """Minimum distance between the relative-motion segment r0 -> r1 and
+    the target BODY segment (+-axis*half_len about the target center) —
+    a 7.5 m airframe is not a point; a 'miss' 4 m off center can be a
+    sub-meter pass off the nose. Standard clamped segment-segment
+    closest-approach (the body axis is frozen across one step)."""
+    d1 = r1 - r0                      # relative path
+    d2 = axis * (2.0 * half_len)      # body, from tail end
+    p1 = r0
+    p2 = -axis * half_len
+    r = p1 - p2
+    a = float(np.dot(d1, d1))
+    e = float(np.dot(d2, d2))
+    f = float(np.dot(d2, r))
+    if a < 1e-12 and e < 1e-12:
+        return float(np.linalg.norm(r))
+    if a < 1e-12:
+        s, u = 0.0, min(max(f / e, 0.0), 1.0)
+    else:
+        c = float(np.dot(d1, r))
+        if e < 1e-12:
+            u, s = 0.0, min(max(-c / a, 0.0), 1.0)
+        else:
+            b = float(np.dot(d1, d2))
+            den = a * e - b * b
+            s = min(max((b * f - c * e) / den, 0.0), 1.0) \
+                if den > 1e-12 else 0.0
+            u = (b * s + f) / e
+            if u < 0.0:
+                u, s = 0.0, min(max(-c / a, 0.0), 1.0)
+            elif u > 1.0:
+                u, s = 1.0, min(max((b - c) / a, 0.0), 1.0)
+    return float(np.linalg.norm((p1 + d1 * s) - (p2 + d2 * u)))

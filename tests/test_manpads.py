@@ -325,6 +325,19 @@ def test_victims_fuse_frags_a_passing_round():
     assert r.hit and r.victim is bystander
 
 
+def test_capsule_fuse_sees_the_airframe_not_a_point():
+    """A pass 3 m off the CENTER of a 7.5 m airframe, near its nose, is
+    really a sub-meter pass — the fuse must measure to the body capsule."""
+    from sim.manpads import _capsule_min_dist, _segment_min_dist
+    axis = np.array([0.0, 0.0, 1.0])
+    r0 = np.array([0.5, 8.0, 3.0])
+    r1 = np.array([0.5, -8.0, 3.0])     # crossing beside the nose
+    point_miss = _segment_min_dist(r0, r1)
+    body_miss = _capsule_min_dist(r0, r1, axis, 3.75)
+    assert point_miss > 3.0
+    assert body_miss == pytest.approx(0.5, abs=0.05)
+
+
 def test_deterministic_replay_is_bit_identical():
     def run():
         tgt = _Drone(pos=(150.0, 220.0, 1600.0), vel=(18.0, 190.0, -35.0))

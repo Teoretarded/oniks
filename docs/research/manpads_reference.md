@@ -84,7 +84,7 @@ Distinctive silhouettes (from the photos above):
 | Fuse | contact+graze, laser prox ~1.5 m | impact + time-delay (prox on J) ~2 m | prox ~1.5 m | delayed impact only |
 | Eject exit m/s | ~28 | ~28 | ~28 | in-tube 1st stage, ~40 at 2nd light |
 | Motor light | ~5.5 m out | ~9 m coast | ~5.5 m | 4 m out |
-| Boost | ~2.0 s @ ~29 g | 1.9 s @ ~38 g | ~2.0 s @ ~32 g | ~1.4 s @ ~80 g `~` |
+| Boost | ~2.0 s @ ~29 g | 1.9 s @ ~38 g | ~2.0 s @ ~32 g | ~0.6 s @ ~190 g `~` (M3.5 within ~350 m) |
 | Sustain | ~5.5 s @ ~2.5 g `~` | ~6 s @ ~1.5 g `~` | ~5.5 s @ ~2.8 g `~` | none (darts coast) |
 | Peak speed m/s | ~600 | ~750 (M2.2+) | 660 | ~1190 (M3.5) |
 | Range km | 6.0 | 4.8 | 6.5 | 7.0 |
