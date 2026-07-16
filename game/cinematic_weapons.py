@@ -290,6 +290,9 @@ class WeaponRig:
         hit = self._ray_ground(st)
         if hit is not None:
             rng = float(np.linalg.norm(hit - eye))
+            if rng < s.min_range_m:
+                st._say(f"TOO CLOSE - MIN {s.min_range_m:0.0f} M")
+                return
             limit = s.lock_range_ground_m if s.seeker == "ir" \
                 else s.range_m * 1.15
             if rng <= limit:
@@ -353,7 +356,8 @@ class WeaponRig:
         else:
             target, gp = None, self.ground_mark
         rnd = ManpadsRound(s, muzzle, aim, target=target, ground_point=gp,
-                           ground_h=self._ground_fn(st))
+                           ground_h=self._ground_fn(st),
+                           victims=lambda: st.launches)
         self.flyouts.append(_Flyout(rnd, target))
         self.reload_left = s.reload_s
         self._launch_fx(st, muzzle, f)
@@ -361,10 +365,22 @@ class WeaponRig:
         st._say(f"{s.label} AWAY")
 
     def _beam_point(self, st):
+        """Where the beam rests: along the aim ray, ranged to the
+        designated track when there is one (the aiming unit ranges the
+        target — aim error then displaces the beam by angle x range,
+        which is exactly the SACLOS skill demand), else the terrain hit,
+        else max range."""
+        eye = self._eye(st)
+        aim = self._aim(st)
+        if self.track is not None and not getattr(self.track, "done",
+                                                  False):
+            rng = float(np.linalg.norm(
+                np.asarray(self.track.pos, dtype=np.float64) - eye))
+            return eye + aim * rng
         hit = self._ray_ground(st)
         if hit is not None:
             return hit
-        return self._eye(st) + self._aim(st) * self.weapon.range_m
+        return eye + aim * self.weapon.range_m
 
     def _launch_fx(self, st, muzzle, f) -> None:
         """Eject puff at the muzzle + the MANPADS backblast cone."""
@@ -446,9 +462,10 @@ class WeaponRig:
                           alpha01=(0.5, 0.04))
         elif kind == "hit":
             self._explosion(st, pos, 1.0)
-            tgt = fo.target
-            if tgt is not None and not isinstance(tgt, _BeamPoint) \
-                    and not getattr(tgt, "done", True):
+            tgt = fo.rnd.victim
+            if isinstance(tgt, _BeamPoint):
+                tgt = None
+            if tgt is not None and not getattr(tgt, "done", True):
                 tgt.done = True
                 self._explosion(st, np.asarray(tgt.pos, dtype=np.float64),
                                 1.6)
@@ -572,7 +589,7 @@ class WeaponRig:
         f = np.array([math.sin(yaw) * cp, math.sin(pitch),
                       math.cos(yaw) * cp])
         r = np.array([math.cos(yaw), 0.0, -math.sin(yaw)])
-        u = np.cross(f, r) * -1.0
+        u = np.cross(f, r)               # view-up (f x r IS up here)
         return f, r, u
 
     def _ensure_gl(self):
@@ -617,8 +634,8 @@ class WeaponRig:
             f, r, u = self._basis(st)
             eye = self._eye(st)
             a = self.ads
-            hip = eye + f * 0.50 + r * 0.24 - u * 0.26
-            sight = eye + f * 0.46 + r * 0.05 - u * 0.10
+            hip = eye + f * 0.55 + r * 0.20 - u * 0.20
+            sight = eye + f * 0.50 + r * 0.05 - u * 0.085
             pos = hip * (1.0 - a) + sight * a
             wk = st.walker
             if wk.on_ground and math.hypot(wk.vx, wk.vz) > 0.3:

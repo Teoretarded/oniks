@@ -65,6 +65,7 @@ class ManpadsSpec:
     sustain_thrust_n: float
     peak_speed_ms: float        # published figure (UI + sanity)
     range_m: float
+    min_range_m: float          # published minimum engagement range
     ceiling_m: float
     life_s: float               # self-destruct timer
     seeker: str                 # 'ir' | 'beam'
@@ -94,6 +95,7 @@ class ManpadsSpec:
     dart_area_m2: float = 0.0   # summed frontal area of the darts
     dart_cd_scale: float = 1.0  # needle-body drag vs the stack curve
     dart_g_limit: float = 0.0
+    dart_spread_m: float = 0.0  # formation envelope around the beam axis
     # Trail cosmetics (rig-side rendering only, never guidance).
     smoke_per_m: float = 0.5
     trail_width_m: float = 0.5
@@ -109,7 +111,8 @@ WEAPONS = (
         eject_v=28.0, ignite_dist_m=5.5,
         boost_s=2.0, boost_thrust_n=3700.0,
         sustain_s=5.5, sustain_thrust_n=520.0,
-        peak_speed_ms=600.0, range_m=6000.0, ceiling_m=3500.0, life_s=15.0,
+        peak_speed_ms=600.0, range_m=6000.0, min_range_m=500.0,
+        ceiling_m=3500.0, life_s=15.0,
         seeker="ir", acq_cone_deg=4.0, gimbal_deg=40.0, track_rate_dps=12.0,
         nav_gain=3.7, g_limit=16.0, aoa_max_deg=18.0, cn_alpha=12.0,
         prox_radius_m=1.5, lock_range_m=6000.0, lock_range_ground_m=1500.0,
@@ -124,7 +127,8 @@ WEAPONS = (
         eject_v=28.0, ignite_dist_m=9.0,
         boost_s=1.9, boost_thrust_n=4300.0,
         sustain_s=6.0, sustain_thrust_n=420.0,
-        peak_speed_ms=750.0, range_m=4800.0, ceiling_m=3800.0, life_s=17.0,
+        peak_speed_ms=750.0, range_m=4800.0, min_range_m=200.0,
+        ceiling_m=3800.0, life_s=17.0,
         seeker="ir", acq_cone_deg=4.5, gimbal_deg=40.0, track_rate_dps=20.0,
         nav_gain=3.8, g_limit=20.0, aoa_max_deg=20.0, cn_alpha=12.0,
         prox_radius_m=2.0, lock_range_m=5200.0, lock_range_ground_m=1200.0,
@@ -138,7 +142,8 @@ WEAPONS = (
         eject_v=28.0, ignite_dist_m=5.5,
         boost_s=2.0, boost_thrust_n=3550.0,
         sustain_s=5.5, sustain_thrust_n=460.0,
-        peak_speed_ms=660.0, range_m=6500.0, ceiling_m=4000.0, life_s=14.0,
+        peak_speed_ms=660.0, range_m=6500.0, min_range_m=400.0,
+        ceiling_m=4000.0, life_s=14.0,
         seeker="ir", acq_cone_deg=4.0, gimbal_deg=40.0, track_rate_dps=15.0,
         nav_gain=3.7, g_limit=18.0, aoa_max_deg=18.0, cn_alpha=12.0,
         prox_radius_m=1.5, lock_range_m=6500.0, lock_range_ground_m=1600.0,
@@ -153,7 +158,8 @@ WEAPONS = (
         eject_v=40.0, ignite_dist_m=4.0,
         boost_s=1.4, boost_thrust_n=13000.0,
         sustain_s=0.0, sustain_thrust_n=0.0,
-        peak_speed_ms=1190.0, range_m=7000.0, ceiling_m=5000.0, life_s=12.0,
+        peak_speed_ms=1190.0, range_m=7000.0, min_range_m=300.0,
+        ceiling_m=5000.0, life_s=12.0,
         seeker="beam", acq_cone_deg=0.0, gimbal_deg=0.0, track_rate_dps=0.0,
         nav_gain=4.0, g_limit=20.0, aoa_max_deg=10.0, cn_alpha=10.0,
         prox_radius_m=0.0, lock_range_m=7000.0, lock_range_ground_m=7000.0,
@@ -161,7 +167,7 @@ WEAPONS = (
         super_elev_deg=3.0,      # the beam gathers the round, not an arc
         dart_sep=True, dart_mass_kg=2.7,
         dart_area_m2=3.0 * math.pi * 0.011 ** 2, dart_cd_scale=0.42,
-        dart_g_limit=20.0,
+        dart_g_limit=20.0, dart_spread_m=1.5,
         smoke_per_m=0.30, trail_width_m=0.55, corkscrew_m=0.0,
         flame_len_m=2.2),
 )
@@ -198,7 +204,7 @@ class ManpadsRound:
     """
 
     def __init__(self, spec: ManpadsSpec, pos, direction, target=None,
-                 ground_point=None, ground_h=None):
+                 ground_point=None, ground_h=None, victims=None):
         self.spec = spec
         self.pos = np.asarray(pos, dtype=np.float64).copy()
         d = _unit(np.asarray(direction, dtype=np.float64))
@@ -231,6 +237,13 @@ class ManpadsRound:
         self._a_lat = np.zeros(3)      # held through the terminal phase
         self._occ_left = 0.0
         self._rel_prev = None          # relative position after last step
+        self._tvel_prev = None         # beam: point velocity, last step
+        # The warhead does not care what it was AIMED at: everything the
+        # caller lists here is fuse-checked with the same segment test (a
+        # beam round threading a flying S-300 must frag it).
+        self.victims = victims         # callable -> iterable of objects
+        self.victim = None             # what the fuse actually caught
+        self._vrel_prev = {}           # id(victim) -> rel after last step
 
     # ---------------------------------------------------------- properties
 
@@ -290,15 +303,12 @@ class ManpadsRound:
                 self.phase = "boost"
                 thrust = s.boost_thrust_n
             elif tb < s.boost_s + s.sustain_s:
-                if self.phase == "boost":
-                    events.append(("burnout", self.pos.copy()))
-                    self._maybe_separate(events)
                 self.phase = "sustain"
                 thrust = s.sustain_thrust_n
             else:
                 if self.phase in ("boost", "sustain"):
-                    if self.phase == "boost" or s.sustain_s > 0.0:
-                        events.append(("burnout", self.pos.copy()))
+                    # burnout = ALL thrust ends (boost->sustain is not it)
+                    events.append(("burnout", self.pos.copy()))
                     self._maybe_separate(events)
                 self.phase = "coast"
 
@@ -340,11 +350,21 @@ class ManpadsRound:
                     self.miss_dist = miss
                 kill = s.prox_radius_m + s.diameter_m \
                     + self._target_radius()
+                if self.darts:
+                    # any of the three darts hitting counts: the triplet
+                    # flies a ~1.5 m formation around the beam axis
+                    kill += s.dart_spread_m
                 if miss <= kill:
                     self.done = True
                     self.hit = True
+                    if self.target is not None:
+                        self.victim = self.target
                     events.append(("hit", self.pos.copy()))
                     return
+
+        # -- anything else passing inside the fuse envelope
+        if self.victims is not None and self._check_victims(events):
+            return
 
         # -- terrain impact
         if self.ground_h is not None:
@@ -359,6 +379,31 @@ class ManpadsRound:
                 return
 
     # ------------------------------------------------------------ internals
+
+    def _check_victims(self, events: list) -> bool:
+        s = self.spec
+        for v in self.victims():
+            if v is self.target or getattr(v, "done", False):
+                continue
+            rel1 = np.asarray(v.pos, dtype=np.float64) - self.pos
+            rel0 = self._vrel_prev.get(id(v))
+            self._vrel_prev[id(v)] = rel1
+            if rel0 is None:
+                continue
+            length = getattr(getattr(v, "variant", None), "length_m", None)
+            radius = getattr(v, "radius", None)
+            if radius is None:
+                radius = float(length) * 0.3 if length else 0.5
+            kill = s.prox_radius_m + s.diameter_m + float(radius)
+            if self.darts:
+                kill += s.dart_spread_m
+            if _segment_min_dist(rel0, rel1) <= kill:
+                self.done = True
+                self.hit = True
+                self.victim = v
+                events.append(("hit", self.pos.copy()))
+                return True
+        return False
 
     def _maybe_separate(self, events: list) -> None:
         if self.spec.dart_sep and not self.darts:
@@ -376,9 +421,17 @@ class ManpadsRound:
         return None, None
 
     def _target_radius(self) -> float:
-        if self.target is not None:
-            return float(getattr(self.target, "radius", 0.5))
-        return 0.0
+        """Effective target radius: an explicit .radius wins; otherwise a
+        sphere-ization of the airframe from its variant length (a 7.5 m
+        S-300 round is NOT a half-meter point)."""
+        if self.target is None:
+            return 0.0
+        r = getattr(self.target, "radius", None)
+        if r is not None:
+            return float(r)
+        length = getattr(getattr(self.target, "variant", None),
+                         "length_m", None)
+        return float(length) * 0.3 if length else 0.5
 
     def _guidance(self, tpos, tvel, vdir, q, area, mass,
                   events) -> np.ndarray:
@@ -422,6 +475,15 @@ class ManpadsRound:
         omega = np.cross(rel, vrel) / (rng * rng)
         vc = -float(np.dot(rel, vrel)) / rng
         a_cmd = s.nav_gain * max(vc, 50.0) * np.cross(omega, los)
+        if s.seeker == "beam":
+            # CLOS: the dart follows the LINE including its acceleration
+            # (classic APN feedforward). An IR seeker can't observe target
+            # acceleration — only the beam computer on the ground can.
+            if self._tvel_prev is not None and self._dt_hint > 1e-6:
+                a_t = (tvel - self._tvel_prev) / self._dt_hint
+                a_cmd = a_cmd + 0.5 * s.nav_gain \
+                    * (a_t - los * float(np.dot(a_t, los)))
+            self._tvel_prev = tvel.copy()
         g_vec = np.array([0.0, -GRAVITY, 0.0])
         a_cmd = a_cmd - (g_vec - vdir * float(np.dot(g_vec, vdir)))
         # Fins produce normal force: project the command off the axis.

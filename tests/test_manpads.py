@@ -303,6 +303,28 @@ def test_prox_fuse_catches_between_step_crossing():
     assert hit, f"prox fuse missed a crossing target ({r.miss_dist})"
 
 
+def test_victims_fuse_frags_a_passing_round():
+    """The warhead does not care what it was aimed at: a round passing a
+    DIFFERENT object inside the fuse envelope kills it. The sim is
+    deterministic, so a dry run gives the exact flight path — park the
+    bystander on it and rerun with the victims hook."""
+    gp = np.array([0.0, 0.0, 4000.0])
+
+    def make():
+        return _launch("igla_s", direction=(0.0, 0.01, 1.0),
+                       ground_point=gp, ground_h=lambda x, z: -1e9)
+
+    probe = make()
+    _fly(probe, 3.0)
+    assert not probe.done
+    bystander = _Drone(pos=probe.pos.copy(), vel=(0.0, 0.0, 0.0))
+    bystander.radius = 2.0
+    r = make()
+    r.victims = lambda: [bystander]
+    _fly(r, 8.0)
+    assert r.hit and r.victim is bystander
+
+
 def test_deterministic_replay_is_bit_identical():
     def run():
         tgt = _Drone(pos=(150.0, 220.0, 1600.0), vel=(18.0, 190.0, -35.0))
