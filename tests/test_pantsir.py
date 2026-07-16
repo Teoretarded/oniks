@@ -390,11 +390,16 @@ def test_reload_paces_launches():
 # ===========================================================================
 
 class _AlwaysKillRng:
-    """rng whose kill roll always succeeds and integers() returns 0."""
+    """rng standing in for a PERFECT fire-control solution: zero OU tracking
+    error -> the physics gun gate covers the target every burst (sim/ciws.py
+    2026-07-17 rework); integers() returns 0 for the child-seed draws."""
     def random(self):
         return 0.0
     def integers(self, *a, **kw):
         return 0
+    def standard_normal(self, n=None):
+        import numpy as _np
+        return 0.0 if n is None else _np.zeros(n)
 
 
 def test_gun_engages_inside_4km():

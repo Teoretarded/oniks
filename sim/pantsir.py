@@ -8,8 +8,9 @@ Spec §4.2 (Pantsir-S1):
     small fuse (8 m), min intercept alt 5 m (sea-skimmers + pop-up HARMs).
   * Auto-engages inbound hostile missiles tracked by its own radar; no player
     micromanagement.
-  * 2× 30 mm guns, ~4 km last-ditch (same Ciws probabilistic burst model as
-    sim/ciws.py with 30 mm numbers; spec §4.2: last-ditch gun system).
+  * 2× 30 mm guns, ~4 km last-ditch (the sim/ciws.py physics burst model —
+    OU tracking error vs dispersion-cone coverage, never a Pk roll — with
+    30 mm numbers; spec §4.2: last-ditch gun system).
   * Ammo/reload armory-configurable.
 
 Module structure
@@ -105,19 +106,18 @@ GUN_RANGE_M: float = 4_000.0        # m
 # at the turret top).
 GUN_MOUNT_M: float = 4.0            # m
 
-# 30 mm gun probabilistic burst model (Ciws with Pantsir 30 mm numbers):
+# 30 mm gun burst model (Ciws with Pantsir 30 mm numbers — PHYSICS, not
+# dice; 2026-07-17 rework, see sim/ciws.py):
 # The Pantsir mounts 2 × 2A38M twin-barrel autocannons, combined rate ~2500
 # rd/min = ~42 rd/s effective (accounting for dual-feed pauses). Spec §4.2:
-# "last-ditch" role. Burst fire and kill-probability ramp mirrors ciws.py but
-# with different range / rate numbers appropriate to the 30 mm.
+# "last-ditch" role. Burst cadence mirrors ciws.py; the kill is a geometric
+# gate — OU fire-control tracking error vs the dispersion-stream lethal
+# radius — with the 30 mm's own calibrated constants (kill-per-burst lands
+# on the previous tuned ramp: ~0.55 at 1 km, ~0.15 at the 4 km edge).
 #   ROUNDS_PER_SECOND: 40 rd/s effective (real 2A38M ~1250 rd/min per barrel,
-#     2 barrels interleaved; burst bursts allow cooling at ~40 rd/s sustained).
-#   Pk ramp: same shape as ciws.py but shorter range (4 km max, 1 km near).
-#     P_FAR = 0.15 at 4 km (long shot into a Mach 2 target — very marginal).
-#     P_NEAR = 0.55 at 1 km (close-in saturating the target airspace).
-# These values are stored in a sub-class of Ciws that overrides the module
-# constants — we pass them as constructor arguments using the same ROUNDS_PER_
-# SECOND from the Ciws module scaled appropriately.
+#     2 barrels interleaved; burst pauses allow cooling at ~40 rd/s sustained).
+# The values live on the _Pantsir30mmGun subclass as class-attribute
+# overrides; the engage loop itself is inherited from Ciws unchanged.
 GUN_ROUNDS_PER_SECOND: float = 40.0   # rd/s effective rate
 GUN_DEFAULT_AMMO: int = 700            # rounds total (spec §4.2; configurable)
 
@@ -264,104 +264,24 @@ class Pantsir:
 class _Pantsir30mmGun(Ciws):
     """2× 2A38M autocannon on the Pantsir turret.
 
-    Overrides the module-level Ciws engagement constants with the Pantsir
-    30 mm numbers:
-      ENGAGE_RANGE  = 4 000 m  (spec §4.2 "~4 km last-ditch")
-      R_FAR         = 4 000 m
-      R_NEAR        = 1 000 m  (effective last-ditch range)
-      P_FAR         = 0.15     (marginal at the outer range — Mach 2 target)
-      P_NEAR        = 0.55     (close-in; saturating the airspace)
-      ROUNDS_PER_SECOND = 40   (2× 2A38M interleaved, ~40 rd/s effective)
-
-    The burst fire model (BURST_FIRE_TIME, BURST_PAUSE_TIME) is inherited from
-    Ciws unchanged — the cadence is the same for any autocannon system.
-
-    Implementation note: Python class-level shadowing of the module's constants
-    is used rather than monkey-patching, to avoid interfering with any live Ciws
-    instance elsewhere in the same process.
+    The engage loop (burst cadence, OU fire-control error, dispersion-cone
+    lethality gate — sim/ciws.py, physics not dice) is INHERITED unchanged;
+    this subclass only overrides the class-level constants:
+      _ENGAGE_RANGE      = 4 000 m  (spec §4.2 "~4 km last-ditch")
+      _ROUNDS_PER_SECOND = 40 rd/s  (2× 2A38M interleaved, effective)
+      _TRACK_SIGMA_MRAD / _LETHAL_DISP_MRAD — CALIBRATED so the measured
+        kill-per-burst frequencies land on the previous tuned Pk ramp
+        (~0.55 at 1 km, ~0.15 at the 4 km edge vs a missile-sized target;
+        tools/probe_gun_physics.py verifies — run it before retuning).
+    Event names feed the Pantsir effect/kill bookkeeping unchanged.
     """
 
-    # Override module-level constants from sim/ciws.py
-    _ENGAGE_RANGE = GUN_RANGE_M         # 4 000 m
-    _R_FAR        = GUN_RANGE_M         # 4 000 m
-    _R_NEAR       = 1_000.0             # m last-ditch near boundary
-    _P_FAR        = 0.15                # Pk at far boundary
-    _P_NEAR       = 0.55                # Pk at near boundary
-    _ROUNDS_PER_SECOND = GUN_ROUNDS_PER_SECOND  # 40 rd/s
-
-    # --- Override the Ciws engage() loop ---
-    def engage(self, target, dt: float) -> list:
-        """Step the 30 mm gun for one physics substep.
-
-        Identical logic to Ciws.engage but uses the Pantsir-specific
-        engagement parameters stored as class-level attributes.
-        """
-        if not self.ready or not target.alive:
-            return []
-
-        tpos = target.pos
-        tvel = target.velocity()
-
-        dx = float(tpos[0])
-        dy = float(tpos[1])
-        dz = float(tpos[2])
-        slant = math.sqrt(dx * dx + dy * dy + dz * dz)
-
-        if slant > self._ENGAGE_RANGE:
-            self._firing = False
-            self._phase_t = 0.0
-            return []
-
-        if slant > 1e-6:
-            closing = -(dx * float(tvel[0]) + dy * float(tvel[1])
-                        + dz * float(tvel[2])) / slant
-        else:
-            closing = 1.0
-
-        if closing <= 0.0:
-            return []
-
-        import sim.ciws as _ciws_mod
-        BURST_FIRE_TIME  = _ciws_mod.BURST_FIRE_TIME
-        BURST_PAUSE_TIME = _ciws_mod.BURST_PAUSE_TIME
-
-        events = []
-        self._phase_t += dt
-
-        if not self._firing:
-            if self._phase_t >= BURST_PAUSE_TIME:
-                self._phase_t -= BURST_PAUSE_TIME
-                self._firing = True
-        if self._firing:
-            if self._phase_t >= BURST_FIRE_TIME:
-                self._phase_t -= BURST_FIRE_TIME
-                self._firing = False
-
-                rounds_fired = int(self._ROUNDS_PER_SECOND * BURST_FIRE_TIME)
-                actual = min(rounds_fired, self.ammo)
-                self.ammo -= actual
-
-                snap_pos = np.array([dx, dy, dz], dtype=np.float64)
-                events.append(("pantsir_gun", snap_pos))
-
-                if actual > 0:
-                    pk = self._kill_prob(slant)
-                    if actual < rounds_fired:
-                        pk *= actual / rounds_fired
-                    if self._rng.random() < pk:
-                        target.alive = False
-                        events.append(("pantsir_kill", snap_pos))
-
-        return events
-
-    def _kill_prob(self, slant_range: float) -> float:
-        """Linear Pk ramp clamped to [_P_FAR, _P_NEAR]."""
-        if slant_range <= self._R_NEAR:
-            return self._P_NEAR
-        if slant_range >= self._R_FAR:
-            return self._P_FAR
-        t = (slant_range - self._R_NEAR) / (self._R_FAR - self._R_NEAR)
-        return self._P_NEAR + t * (self._P_FAR - self._P_NEAR)
+    _ENGAGE_RANGE = GUN_RANGE_M                  # 4 000 m
+    _ROUNDS_PER_SECOND = GUN_ROUNDS_PER_SECOND   # 40 rd/s
+    _TRACK_SIGMA_MRAD = 2.67    # mrad RMS per-axis tracking error
+    _LETHAL_DISP_MRAD = 1.75    # mrad lethal stream growth (30 mm spread)
+    EVENT_BURST = "pantsir_gun"
+    EVENT_KILL = "pantsir_kill"
 
 
 # ---------------------------------------------------------------------------
@@ -536,16 +456,27 @@ class _UnitDefense:
         # Launch position: PANTSIR_ANTENNA_M above the unit chassis (the 57E6
         # tubes are mounted on the same turret arm as the radar).
         launch_pos = unit.pos + np.array([0.0, PANTSIR_ANTENNA_M, 0.0])
+
+        def command_radar_pos():
+            radar = unit.radar
+            if (not unit.alive or not radar.alive or not radar.emitting):
+                return None
+            return (float(radar.pos[0]), float(radar.antenna_alt),
+                    float(radar.pos[2]))
+
+        def command_radar_ok():
+            radar = unit.radar
+            return bool(unit.alive and radar.alive and radar.emitting)
+
         sam = SamMissile(
             PANTSIR_57E6,
             launch_pos,
             self._tracks[best_key]["missile"],
             contact_estimate_fn=self._estimate(best_key),
             rng=np.random.default_rng(int(unit._rng.integers(2 ** 63))),
-            # No SARH illuminator: the 57E6 uses its own active/radar seeker
-            # in terminal phase (illuminator_pos_fn=None → missile's own seeker
-            # is the LOS source, identical to the S-300 player rounds).
-            illuminator_pos_fn=None,
+            # Command link stays tied to this unit's live engagement radar.
+            illuminator_pos_fn=command_radar_pos,
+            illuminator_ok_fn=command_radar_ok,
         )
         # Integration flags:
         #   launch_platform = unit → sim/damage.py skips self-OBB-hit on

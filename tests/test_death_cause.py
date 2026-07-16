@@ -292,6 +292,9 @@ def test_ciws_kill_stamps_victim_with_ship():
         def random(self):
             return 0.0
 
+        def standard_normal(self, n=None):
+            return 0.0 if n is None else np.zeros(n)
+
     class _StubWorld:
         def __init__(self):
             self.missiles = []
@@ -335,6 +338,11 @@ def test_pantsir_gun_kill_stamps_victim():
 
         def integers(self, *a, **kw):
             return 0
+
+        def standard_normal(self, n=None):
+            # Perfect fire-control solution: zero OU tracking error, so the
+            # physics gun gate (sim/ciws.py 2026-07-17) kills every burst.
+            return 0.0 if n is None else np.zeros(n)
 
     class _StubWorld:
         def __init__(self):

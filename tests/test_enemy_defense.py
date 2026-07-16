@@ -44,10 +44,16 @@ class _StubWorld:
 
 
 class _ZeroRng:
-    """Duck-typed rng whose every kill roll succeeds (Pk > 0 always)."""
+    """Duck-typed rng standing in for a PERFECT fire-control solution:
+    zero OU tracking error -> the physics gun gate (sim/ciws.py, 2026-07-17)
+    covers the target on every burst.  ``random`` kept for legacy callers."""
 
     def random(self):
         return 0.0
+
+    def standard_normal(self, n=None):
+        import numpy as _np
+        return 0.0 if n is None else _np.zeros(n)
 
 
 def _oniks(pos, vel, profile="hi-lo"):
