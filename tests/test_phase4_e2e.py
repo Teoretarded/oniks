@@ -223,6 +223,14 @@ def test_drone_engaged_rwr_lock_kill_and_respawn():
         if isinstance(e, Fighter):
             e.state = FS_GONE
             e._alive = False
+    # Phase-8 grew an SM-6 anti-drone standoff channel with its OWN in-flight
+    # cap; in the 22-30 km band it can overlap the SM-2 shots and break this
+    # test's SM-2-only inflight bound.  Empty the SM-6 magazines so the test
+    # keeps isolating the SM-2 channel it has always pinned (the SM-6 hunt is
+    # covered by the phase-8 suites) — same isolation move as grounding the
+    # fighters above.
+    for s in w.ships:
+        s.sm6_ammo = 0
     d = w.drone
     # Use the closest destroyer: destroyer_02 = ships[2] at ~135 km.
     ship = next(s for s in w.ships if s.ship_id == "destroyer_02")

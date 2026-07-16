@@ -90,6 +90,18 @@ TRACK_TAU_S = 1.0           # s OU correlation (FCS solution persistence).
 #   "a lone swarm round never leaks given ammo" contract broke at tau 2).
 LETHAL_DISP_MRAD = 1.45     # mrad: dispersion-stream lethal radius growth
 
+# Crossing-rate servo lag: the mount's traverse/settle trails a CROSSING
+# target by SERVO_LAG_S seconds of its cross-range speed, shrinking the
+# covered radius by lag_m = SERVO_LAG_S * v_perp (and closing the shot
+# entirely when the lag exceeds the whole lethal radius — the physical
+# dead zone every real CIWS has against fast crossers).  A radial closer
+# (v_perp ~ 0) pays nothing, so the head-on calibration above is
+# untouched; leakers CROSSING the mount's position survive close passes —
+# the reason ships pair the gun with missiles, and the seam the phase-6
+# saturation raid leaks through (its defeat-path contract broke when the
+# reworked gun was point-blank-certain against crossers too).
+SERVO_LAG_S = 0.02          # s effective traverse/settle lag
+
 # Effective target radius when the target does not expose ``.radius``:
 # an Oniks-class 8.9 m airframe sphere-izes to ~2.6 m (the manpads
 # _target_radius convention, length * 0.3).
@@ -118,6 +130,7 @@ class Ciws:
     _TRACK_SIGMA_MRAD = TRACK_SIGMA_MRAD
     _TRACK_TAU_S = TRACK_TAU_S
     _LETHAL_DISP_MRAD = LETHAL_DISP_MRAD
+    _SERVO_LAG_S = SERVO_LAG_S
     EVENT_BURST = "ciws_burst"
     EVENT_KILL = "ciws_kill"
 
@@ -266,7 +279,19 @@ class Ciws:
                               * 1e-3 * slant)
                     lethal = self._lethal_radius_m(
                         slant, target, actual / max(rounds_fired, 1))
-                    if miss_m <= lethal:
+                    # Crossing-rate servo lag (SERVO_LAG_S): the covered
+                    # radius shrinks by the mount's traverse trail behind
+                    # the target's cross-range speed.  v_perp is the
+                    # component of target velocity perpendicular to the
+                    # line of sight; a radial closer pays nothing.
+                    vx, vy, vz = (float(tvel[0]), float(tvel[1]),
+                                  float(tvel[2]))
+                    if slant > 1e-6:
+                        radial = (dx * vx + dy * vy + dz * vz) / slant
+                        v2 = vx * vx + vy * vy + vz * vz
+                        v_perp = math.sqrt(max(v2 - radial * radial, 0.0))
+                        lethal -= self._SERVO_LAG_S * v_perp
+                    if lethal > 0.0 and miss_m <= lethal:
                         target.alive = False
                         events.append((self.EVENT_KILL, snap_pos))
 
