@@ -280,14 +280,18 @@ class CinematicScene:
                 self._crater_cells.setdefault((gi, gj), []).append(idx)
 
     @staticmethod
-    def _carve(h, dist, radius: float, depth: float, gz_h: float):
+    def _carve(h, dist, radius: float, depth: float, gz_h: float,
+               tuck: float = 0.0):
         """Apply one crater to surface height(s) ``h`` at radial
         distance(s) ``dist``: the bowl interior is CUT down toward the
         ground-zero elevation (parabolic target surface, never fills),
         the ejecta lip rides additively just outside the rim.  Works
-        scalar or vectorized."""
+        scalar or vectorized.  ``tuck`` lowers the target for coarse
+        ring layers stacked under the primary surface so they keep
+        their clamp separation inside the bowl."""
         rr = dist / radius
-        target = gz_h - depth * np.clip(1.0 - rr * rr, 0.0, 1.0) ** 2
+        target = (gz_h - tuck
+                  - depth * np.clip(1.0 - rr * rr, 0.0, 1.0) ** 2)
         lip_arg = (rr - 1.05) / 0.65
         lip = (0.22 * depth
                * np.clip(1.0 - lip_arg * lip_arg, 0.0, 1.0) ** 2)
@@ -313,7 +317,8 @@ class CinematicScene:
         return h - h0
 
     def crater_delta_grid(self, xs: np.ndarray, zs: np.ndarray,
-                          baked: np.ndarray) -> np.ndarray:
+                          baked: np.ndarray,
+                          tuck: float = 0.0) -> np.ndarray:
         """(len(zs), len(xs)) summed crater delta over the crater-free
         ``baked`` height grid — the renderer's mesh rebuild path adds
         this onto the stored DSM.  Craters carve chronologically."""
@@ -329,7 +334,7 @@ class CinematicScene:
                     or cz + reach < z0 or cz - reach > z1):
                 continue
             dist = np.hypot(xs[None, :] - cx, zs[:, None] - cz)
-            h = self._carve(h, dist, r, d, gz)
+            h = self._carve(h, dist, r, d, gz, tuck=tuck)
         return (h - base).astype(np.float32)
 
     def craters_intersecting(self, x0: float, z0: float, x1: float,

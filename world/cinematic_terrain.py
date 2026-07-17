@@ -398,24 +398,30 @@ class CinematicTerrain:
             # chunks so the world keeps going past the fine scene —
             # heterogeneous chunk sizes are fine (cell derives per rec).
             self.surround = []
-            for rec in (list(getattr(scene, "surround", []))
-                        + list(getattr(scene, "surround2", []))
-                        + list(getattr(scene, "surround3", []))):
-                with np.load(rec.hgt_path) as z:
-                    h = z["h"]
-                mesh = _TexturedMesh(*punch_core_hole(
-                    *build_tile_arrays(h, rec.size / (h.shape[0] - 3),
-                                       rec.size, skirt_drop=70.0),
-                    rec.x0, rec.z0,
-                    (scene.x0, scene.z0, scene.x1, scene.z1)))
-                rgb = np.asarray(Image.open(rec.tex_path).convert("RGB"),
-                                 dtype=np.uint8)
-                tex = _upload_texture(rgb)
-                y_mid = float(h.mean())
-                radius = float(np.hypot(rec.size * 0.71,
-                                        (h.max() - h.min()) * 0.5) + 1.0)
-                self.surround.append([mesh, tex, rec.x0, rec.z0, rec.size,
-                                      y_mid, radius, rec])
+            # Per-ring crater tuck: stacked rings carve to slightly
+            # deeper targets so clamped-under layers keep their
+            # separation inside a bowl instead of z-fighting on the
+            # SAME cut surface (nuke-probe shards, 2026-07-17).
+            for tuck, ring in ((0.0, getattr(scene, "surround", [])),
+                               (15.0, getattr(scene, "surround2", [])),
+                               (30.0, getattr(scene, "surround3", []))):
+                for rec in ring:
+                    with np.load(rec.hgt_path) as z:
+                        h = z["h"]
+                    mesh = _TexturedMesh(*punch_core_hole(
+                        *build_tile_arrays(h, rec.size / (h.shape[0] - 3),
+                                           rec.size, skirt_drop=70.0),
+                        rec.x0, rec.z0,
+                        (scene.x0, scene.z0, scene.x1, scene.z1)))
+                    rgb = np.asarray(Image.open(rec.tex_path).convert(
+                        "RGB"), dtype=np.uint8)
+                    tex = _upload_texture(rgb)
+                    y_mid = float(h.mean())
+                    radius = float(np.hypot(rec.size * 0.71,
+                                            (h.max() - h.min()) * 0.5) + 1.0)
+                    self.surround.append([mesh, tex, rec.x0, rec.z0,
+                                          rec.size, y_mid, radius, rec,
+                                          tuck])
         except Exception:
             self.dispose()
             raise
@@ -525,7 +531,7 @@ class CinematicTerrain:
                 _scorch_rgb, t.rec.tex_path, t.x0, t.z0, t.size,
                 all_craters), "tile", t))
         for entry in self.surround:
-            mesh, tex, x0, z0, size, y_mid, radius, rec = entry
+            mesh, tex, x0, z0, size, y_mid, radius, rec, tuck = entry
             news = sc.craters_intersecting(x0, z0, x0 + size, z0 + size,
                                            since_rev=since)
             if not news:
@@ -535,7 +541,7 @@ class CinematicTerrain:
             cell = size / (h.shape[0] - 3)
             xs = x0 + (np.arange(h.shape[1], dtype=np.float64) - 1.0) * cell
             zs = z0 + (np.arange(h.shape[0], dtype=np.float64) - 1.0) * cell
-            h = h + sc.crater_delta_grid(xs, zs, h)
+            h = h + sc.crater_delta_grid(xs, zs, h, tuck=tuck)
             entry[0].delete()
             entry[0] = _TexturedMesh(*punch_core_hole(
                 *build_tile_arrays(h, cell, size, skirt_drop=70.0),
@@ -618,7 +624,8 @@ class CinematicTerrain:
         glActiveTexture(GL_TEXTURE0)
         model = np.zeros((4, 4), dtype=np.float32)
         model[0, 0] = model[1, 1] = model[2, 2] = model[3, 3] = 1.0
-        for mesh, tex, sx0, sz0, size, y_mid, radius, _rec in self.surround:
+        for (mesh, tex, sx0, sz0, size, y_mid, radius, _rec,
+             _tuck) in self.surround:
             cx = sx0 + size * 0.5 - eye[0]
             cy = y_mid - eye[1]
             cz = sz0 + size * 0.5 - eye[2]

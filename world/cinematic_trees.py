@@ -140,6 +140,20 @@ def _record_arrays(
             species.astype(np.uint8, copy=False))
 
 
+def fell_mask(x, z, tile_x0: float, tile_z0: float, craters,
+              fell_scale: float = 1.4) -> np.ndarray:
+    """Boolean keep-mask over tile-local tree positions: trees within
+    ``fell_scale * R`` of any crater are felled (the blast/scorch zone
+    — matches the ash disc at 1.45 R), the rest stand.  GL-free."""
+    x = np.asarray(x, np.float64).ravel() + float(tile_x0)
+    z = np.asarray(z, np.float64).ravel() + float(tile_z0)
+    keep = np.ones(x.shape, bool)
+    for c in craters:
+        cx, cz, r = float(c[0]), float(c[1]), float(c[2])
+        keep &= np.hypot(x - cx, z - cz) > r * fell_scale
+    return keep
+
+
 def build_tree_arrays(
     x,
     z=None,
@@ -270,13 +284,14 @@ class _Tile:
     """Tree-file record plus lazy GPU mesh for one terrain tile."""
 
     __slots__ = ("path", "x0", "z0", "size", "y_mid", "radius",
-                 "mesh", "failed")
+                 "mesh", "failed", "craters")
 
     def __init__(self, path: str, x0: float, z0: float, size: float):
         self.path = path
         self.x0, self.z0, self.size = float(x0), float(z0), float(size)
         self.mesh = None
         self.failed = False
+        self.craters = []          # (x, z, R, ...) felling this tile
         with np.load(path) as records:
             base = np.asarray(records["base_y"], dtype=np.float32)
             tops = base + np.asarray(records["height"], dtype=np.float32)
@@ -356,6 +371,7 @@ class CinematicTrees:
         self.shadow_str = 0.0
         self.tiles: list[_Tile] = []
         self._disposed = False
+        self._crater_seen = 0      # scene.crater_rev consumed so far
         self._model = np.eye(4, dtype=np.float32)
         # A scene without a tree bake (no DSM data — Yosemite — or the
         # baker simply hasn't run) is a NO-TREES scene, not a crash:
@@ -378,16 +394,49 @@ class CinematicTrees:
             raise
 
     def _ensure_mesh(self, tile: _Tile) -> None:
-        """Build and upload a tile once, memoizing load failures."""
+        """Build and upload a tile once, memoizing load failures.
+        Trees inside crater blast zones are felled at build."""
         if tile.mesh is not None or tile.failed:
             return
         try:
             with np.load(tile.path) as records:
-                verts, indices = build_tree_arrays(records)
+                if tile.craters:
+                    keep = fell_mask(records["x"], records["z"],
+                                     tile.x0, tile.z0, tile.craters)
+                    verts, indices = build_tree_arrays(
+                        records["x"][keep], records["z"][keep],
+                        records["base_y"][keep], records["height"][keep],
+                        records["radius"][keep], records["tint"][keep],
+                        records["species"][keep])
+                else:
+                    verts, indices = build_tree_arrays(records)
             tile.mesh = _TreeMesh(self.gl, verts, indices)
         except Exception as exc:  # noqa: BLE001 - retain other forest tiles
             tile.failed = True
             print(f"[cinematic] tree VBO failed for {tile.path}: {exc}")
+
+    def apply_craters(self, scene) -> None:
+        """Fell trees in NEW craters' blast zones: affected tiles drop
+        their mesh and lazily rebuild filtered (impact moment — the
+        blast masks the rebuild, same policy as the terrain)."""
+        rev = getattr(scene, "crater_rev", 0)
+        if rev == self._crater_seen or not self.enabled:
+            self._crater_seen = rev
+            return
+        since = self._crater_seen
+        self._crater_seen = rev
+        for tile in self.tiles:
+            news = scene.craters_intersecting(
+                tile.x0, tile.z0, tile.x0 + tile.size,
+                tile.z0 + tile.size, since_rev=since)
+            if not news:
+                continue
+            tile.craters = scene.craters_intersecting(
+                tile.x0, tile.z0, tile.x0 + tile.size,
+                tile.z0 + tile.size)
+            if tile.mesh is not None:
+                tile.mesh.delete()
+                tile.mesh = None
 
     def draw(self, renderer, camera, time: float) -> None:
         """Draw nearby, forward-facing tiles with two-sided alpha testing."""

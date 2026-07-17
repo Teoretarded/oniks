@@ -1195,6 +1195,7 @@ class CinematicState(GameState):
             self._space_k = 0.0
 
         self.terrain.update(eye)
+        self.trees.apply_craters(self.scene)
         self.app.renderer.alt_offset = self.scene.origin_alt
         self.app.renderer.begin(self.camera, w / max(h, 1))
         if self.clouds is not None and getattr(self.clouds, "enabled", True):
