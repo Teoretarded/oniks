@@ -50,6 +50,52 @@ def _scene_json(scene: str) -> dict:
         return json.load(f)
 
 
+def _finer_field(chunks: list, out_dir: str):
+    """(field, cell, x0, z0, x1, z1) mosaic of an already-baked chunk
+    list (scene.json schema) so coarser rings can clamp UNDER it.
+    Tucking against foreign data (GLO-30 canopy heights) let ring slabs
+    breach the LiDAR valley floor — the user's black square/lines."""
+    if not chunks:
+        return None
+    x0 = min(c["x0"] for c in chunks)
+    z0 = min(c["z0"] for c in chunks)
+    x1 = max(c["x0"] + c["size"] for c in chunks)
+    z1 = max(c["z0"] + c["size"] for c in chunks)
+    size = chunks[0]["size"]
+    with np.load(os.path.join(out_dir, chunks[0]["hgt"])) as z:
+        n_in = z["h"].shape[0] - 2
+    cell = size / (n_in - 1)
+    nx = int(round((x1 - x0) / cell)) + 1
+    nz = int(round((z1 - z0) / cell)) + 1
+    field = np.full((nz, nx), np.nan, np.float32)
+    for c in chunks:
+        with np.load(os.path.join(out_dir, c["hgt"])) as zf:
+            inner = zf["h"][1:-1, 1:-1]
+        ix = int(round((c["x0"] - x0) / cell))
+        iz = int(round((c["z0"] - z0) / cell))
+        field[iz:iz + n_in, ix:ix + n_in] = inner
+    return (field, cell, x0, z0, x1, z1)
+
+
+def _clamp_under(grid: np.ndarray, xs: np.ndarray, zs: np.ndarray,
+                 finer, tuck: float) -> np.ndarray:
+    """Force every cell that lies inside the finer field's rect to sit
+    at least ``tuck`` below the finer surface (nearest-sample)."""
+    field, cell, fx0, fz0, fx1, fz1 = finer
+    inside = ((xs[None, :] >= fx0) & (xs[None, :] <= fx1)
+              & (zs[:, None] >= fz0) & (zs[:, None] <= fz1))
+    if not inside.any():
+        return grid
+    ii = np.clip(np.round((xs - fx0) / cell).astype(int),
+                 0, field.shape[1] - 1)
+    jj = np.clip(np.round((zs - fz0) / cell).astype(int),
+                 0, field.shape[0] - 1)
+    lim = field[jj[:, None], ii[None, :]] - tuck
+    ok = inside & np.isfinite(lim)
+    out = np.where(ok, np.minimum(grid, lim), grid)
+    return np.where(inside & ~np.isfinite(lim), grid - tuck, out)
+
+
 def _grid_from_dem(dem: np.ndarray, gj0: int, gi0: int, n_cells: int,
                    step: int) -> np.ndarray:
     """(n+3, n+3) height grid sampled every ``step`` px with edge pad —
@@ -132,15 +178,11 @@ def _bake_ring2(scene: str, man2: dict, sj: dict, out_dir: str) -> list:
         rgb[black] = tint[black]
         print(f"  {int(black.sum())} ortho hole px tinted")
 
-    # The existing surround rect (finer) — chunks fully inside skip out,
-    # partial overlaps get tucked below it.  Bounds come from the baked
-    # surround chunk list itself (scene.json carries no km rects).
-    sur = sj.get("surround", [])
-    if sur:
-        sur_x0 = min(c["x0"] for c in sur)
-        sur_x1 = max(c["x0"] + c["size"] for c in sur)
-        sur_z0 = min(c["z0"] for c in sur)
-        sur_z1 = max(c["z0"] + c["size"] for c in sur)
+    # The existing surround (finer): chunks fully inside skip out,
+    # partial overlaps clamp UNDER its baked surface.
+    finer_sur = _finer_field(sj.get("surround", []), out_dir)
+    if finer_sur is not None:
+        sur_x0, sur_z0, sur_x1, sur_z1 = finer_sur[2:6]
     else:
         sur_x0 = sur_x1 = sur_z0 = sur_z1 = 0.0
 
@@ -161,12 +203,12 @@ def _bake_ring2(scene: str, man2: dict, sj: dict, out_dir: str) -> list:
             gj0 = cj * R2_CHUNK_KM * R2_PX_KM
             gi0 = ci * R2_CHUNK_KM * R2_PX_KM
             grid = _grid_from_dem(dem, gj0, gi0, n_cells, step)
-            # Tuck the parts the finer surround already draws.
+            # Clamp the parts the finer surround already draws UNDER its
+            # own baked surface (not a blind offset).
             xs = x0c + (np.arange(n_cells + 3) - 1) * float(R2_CELL_M)
             zs = z0c + (np.arange(n_cells + 3) - 1) * float(R2_CELL_M)
-            inside = ((xs[None, :] >= sur_x0) & (xs[None, :] <= sur_x1)
-                      & (zs[:, None] >= sur_z0) & (zs[:, None] <= sur_z1))
-            grid = np.where(inside, grid - TUCK_M, grid)
+            if finer_sur is not None:
+                grid = _clamp_under(grid, xs, zs, finer_sur, TUCK_M)
             base = f"surround2_{ci}_{cj}"
             tex = Image.fromarray(np.flipud(
                 rgb[gj0:gj0 + R2_CHUNK_KM * R2_PX_KM,
@@ -260,7 +302,8 @@ def _alpine_tint(h_asl: np.ndarray, slope: np.ndarray) -> np.ndarray:
     return np.clip(rgbf, 0, 255).astype(np.uint8)
 
 
-def _bake_ring3(scene: str, sj: dict, man2: dict, out_dir: str) -> list:
+def _bake_ring3(scene: str, sj: dict, man2: dict, out_dir: str,
+                finers: list) -> list:
     origin_e = sj["origin_e"]
     origin_n = sj["origin_n"]
     origin_alt = sj["origin_alt"]
@@ -333,9 +376,8 @@ def _bake_ring3(scene: str, sj: dict, man2: dict, out_dir: str) -> list:
                               mode="edge")
             cxs = x0c + (np.arange(n_cells + 3) - 1) * float(R3_CELL_M)
             czs = z0c + (np.arange(n_cells + 3) - 1) * float(R3_CELL_M)
-            inside = ((cxs[None, :] >= r2x0) & (cxs[None, :] <= r2x1)
-                      & (czs[:, None] >= r2z0) & (czs[:, None] <= r2z1))
-            grid = np.where(inside, grid - TUCK_M, grid)
+            for finer in finers:
+                grid = _clamp_under(grid, cxs, czs, finer, TUCK_M)
             # Baked tint from ASL height + slope.
             h_asl = grid[1:-2, 1:-2] + float(origin_alt)
             dzdx = np.gradient(h_asl, float(R3_CELL_M), axis=1)
@@ -363,7 +405,11 @@ def main() -> None:
               encoding="utf-8") as f:
         man2 = json.load(f)
     sj["surround2"] = _bake_ring2(scene, man2, sj, out_dir)
-    sj["surround3"] = _bake_ring3(scene, sj, man2, out_dir)
+    # Ring 3 clamps under BOTH finer layers' freshly-baked surfaces.
+    finers3 = [f for f in (_finer_field(sj["surround2"], out_dir),
+                           _finer_field(sj.get("surround", []), out_dir))
+               if f is not None]
+    sj["surround3"] = _bake_ring3(scene, sj, man2, out_dir, finers3)
     sj["far_attribution"] = man2.get("glo30_attribution", "")
     tmp = os.path.join(out_dir, "scene.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
