@@ -718,6 +718,20 @@ class IcbmLaunch:
                 fx.fire.emit(1, tail - h * back, 0.4, -h * 130.0, 8.0,
                              (0.08, 0.26), (size * 0.5, size * 1.6),
                              (col, col), r, stretch=0.025)
+            # Shock diamonds: hard bright knots in the first third of
+            # the plume — the close-range "real motor" read.  They die
+            # off with altitude as ambient pressure (and the diamond
+            # structure) vanishes.
+            if rel_alt < 12000.0:
+                dk = 1.0 - rel_alt / 12000.0
+                for k in range(3):
+                    back = flame_len * (0.10 + 0.26 * k)
+                    fx.fire.emit(1, tail - h * back, 0.15, -h * 90.0,
+                                 4.0, (0.05, 0.10),
+                                 (0.030 * flame_len * dk,
+                                  0.055 * flame_len * dk),
+                                 ((1.0, 0.98, 0.90), spec.flame_core),
+                                 r, stretch=0.012)
             # Far-visibility glow: flame-length scale — a 2x-length sprite
             # blinded the chase cam (audit shot 30, a white ball).
             fx.fire.emit(1, tail - h * flame_len * 0.3, 0.1,
@@ -876,6 +890,47 @@ class IcbmLaunch:
                           6.0, (8.0, 16.0), (3.0, 26.0),
                           (spec.smoke_fresh, spec.smoke_old), r,
                           alpha01=(0.85, 0.06), fade_in=0.05)
+            # Silo apron blast: the S-300 pad-blast trio scaled to a
+            # fire-in-the-hole silo (the audited SAM pattern — dust
+            # sheet, white efflux surge, lingering base cloud; the old
+            # ignition was a bare puff, 2026-07-17 user report).
+            apron = p + np.array([0.0, 0.5, 0.0])
+            idx = fx.smoke.emit(150, apron, 3.0, (0.0, 1.4, 0.0), 0.6,
+                                (3.0, 6.0), (3.0, 22.0),
+                                ((0.60, 0.55, 0.47), (0.46, 0.43, 0.38)),
+                                r, alpha01=(0.8, 0.05), fade_in=0.04,
+                                stretch=0.035)
+            if len(idx):
+                ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+                sp = r.uniform(34.0, 60.0, len(idx))
+                fx.smoke.vel[idx, 0] = (np.sin(ang) * sp).astype(np.float32)
+                fx.smoke.vel[idx, 2] = (np.cos(ang) * sp).astype(np.float32)
+                fx.smoke.vel[idx, 1] = r.uniform(0.5, 2.4, len(idx)) \
+                    .astype(np.float32)
+            fx.smoke.emit(70, apron + np.array([0.0, 2.0, 0.0]), 4.0,
+                          (0.0, 12.0, 0.0), 4.5, (8.0, 15.0), (5.0, 30.0),
+                          (spec.smoke_fresh, spec.smoke_old), r,
+                          alpha01=(0.85, 0.06), fade_in=0.05)
+            fx.smoke.emit(70, apron + np.array([0.0, 3.0, 0.0]), 6.0,
+                          _wind(fx, float(p[1])) + np.array([0.0, 2.2, 0.0]),
+                          2.0, (24.0, 45.0), (10.0, 46.0),
+                          (spec.smoke_fresh, spec.smoke_old), r,
+                          alpha01=(0.55, 0.04), fade_in=0.12)
+        elif spec.water_launch:
+            # Solid light-off over the broach splash: a hard white
+            # STEAM flash where the plume boils the lifted water, plus
+            # spray driven back down the column.
+            white = (0.95, 0.97, 1.0)
+            fx.smoke.emit(55, p, 2.5, (0.0, 9.0, 0.0), 5.0, (1.8, 3.5),
+                          (3.0, 14.0), (white, (0.82, 0.87, 0.92)), r,
+                          alpha01=(0.9, 0.08), fade_in=0.02, stretch=0.02)
+            fx.spray.emit(60, p, 1.8, (0.0, -2.0, 0.0), 9.0,
+                          (0.9, 1.8), (0.4, 1.2),
+                          (white, (0.85, 0.90, 0.94)), r)
+            fx.smoke.emit(18, p, 2.0, (0.0, 1.0, 0.0), 2.5, (2.0, 5.0),
+                          (2.0, 9.0),
+                          ((0.55, 0.36, 0.26), spec.smoke_old), r,
+                          alpha01=(0.6, 0.05), fade_in=0.05)
         else:
             # Reddish NTO tint on the ignition transient.
             fx.smoke.emit(18, p, 2.0, (0.0, 1.0, 0.0), 2.5, (2.0, 5.0),
@@ -890,19 +945,39 @@ class IcbmLaunch:
         spec = self.spec
         r = fx.rng
         p = np.asarray(pos, dtype=np.float64) + np.array([0.0, 2.0, 0.0])
-        n = 46
-        idx = fx.smoke.emit(n, p, 0.5, (0.0, 10.5, 0.0), 0.8,
-                            (22.0, 38.0), (2.6, 15.0),
-                            (spec.smoke_fresh, spec.smoke_old), r,
-                            alpha01=(0.62, 0.03), fade_in=0.10)
-        if len(idx):
-            ang = np.linspace(0.0, 2.0 * np.pi, len(idx), endpoint=False)
-            ring_r = 2.6
-            fx.smoke.pos[idx, 0] += (np.sin(ang) * ring_r).astype(np.float32)
-            fx.smoke.pos[idx, 2] += (np.cos(ang) * ring_r).astype(np.float32)
-            sp = fx.rng.uniform(3.0, 4.6, len(idx))
-            fx.smoke.vel[idx, 0] += (np.sin(ang) * sp).astype(np.float32)
-            fx.smoke.vel[idx, 2] += (np.cos(ang) * sp).astype(np.float32)
+        # Two stacked rings (the vortex core + its trailing sheath) so
+        # the doughnut reads as a rolling TORUS, not a thin necklace —
+        # the one-shot 46-particle ring vanished at any distance
+        # (2026-07-17 user report: launch effects "bland").
+        for n, ring_r, rise, alpha in ((110, 2.6, 10.5, 0.62),
+                                       (70, 3.4, 8.0, 0.40)):
+            idx = fx.smoke.emit(n, p, 0.5, (0.0, rise, 0.0), 0.8,
+                                (22.0, 38.0), (3.2, 17.0),
+                                (spec.smoke_fresh, spec.smoke_old), r,
+                                alpha01=(alpha, 0.03), fade_in=0.10)
+            if len(idx):
+                ang = np.linspace(0.0, 2.0 * np.pi, len(idx),
+                                  endpoint=False)
+                jit = fx.rng.uniform(-0.4, 0.4, len(idx))
+                fx.smoke.pos[idx, 0] += (np.sin(ang) * (ring_r + jit)) \
+                    .astype(np.float32)
+                fx.smoke.pos[idx, 2] += (np.cos(ang) * (ring_r + jit)) \
+                    .astype(np.float32)
+                sp = fx.rng.uniform(3.0, 4.6, len(idx))
+                # Vortex swirl: a touch of tangential motion rolls the
+                # doughnut instead of just inflating it.
+                sw = fx.rng.uniform(-1.6, 1.6, len(idx))
+                fx.smoke.vel[idx, 0] += (np.sin(ang) * sp
+                                         + np.cos(ang) * sw) \
+                    .astype(np.float32)
+                fx.smoke.vel[idx, 2] += (np.cos(ang) * sp
+                                         - np.sin(ang) * sw) \
+                    .astype(np.float32)
+        # Lingering halo: the ring's remnant hangs as a smoke hoop.
+        fx.smoke.emit(30, p + np.array([0.0, 6.0, 0.0]), 3.5,
+                      (0.0, 2.5, 0.0), 1.0, (30.0, 50.0), (6.0, 24.0),
+                      (spec.smoke_fresh, spec.smoke_old), r,
+                      alpha01=(0.30, 0.02), fade_in=0.25)
 
     def eject_fx(self, fx, pos) -> None:
         """Cold mortar exit.  Silo: the huge dark PAD-gas puff venting
@@ -994,6 +1069,26 @@ class IcbmLaunch:
                       (spec.diameter_m * 2.0, spec.diameter_m * 14.0),
                       (spec.smoke_fresh, spec.smoke_old), r,
                       alpha01=(0.4, 0.02), fade_in=0.15)
+
+    def cutoff_fx(self, fx, pos) -> None:
+        """Liquid engine shutdown: the hypergolic transient — a last
+        rich-mixture flare, an NTO-brown vent puff blown down the axis,
+        and unburnt propellant droplets glinting behind the stack (the
+        Sarmat 'cutoff' beat had NO visual at all)."""
+        spec = self.spec
+        r = fx.rng
+        p = (np.asarray(pos, dtype=np.float64)
+             - self.axis * spec.length_m * 0.45)
+        fx.fire.emit(14, p, 0.8, -self.axis * 22.0, 8.0, (0.25, 0.6),
+                     (1.2, 3.6), (spec.flame_core, spec.flame_edge), r,
+                     stretch=0.02)
+        fx.smoke.emit(22, p, 1.4, -self.axis * 12.0, 5.0, (3.0, 7.0),
+                      (2.0, 10.0),
+                      ((0.55, 0.36, 0.26), spec.smoke_old), r,
+                      alpha01=(0.5, 0.04), fade_in=0.04)
+        fx.spray.emit(18, p, 0.8, -self.axis * 9.0, 5.0, (0.8, 1.6),
+                      (0.25, 0.7), ((0.9, 0.85, 0.7), (0.7, 0.6, 0.45)),
+                      r)
 
     def term_fx(self, fx, pos) -> None:
         """Solid thrust termination: the forward vent ports blow — two

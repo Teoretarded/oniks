@@ -968,6 +968,8 @@ class CinematicState(GameState):
                     m.term_fx(self.effects, pos)
                     self._say("THRUST TERMINATED - BALLISTIC ARC")
                 elif kind == "cutoff":
+                    if hasattr(m, "cutoff_fx"):
+                        m.cutoff_fx(self.effects, pos)
                     self._say("ENGINE CUTOFF - BALLISTIC ARC")
                 elif kind == "impact":
                     self._queue_sound("boom", pos)
