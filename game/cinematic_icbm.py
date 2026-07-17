@@ -10,17 +10,21 @@ uses the REAL mechanisms, no dice and no fudge (research doc section 3):
   velocity that puts the vehicle on a ballistic arc arriving at the
   target exactly when the TOA clock runs out is
   ``v_req = D/tau + 0.5*g*tau*up`` (D = target - pos, tau = time left).
-- Solids (Minuteman III) cannot shut down, so boost flies GEMS —
-  Generalized Energy Management Steering (US 4,387,865 / 10,323,907):
-  thrust points ``theta = arccos(|Vg| / C)`` off the velocity-to-be-
-  gained Vg, the orthogonal component rotating slowly (the corkscrew
-  that visibly WASTES energy).  Under that law d|Vg|/dt = -a*|Vg|/C
-  while dC/dt = -a, so the ratio |Vg|/C is invariant: Vg reaches zero
-  exactly as the last propellant burns.  All stages burn to depletion
-  on the real schedule; the post-boost vehicle trims the residual —
-  which is precisely what a PSRE/PBV exists for.
-- Liquids (Sarmat) burn both boost stages the same way and the PBV
-  engine simply SHUTS DOWN at Vg ~ 0 (the "cutoff" event).
+- The flight computer picks the FASTEST feasible arrival time (user
+  order 2026-07-17: "best possible fastest route"): tau starts at the
+  weapon's floor and grows only until (a) the impulsive Lambert arc
+  clears the terrain between silo and mark with margin and (b) the
+  required velocity fits inside the motor's delta-v budget.
+- Boost thrusts dead along the velocity-to-be-gained Vg and THRUST-
+  TERMINATES the instant Vg reaches zero: solids vent forward ports
+  (the Minuteman I/II thrust-termination mechanism, generalized),
+  liquids simply shut down (the Sarmat "cutoff").  The unused stack
+  jettisons and the PBV trims the residual metres per second.
+- GEMS burn-to-depletion (the corkscrew) is retired at map scale — a
+  20 km shot was spending ~90% of its thrust on deliberate waste and
+  read as "flying off into the distance" (measured 28-30 km cross-
+  track).  On long shots the budget binds, stages burn through and
+  separate naturally, so full staging returns with real ranges.
 
 Straight-line boost drag is ignored (near-vertical climb at GEMS-shaped
 moderate speeds; error is small against the PBV trim authority) and the
@@ -44,6 +48,17 @@ GATE_TILT_DEG = 3.0        # programmed tilt toward target below the gate
 SLEW_DEG_S = 30.0          # attitude slew limit (TVC authority, visual)
 VG_TRIM_MS = 0.4           # PBV stops trimming below this |Vg|
 TAU_GUARD_S = 2.0          # stop guiding this close to arrival
+TERM_VG_MS = 2.0           # boost thrust-terminates below this |Vg|
+TAU_GROWTH = 1.12          # fastest-route search: tau bump per retry
+TWIN_DT = 0.0625           # feasibility twin's step (16 Hz: measured
+                           # 0.25 s let real flights clip ridges the
+                           # twin cleared — 1.3 km miss at 60 km SE)
+TWIN_TERM_MS = 6.0         # twin counts Vg as nulled below this
+TWIN_DEADLINE = 0.85       # Vg must null inside this fraction of tau
+MIN_IMPACT_DEG = 30.0      # terminal dive floor: steep enough to drop
+                           # BEHIND ridges instead of skimming them
+CLEAR_MARGIN_M = 800.0     # coast arc must clear terrain by this much
+CLEAR_ENDS_M = 1500.0      # ...except this close to launch/impact
 
 
 @dataclass(frozen=True)
@@ -79,10 +94,8 @@ class IcbmSpec:
     bus_isp_s: float         # storable bipropellant (RS-14 class)
     door_s: float            # closure door / silo lid slide time
     base_depth_m: float      # missile TAIL below ground at rest
-    coast_min_s: float       # post-boost coast floor (loft floor)
-    coast_max_s: float       # coast cap (full-loft ceiling)
+    tof_floor_s: float       # fastest allowed arrival (feel floor)
     gate_agl_m: float        # below this fly the vertical program
-    weave_period_s: float    # GEMS S-turn half-cycle pacing
     shake_amp: float         # observer shake at the acoustic hit
     cutoff_event: bool       # liquids report engine shutdown
     # Visual identity (research doc 1.5 / 2.5 plume phenomenology).
@@ -113,8 +126,7 @@ MINUTEMAN_III = IcbmSpec(
     bus_isp_s=290.0,
     door_s=1.5,              # 110 t door on gas actuators, ~35 mph
     base_depth_m=22.0,       # 80 ft tube, 18.3 m missile: nose near mouth
-    coast_min_s=90.0, coast_max_s=155.0, gate_agl_m=1500.0,
-    weave_period_s=26.0,
+    tof_floor_s=75.0, gate_agl_m=1500.0,
     shake_amp=1.4, cutoff_event=False,
     # Aluminized solid: brilliant white-orange flame, DENSE white pillar.
     flame_core=(1.0, 0.99, 0.90), flame_edge=(1.0, 0.62, 0.16),
@@ -134,8 +146,7 @@ SARMAT = IcbmSpec(
     bus_isp_s=300.0,
     door_s=6.0,              # the huge lid walks open on rails
     base_depth_m=33.0,       # ~39 m silo, TPK; tail rides near the bottom
-    coast_min_s=120.0, coast_max_s=300.0, gate_agl_m=1800.0,
-    weave_period_s=34.0,
+    tof_floor_s=105.0, gate_agl_m=1800.0,
     shake_amp=1.8, cutoff_event=True,
     # Hypergolic N2O4/UDMH: hard orange flame, thin brown-grey haze —
     # the mortar puff at the silo is the dirtiest moment of the launch.
@@ -155,7 +166,9 @@ class IcbmLaunch:
     Duck-types the ScriptedLaunch contract CinematicState.sim_step uses
     (.t .pos .done .variant .step(dt, events) .emit(fx, dt) plus the fx
     event hooks); event kinds beyond the S-300 set are additive:
-    door / eject / pallet / smoke_ring / stage / cutoff / impact.
+    door / eject / pallet / smoke_ring / stage / term / cutoff / impact
+    ("term" = solid thrust-termination ports, "cutoff" = liquid engine
+    shutdown — both mean boost ended with Vg trimmed to ~zero).
     """
 
     def __init__(self, spec: IcbmSpec, silo, target, ground_h,
@@ -197,18 +210,99 @@ class IcbmLaunch:
         self._burned_in_stage = 0.0
         self._bus_prop_left = spec.bus_prop_kg
         self._cut = False                # bus finished (trim done / cutoff)
-        # Range-adaptive time of arrival (user report: fixed TOA made a
-        # 20 km shot loiter and corkscrew overhead for minutes): total
-        # flight = full burn schedule + a coast that scales with range.
-        rng = math.hypot(self._target[0] - sx, self._target[2] - sz)
-        coast = min(max(rng / 250.0 + 40.0, spec.coast_min_s),
-                    spec.coast_max_s)
-        self._toa = sum(s.burn_s for s in spec.stages) + coast
+        self._term_fired = False         # boost term/cutoff event sent
         # Subsequent-stage delta-v capability, precomputed once.
         self._dv_after = self._dv_after_table()
+        # FASTEST feasible arrival (user order: "best possible fastest
+        # route"): tau grows from the weapon's floor only until the
+        # Lambert arc clears terrain and fits the motor budget.
+        self._toa = self._pick_toa()
         if door_open:                    # silo door already stands open
             self._door_done = True
             self.t = spec.door_s
+
+    def _pick_toa(self) -> float:
+        """Deterministic fastest-route search over the arrival time:
+        the smallest tau that a forward-simulated twin of the guidance
+        law can actually FLY — Vg nulled before depletion with time to
+        coast, and the coast arc clearing the terrain en route.  A
+        closed-form feasibility model missed the finite-burn clock debt
+        (measured: 104-140 km short at 700 km); the twin has no model
+        error because it IS the law at coarse dt."""
+        tau = self.spec.tof_floor_s
+        for _ in range(28):
+            if self._impact_steep(tau) and self._twin_feasible(tau):
+                break
+            tau *= TAU_GROWTH
+        return tau
+
+    def _impact_steep(self, tau: float) -> bool:
+        """Terminal dive floor: the Lambert arrival velocity must come
+        down at >= MIN_IMPACT_DEG or alpine ridges shadow the mark."""
+        d = self._target - (self._silo + UP * 2.0)
+        v = d / tau + UP * (0.5 * GRAVITY * tau)
+        v_imp = v - UP * (GRAVITY * tau)
+        vh = math.hypot(float(v_imp[0]), float(v_imp[2]))
+        ang = math.degrees(math.atan2(-float(v_imp[1]), max(vh, 1e-9)))
+        return ang >= MIN_IMPACT_DEG
+
+    def _twin_feasible(self, tau: float) -> bool:
+        """Fly the boost law (vertical program -> thrust along Vg) at
+        TWIN_DT on the real stage schedule; True when Vg nulls in time
+        AND the remaining ballistic coast clears the terrain."""
+        spec = self.spec
+        pos = self._silo + UP * 2.0
+        vel = np.zeros(3)
+        mass = (sum(s.gross_kg for s in spec.stages)
+                + spec.bus_kg + spec.bus_prop_kg)
+        idx, burned, t = 0, 0.0, 0.0
+        while t < tau * TWIN_DEADLINE:
+            tau_rem = max(tau - t, 1.0)
+            v_req = ((self._target - pos) / tau_rem
+                     + UP * (0.5 * GRAVITY * tau_rem))
+            vg = v_req - vel
+            nvg = float(np.linalg.norm(vg))
+            agl = float(pos[1] - self._silo[1])
+            if agl >= spec.gate_agl_m and nvg <= TWIN_TERM_MS:
+                return self._coast_clears(pos, vel, tau - t)
+            if idx >= len(spec.stages):
+                return False             # depleted with Vg still open
+            st = spec.stages[idx]
+            if burned >= st.burn_s:
+                mass -= st.gross_kg - st.prop_kg   # shed the DRY stage
+                idx += 1
+                burned = 0.0
+                continue
+            a = st.thrust_n / mass
+            if agl < spec.gate_agl_m:
+                vel = vel + UP * (a * TWIN_DT)
+            else:
+                # Cap the impulse at |Vg| so the coarse step can NULL
+                # Vg instead of jittering +-a*dt around zero (the fine
+                # 1/120 flight achieves this through TVC bandwidth).
+                vel = vel + (vg / max(nvg, 1e-9)) * min(a * TWIN_DT, nvg)
+            mass -= st.mdot * TWIN_DT
+            burned += TWIN_DT
+            vel = vel - UP * (GRAVITY * TWIN_DT)
+            pos = pos + vel * TWIN_DT
+            t += TWIN_DT
+        return False
+
+    def _coast_clears(self, p0: np.ndarray, v0: np.ndarray,
+                      t_left: float) -> bool:
+        """Does the post-termination ballistic coast clear terrain?"""
+        hd = math.hypot(self._target[0] - p0[0], self._target[2] - p0[2])
+        for f in np.linspace(0.0, 1.0, 65):
+            end_d = min(f * hd, (1.0 - f) * hd)
+            if end_d < CLEAR_ENDS_M:     # arc legitimately near ground
+                continue
+            t = f * t_left
+            p = p0 + v0 * t
+            py = float(p[1]) - 0.5 * GRAVITY * t * t
+            g = float(self.ground_h(float(p[0]), float(p[2])))
+            if np.isfinite(g) and py < g + CLEAR_MARGIN_M:
+                return False
+        return True
 
     @property
     def ignited(self) -> bool:
@@ -275,7 +369,11 @@ class IcbmLaunch:
         return self._v_req() - self.vel
 
     def _thrust_dir(self) -> np.ndarray:
-        """Vertical program below the gate; Lambert+GEMS above it."""
+        """Vertical program below the gate; dead along Vg above it.
+        No energy-wasting geometry: the fastest-route tau already sized
+        the shot so boost TERMINATES when Vg hits zero (measured: the
+        GEMS weave swept the Sarmat 28-30 km cross-track on an 8 km
+        shot — the user's 'flies off into the distance')."""
         agl = self.pos[1] - self._silo[1]
         gate = self.spec.gate_agl_m
         to_t = self._target - self._silo
@@ -288,30 +386,9 @@ class IcbmLaunch:
             return vertical
         vg = self.vg()
         nvg = float(np.linalg.norm(vg))
-        cap = self._capability()
-        if nvg < 1e-6 or cap < 1e-6:
+        if nvg < 1e-6:
             return self.axis.copy()
-        e = vg / nvg
-        # GEMS energy waste as PLANAR S-turns (the documented look),
-        # not a rotating cone — the old corkscrew drew literal circles
-        # in the sky (user screenshot).  Waste lives in the horizontal
-        # axis across the target track, sign smoothly alternating.
-        across = np.array([math.cos(az), 0.0, -math.sin(az)])
-        n = across - e * float(np.dot(across, e))
-        nn = float(np.linalg.norm(n))
-        if nn < 1e-6:
-            n = np.cross(e, UP)
-            nn = float(np.linalg.norm(n))
-        n /= nn
-        sgn = math.tanh(2.5 * math.sin(
-            2.0 * math.pi * (self.t - self.ignite_t)
-            / self.spec.weave_period_s))
-        ratio = min(max(nvg / cap, 0.0), 1.0)
-        theta = math.acos(ratio)
-        d = e * math.cos(theta) + n * (math.sin(theta) * sgn)
-        # Unit thrust always: mid-flip |sgn|<1 shrank the vector to ~0.2
-        # — a solid motor cannot throttle (review design note).
-        return d / max(float(np.linalg.norm(d)), 1e-9)
+        return vg / nvg
 
     def _slew(self, want: np.ndarray, dt: float) -> None:
         """Rate-limit the attitude toward the commanded direction."""
@@ -380,7 +457,22 @@ class IcbmLaunch:
         if not self.rv_only:
             st = spec.stages[self.stage_idx]
             start = sum(s.burn_s for s in spec.stages[:self.stage_idx])
-            if burn < start + st.burn_s:
+            agl = self.pos[1] - self._silo[1]
+            if (agl >= spec.gate_agl_m
+                    and float(np.linalg.norm(self.vg())) <= TERM_VG_MS):
+                # THRUST TERMINATION: the round has the velocity it
+                # needs — solids blow the forward vent ports (Minuteman
+                # I/II mechanism, generalized), liquids shut down.  The
+                # unused stack jettisons; the PBV trims what's left.
+                events.append(("cutoff" if spec.cutoff_event else "term",
+                               self.pos.copy()))
+                events.append(("stage", self.pos.copy()))
+                self._term_fired = True
+                self.rv_only = True
+                self.burnout_t = self.t
+                self.mass = spec.bus_kg + self._bus_prop_left
+                self._burned_in_stage = 0.0
+            elif burn < start + st.burn_s:
                 thrusting = True
                 # Thrust follows the guidance law EXACTLY — TVC autopilot
                 # bandwidth dwarfs our dt (a 2.5% average alignment lag
@@ -410,7 +502,7 @@ class IcbmLaunch:
             nvg = float(np.linalg.norm(vg))
             if nvg < VG_TRIM_MS or self._tau() < TAU_GUARD_S:
                 self._cut = True
-                if spec.cutoff_event:
+                if spec.cutoff_event and not self._term_fired:
                     events.append(("cutoff", self.pos.copy()))
             else:
                 thrusting = True
@@ -423,7 +515,7 @@ class IcbmLaunch:
                 self._bus_prop_left -= mdot * dt
                 if self._bus_prop_left <= 0.0:
                     self._cut = True
-                    if spec.cutoff_event:
+                    if spec.cutoff_event and not self._term_fired:
                         events.append(("cutoff", self.pos.copy()))
 
         prev = self.pos.copy()
@@ -738,6 +830,26 @@ class IcbmLaunch:
                       (spec.diameter_m * 2.0, spec.diameter_m * 14.0),
                       (spec.smoke_fresh, spec.smoke_old), r,
                       alpha01=(0.4, 0.02), fade_in=0.15)
+
+    def term_fx(self, fx, pos) -> None:
+        """Solid thrust termination: the forward vent ports blow — two
+        hard opposed jets square to the axis kill the net thrust, then
+        the flame dies (the Minuteman I/II range-safe mechanism)."""
+        spec = self.spec
+        r = fx.rng
+        p = (np.asarray(pos, dtype=np.float64)
+             + self.axis * spec.length_m * 0.8)
+        side = np.cross(self.axis, UP)
+        ns = float(np.linalg.norm(side))
+        side = side / ns if ns > 1e-6 else np.array([1.0, 0.0, 0.0])
+        for s in (side, -side):
+            fx.fire.emit(10, p, 0.6, s * 60.0 + self.axis * 10.0, 12.0,
+                         (0.2, 0.5), (1.0, 3.0),
+                         (spec.flame_core, spec.flame_edge), r,
+                         stretch=0.02)
+            fx.smoke.emit(8, p, 1.0, s * 30.0, 6.0, (2.0, 5.0),
+                          (1.5, 6.0), (spec.smoke_fresh, spec.smoke_old),
+                          r, alpha01=(0.5, 0.05), fade_in=0.04)
 
     def impact_fx(self, fx, pos) -> None:
         """RV ground impact: dust sheet, flash, rising column, lingering

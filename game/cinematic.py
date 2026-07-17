@@ -536,11 +536,12 @@ class CinematicState(GameState):
 
     # ------------------------------------------------------------ teleport
 
-    def _view_ground_hit(self, p: np.ndarray):
+    def _view_ground_hit(self, p: np.ndarray, direction=None):
         """March the view ray from ``p`` onto the bare-earth field.
         Returns the clamped hit point or None (shared by the freecam
         teleport and T target designation)."""
-        d = np.array(self.walker.forward(), dtype=np.float64)
+        d = (np.array(direction, dtype=np.float64) if direction is not None
+             else np.array(self.walker.forward(), dtype=np.float64))
         hit = None
         t, step = 0.0, 8.0
         # The walkable world spans the full SURROUND extent (16 x 16 km on
@@ -594,9 +595,17 @@ class CinematicState(GameState):
         self._say("TELEPORTED")
 
     def _designate_target(self) -> None:
-        """T: mark the ground point under the view ray for the ICBMs."""
-        hit = self._view_ground_hit(
-            np.array(self._eye(), dtype=np.float64))
+        """T: mark the ground point under the view ray.  In chase cam
+        the WALKER's view is stale — the mark must follow the ray the
+        player actually sees, i.e. the camera's (user report: rounds
+        'not going where I mark')."""
+        if self.follow and self.launch is not None:
+            eye = np.array(self.camera.eye, dtype=np.float64)
+            direction = np.array(self.camera.forward, dtype=np.float64)
+        else:
+            eye = np.array(self._eye(), dtype=np.float64)
+            direction = None
+        hit = self._view_ground_hit(eye, direction)
         if hit is None:
             self._say("NO GROUND UNDER THE MARK")
             return
@@ -729,8 +738,11 @@ class CinematicState(GameState):
                     m.smoke_ring_fx(self.effects, pos)
                 elif kind == "stage":
                     m.stage_fx(self.effects, pos)
+                elif kind == "term":
+                    m.term_fx(self.effects, pos)
+                    self._say("THRUST TERMINATED - BALLISTIC ARC")
                 elif kind == "cutoff":
-                    self._say("PBV CUTOFF - BALLISTIC")
+                    self._say("ENGINE CUTOFF - BALLISTIC ARC")
                 elif kind == "impact":
                     m.impact_fx(self.effects, pos)
                     self._queue_sound("boom", pos)

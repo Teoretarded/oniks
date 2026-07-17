@@ -50,15 +50,50 @@ def test_icbm_specs_match_research():
     assert sar.length_m == 35.3 and sar.diameter_m == 3.0
 
 
-def test_gems_full_burn_lands_on_target():
+def test_map_scale_shot_is_fast_and_direct():
+    """User order 2026-07-17 ('best possible fastest route'): a map-
+    scale shot thrust-terminates in stage 1, flies a direct arc — no
+    energy-wasting weave (the old GEMS corkscrew swept 5-30 km cross-
+    track and read as 'flying off into the distance') — and still
+    lands inside the accuracy contract.  Two-sided bounds: fast but
+    never terrain-scraping."""
     lch = IcbmLaunch(ICBM_BY_ID["mm3"], silo=(0., 800., 0.),
                      target=(8000., 800., 3000.), ground_h=lambda x, z: 800.)
-    evs = _fly(lch, max_s=900.)
-    burn_end = lch.burnout_t
-    assert 180.0 <= burn_end <= 194.0          # all 3 stages, real schedule
-    assert lch.apex_m - 800.0 >= 15_000.0      # it goes UP
-    imp = [p for k, p in evs if k == "impact"]
+    tgt = np.array([8000.0, 0.0, 3000.0])
+    along = tgt / np.linalg.norm(tgt)
+    cross = np.array([along[2], 0.0, -along[0]])
+    max_cross = 0.0
+    events = []
+    steps = int(400.0 / DT)
+    for _ in range(steps):
+        if lch.done:
+            break
+        evs: list = []
+        lch.step(DT, evs)
+        events.extend(evs)
+        max_cross = max(max_cross, abs(float(np.dot(lch.pos, cross))))
+    assert lch.burnout_t is not None and lch.burnout_t <= 61.0  # S1 term
+    assert any(k == "term" for k, _ in events)   # vent ports fired
+    imp = [p for k, p in events if k == "impact"]
     assert imp and math.hypot(imp[0][0] - 8000., imp[0][2] - 3000.) < 150.0
+    assert lch.t <= 200.0                        # FAST: minutes, not tens
+    assert lch.t >= 60.0                         # ...but not a rail gun
+    assert max_cross < 1000.0                    # direct: no weave sweep
+    assert 3000.0 <= lch.apex_m - 800.0 <= 25_000.0  # a real arc, no scrape
+
+
+def test_long_shot_stages_naturally_and_lands():
+    """When the range demands more delta-v than one stage holds, the
+    stack burns through separations exactly as before — full staging
+    returns with real ranges (the future globe shots)."""
+    lch = IcbmLaunch(ICBM_BY_ID["mm3"], silo=(0., 0., 0.),
+                     target=(700_000., 0., 0.), ground_h=lambda x, z: 0.)
+    evs = _fly(lch, max_s=1200.)
+    kinds = [k for k, _ in evs]
+    assert lch.burnout_t is not None and lch.burnout_t > 61.0  # staged
+    assert kinds.count("stage") >= 2             # S1 sep + later jettison
+    imp = [p for k, p in evs if k == "impact"]
+    assert imp and math.hypot(imp[0][0] - 700_000., imp[0][2]) < 300.0
 
 
 def test_sarmat_cuts_off_at_vg_zero():
@@ -104,14 +139,17 @@ def test_mm3_emits_smoke_ring_once_at_tube_exit():
 # ------------------------------------------------------- structural checks
 
 def test_event_grammar_and_staging_counts():
-    """Hot: door/ignite/smoke_ring + one 'stage' per boost stage.
-    Cold: door/eject/pallet/ignite + stages + cutoff.  Impact ends both."""
+    """Hot map shot: door/ignite/smoke_ring + term + ONE stage (the
+    jettison at thrust termination).  Cold: door/eject/pallet/ignite +
+    cutoff + one stage.  Exactly one boost-end event per flight; impact
+    ends both."""
     mm = IcbmLaunch(MINUTEMAN_III, silo=(0., 0., 0.),
                     target=(7000., 0., 2000.), ground_h=lambda x, z: 0.)
     evs = _fly(mm, max_s=900.)
     kinds = [k for k, _ in evs]
     assert kinds.count("door") == 1 and kinds.count("ignite") == 1
-    assert kinds.count("stage") == len(MINUTEMAN_III.stages)
+    assert kinds.count("term") == 1 and kinds.count("cutoff") == 0
+    assert kinds.count("stage") == 1             # stack jettison at term
     assert kinds.count("impact") == 1 and mm.done
     assert "eject" not in kinds and "pallet" not in kinds
 
@@ -120,8 +158,8 @@ def test_event_grammar_and_staging_counts():
     evs = _fly(sar, max_s=1200.)
     kinds = [k for k, _ in evs]
     assert kinds.count("eject") == 1 and kinds.count("pallet") == 1
-    assert kinds.count("stage") == len(SARMAT.stages)
-    assert kinds.count("cutoff") == 1
+    assert kinds.count("cutoff") == 1 and kinds.count("term") == 0
+    assert kinds.count("stage") == 1
     assert kinds.count("impact") == 1 and sar.done
     assert "smoke_ring" not in kinds
 
