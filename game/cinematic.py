@@ -121,10 +121,12 @@ MOODS = (
 SKIES = ((0, "CLEAR"), (1, "FAIR"), (2, "BROKEN"), (3, "OVERCAST"),
          (6, "STORM"))
 
-# Launcher roster: the S-300 pad plus one ICBM silo per weapon (the silo
-# model at the surveyed site swaps with the selection).
+# Launcher roster: the S-300 pad plus one strategic launcher per weapon
+# (silo compound, or the submerged boat for water-launched rounds).
 LAUNCHERS = (("s300", "S-300 PAD", "THE COLD-LAUNCH CLASSIC"),) + tuple(
-    (s.id, f"{s.label} SILO", s.blurb) for s in ICBMS)
+    (s.id,
+     f"{s.label} {'SSBN' if s.water_launch else 'SILO'}",
+     s.blurb) for s in ICBMS)
 # Coast time-warp ladder while an ICBM flies ('.' cycles).
 WARPS = (1.0, 8.0, 30.0)
 
@@ -188,6 +190,8 @@ class CinematicState(GameState):
         # ICBM battery (docs/plans/icbm_cinematic_plan_2026-07-17.md).
         self.launcher_i = 0          # LAUNCHERS index (0 = S-300 pad)
         self.icbm_target = None      # np (3,) designated ground point
+        self.icbm_targets: list = []  # MIRV: every live mark, in order
+        self._lake_site = None       # np (3,) open water (Trident)
         self.follow = False          # C: chase cam on the newest round
         self.warp_i = 0              # WARPS index (ICBM flight only)
         self._silo_site = None       # np (3,) surveyed compound center
@@ -250,7 +254,8 @@ class CinematicState(GameState):
                                      build_minuteman_lf,
                                      build_minuteman_lf_door,
                                      build_sarmat, build_sarmat_silo,
-                                     build_sarmat_silo_lid)
+                                     build_sarmat_silo_lid,
+                                     build_trident)
             self.silo_meshes = {
                 "mm3": (Mesh(build_minuteman_lf()),
                         Mesh(build_minuteman_lf_door())),
@@ -258,7 +263,8 @@ class CinematicState(GameState):
                            Mesh(build_sarmat_silo_lid())),
             }
             self.icbm_meshes = {"mm3": Mesh(build_minuteman_iii()),
-                                "sarmat": Mesh(build_sarmat())}
+                                "sarmat": Mesh(build_sarmat()),
+                                "trident": Mesh(build_trident())}
 
             self._start_shadow_bakes()
             (sx, sz), yaw = self.scene.spawn_pos_yaw()
@@ -273,11 +279,20 @@ class CinematicState(GameState):
             self._pad_yaw = math.atan2(px - sx, pz - sz)
             # ICBM silo: deterministic survey (flat, clear, LOS, watching
             # distance) — the compound door slides AWAY from the spawn.
-            from world.cinematic_scene import survey_silo_site
+            from world.cinematic_scene import (survey_lake_site,
+                                               survey_silo_site)
             cx, cz = survey_silo_site(self.scene)
             self._silo_site = np.array(
                 [cx, self.scene.ground_h(cx, cz), cz], dtype=np.float64)
             self._silo_yaw = math.atan2(cx - sx, cz - sz)
+            # Open water for the sub-launched rounds (None: no lake).
+            lake = survey_lake_site(self.scene)
+            self._lake_site = None
+            if lake is not None:
+                lx, lz = lake
+                self._lake_site = np.array(
+                    [lx, self.scene.ground_h(lx, lz), lz],
+                    dtype=np.float64)
             self._apply_mood()
         pygame.event.set_grab(True)
         pygame.mouse.set_visible(False)
@@ -614,12 +629,32 @@ class CinematicState(GameState):
             return
         hit[1] = self.scene.ground_h(float(hit[0]), float(hit[2]))
         self.icbm_target = hit
-        if self._silo_site is not None:
-            rng = math.hypot(hit[0] - self._silo_site[0],
-                             hit[2] - self._silo_site[2])
-            self._say(f"TARGET SET - {rng / 1000.0:.1f} KM FROM SILO")
+        # MIRV weapons collect marks up to the bus capacity; every
+        # other launcher keeps single-mark behaviour (list of one).
+        lid = LAUNCHERS[self.launcher_i][0]
+        cap = 1
+        if lid in ICBM_BY_ID:
+            cap = max(1, ICBM_BY_ID[lid].mirv_count)
+        if cap <= 1 or len(self.icbm_targets) >= cap:
+            self.icbm_targets = [hit]
+        else:
+            self.icbm_targets.append(hit)
+        n = len(self.icbm_targets)
+        site = self._launch_site(lid)
+        if site is not None:
+            rng = math.hypot(hit[0] - site[0], hit[2] - site[2])
+            tag = f"TARGET {n}/{cap} SET" if cap > 1 else "TARGET SET"
+            self._say(f"{tag} - {rng / 1000.0:.1f} KM OUT")
         else:
             self._say("TARGET SET")
+
+    def _launch_site(self, lid: str):
+        """Where this launcher fires from: lake for water launch."""
+        if lid in ICBM_BY_ID and ICBM_BY_ID[lid].water_launch:
+            return self._lake_site
+        if lid == "s300":
+            return self._pad
+        return self._silo_site
 
     # ----------------------------------------------------------- launching
 
@@ -673,9 +708,12 @@ class CinematicState(GameState):
         self._queue_sound("pop", mouth, gain=0.5)
 
     def _fire_icbm(self, lid: str) -> None:
-        """One bird per silo; needs a designated target (T)."""
-        if self._silo_site is None:
-            self._say("NO SILO SURVEYED")
+        """One bird per launcher; needs a designated target (T)."""
+        spec = ICBM_BY_ID[lid]
+        site = self._launch_site(lid)
+        if site is None:
+            self._say("NO OPEN WATER IN THIS SCENE"
+                      if spec.water_launch else "NO SILO SURVEYED")
             return
         if self.icbm_target is None:
             self._say("NO TARGET - AIM AND PRESS T")
@@ -683,17 +721,20 @@ class CinematicState(GameState):
         for m in self.launches:
             if isinstance(m, IcbmLaunch) and not m.done \
                     and m.spec.id == lid:
-                self._say("BIRD IN FLIGHT - SILO EMPTY")
+                self._say("BIRD IN FLIGHT - LAUNCHER EMPTY")
                 return
-        spec = ICBM_BY_ID[lid]
-        m = IcbmLaunch(spec, silo=tuple(self._silo_site),
-                       target=tuple(self.icbm_target),
+        marks = [tuple(t) for t in self.icbm_targets] \
+            or [tuple(self.icbm_target)]
+        m = IcbmLaunch(spec, silo=tuple(site),
+                       target=marks[0],
+                       targets=marks if len(marks) > 1 else None,
                        ground_h=self.scene.ground_h,
                        door_open=self._door_anim.get(lid, 0.0) >= 0.99)
         self.launches.append(m)
-        rng = math.hypot(self.icbm_target[0] - self._silo_site[0],
-                         self.icbm_target[2] - self._silo_site[2])
-        self._say(f"{spec.label} AWAY - {rng / 1000.0:.1f} KM SHOT")
+        rng = math.hypot(marks[0][0] - site[0], marks[0][2] - site[2])
+        extra = f" - {len(marks)} MARKS" if len(marks) > 1 else ""
+        self._say(f"{spec.label} AWAY - {rng / 1000.0:.1f} KM"
+                  f" SHOT{extra}")
 
     # ------------------------------------------------------------------ sim
 
@@ -758,6 +799,10 @@ class CinematicState(GameState):
                     m.smoke_ring_fx(self.effects, pos)
                 elif kind == "stage":
                     m.stage_fx(self.effects, pos)
+                elif kind == "mirv_sep":
+                    m.stage_fx(self.effects, pos)
+                    self._say(f"RV AWAY - "
+                              f"{len(getattr(m, '_rvs', []))} RELEASED")
                 elif kind == "term":
                     m.term_fx(self.effects, pos)
                     self._say("THRUST TERMINATED - BALLISTIC ARC")
@@ -839,8 +884,9 @@ class CinematicState(GameState):
         if add is None:                # fakes/tests without the overlay
             return
         if isinstance(m, IcbmLaunch):
-            w_mt = m.spec.yield_kt / 1000.0
-            radius = 175.0 * max(w_mt, 1e-6) ** 0.3
+            w_kt = (m.impact_yield_kt()
+                    if hasattr(m, "impact_yield_kt") else m.spec.yield_kt)
+            radius = 175.0 * max(w_kt / 1000.0, 1e-6) ** 0.3
             depth = radius / 2.8
         elif isinstance(m, GuidedLaunch):
             radius = max(2.5, 0.9 * m.variant.warhead_kg ** (1.0 / 3.0))
@@ -1072,24 +1118,29 @@ class CinematicState(GameState):
         return True
 
     def _draw_target_marker(self, w: int, h: int) -> None:
-        """The designated ICBM aim point: a warm diamond + range tag."""
-        if self.icbm_target is None:
+        """Every designated aim point: warm diamonds + range tags
+        (MIRV weapons can hold several marks)."""
+        marks = self.icbm_targets or (
+            [self.icbm_target] if self.icbm_target is not None else [])
+        if not marks:
             return
-        sp = self._screen_pos(w, h, self.icbm_target
-                              + np.array([0.0, 2.0, 0.0]))
-        if sp is None:
-            return
-        x, y = sp
         text = self.text
         col = (1.0, 0.62, 0.30)
-        s = 7.0
-        text.draw_lines([(x, y - s), (x + s, y), (x, y + s), (x - s, y),
-                         (x, y - s)], (*col, 0.95), 1.0)
-        text.draw_lines([(x, y - s - 6), (x, y - s - 14)], (*col, 0.7), 1.0)
-        rng_km = float(np.linalg.norm(
-            self.icbm_target - np.asarray(self._eye()))) / 1000.0
-        text.draw_text(x + 12, y + 6, f"TGT {rng_km:.1f} KM",
-                       (*col, 0.9), SMALL_SIZE)
+        for i, mark in enumerate(marks):
+            sp = self._screen_pos(w, h, mark + np.array([0.0, 2.0, 0.0]))
+            if sp is None:
+                continue
+            x, y = sp
+            s = 7.0
+            text.draw_lines([(x, y - s), (x + s, y), (x, y + s),
+                             (x - s, y), (x, y - s)], (*col, 0.95), 1.0)
+            text.draw_lines([(x, y - s - 6), (x, y - s - 14)],
+                            (*col, 0.7), 1.0)
+            rng_km = float(np.linalg.norm(
+                mark - np.asarray(self._eye()))) / 1000.0
+            tag = (f"TGT {i + 1} {rng_km:.1f} KM" if len(marks) > 1
+                   else f"TGT {rng_km:.1f} KM")
+            text.draw_text(x + 12, y + 6, tag, (*col, 0.9), SMALL_SIZE)
 
     def _draw_hud(self, w: int, h: int) -> None:
         text = self.text

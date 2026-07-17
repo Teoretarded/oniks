@@ -131,6 +131,42 @@ def build_minuteman_iii() -> MeshData:
     return b.build()
 
 
+TRI_LEN = 13.58
+TRI_R = 1.055
+TRI_NOSE_LEN = 2.6             # blunt dome + the iconic aerospike needle
+
+
+def build_trident() -> MeshData:
+    """UGM-133A D5: stubby dark graphite stack, blunt cosine dome and
+    the extended aerospike needle, origin mid-body, nose +Z."""
+    b = MeshBuilder()
+    body = PALETTE["sarmat_dark"]          # graphite epoxy reads charcoal
+    band = PALETTE["icbm_band"]
+    base = -TRI_LEN * 0.5
+    cyl_len = TRI_LEN - TRI_NOSE_LEN
+    b.add_mesh(make_lathe([(base, 0.0), (base, TRI_R)], SEG,
+                          PALETTE["exhaust_ring"]))
+    b.add_mesh(make_cylinder(TRI_R, cyl_len, SEG, body, axis="z",
+                             offset=(0.0, 0.0, base + cyl_len * 0.5)))
+    # Stage seams: two pale rings.
+    for z in (base + cyl_len * 0.48, base + cyl_len * 0.78):
+        b.add_mesh(make_cylinder(TRI_R + 0.012, 0.18, SEG, band,
+                                 axis="z", offset=(0.0, 0.0, z)))
+    # Blunt cosine dome.
+    pts = []
+    for a in np.linspace(0.0, math.pi * 0.5, 6):
+        pts.append((base + cyl_len + TRI_NOSE_LEN * 0.72 * math.sin(a),
+                    TRI_R * math.cos(a)))
+    pts[-1] = (base + cyl_len + TRI_NOSE_LEN * 0.72, 0.0)
+    b.add_mesh(make_lathe(pts, SEG, body))
+    # Aerospike needle (deployed): thin rod proud of the dome.
+    b.add_mesh(make_cylinder(0.045, TRI_NOSE_LEN * 0.9, 8, band,
+                             axis="z",
+                             offset=(0.0, 0.0, base + cyl_len
+                                     + TRI_NOSE_LEN * 0.75)))
+    return b.build()
+
+
 def _sarmat_fairing_profile(z0: float) -> list:
     """Blunt rounded ogive (signature 2.6-2): cosine cap, no sharp tip."""
     pts = []

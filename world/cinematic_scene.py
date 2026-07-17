@@ -566,6 +566,72 @@ def survey_silo_candidates(dtm: np.ndarray, obstacle: np.ndarray,
             for k in order[:400]]
 
 
+def survey_lake_site(scene, min_dist: float = 6000.0,
+                     max_dist: float = 45000.0):
+    """Find open WATER for the sub-launched Trident: the biggest flat
+    low patch in the surround/ring fields (alpine lakes are the only
+    dead-flat 500 m+ areas below the valley floor).  Deterministic;
+    returns (x, z) or None."""
+    (sx, sz), _yaw = scene.spawn_pos_yaw()
+    spawn_h = scene.ground_h(sx, sz)
+    fields = []
+    if scene._sur is not None:
+        fields.append((scene._sur, scene._sur_cell,
+                       scene._sur_x0, scene._sur_z0))
+    for fld, cell, fx0, fz0, _x1, _z1 in getattr(scene, "_far", []):
+        fields.append((fld, cell, fx0, fz0))
+    best = None                    # (height, dist, x, z)
+    for fld, cell, fx0, fz0 in fields:
+        step = max(1, int(round(96.0 / cell)))
+        d = fld[::step, ::step]
+        csz = cell * step
+        r = max(1, int(round(300.0 / csz)))
+        with np.errstate(invalid="ignore"):
+            hi = _winmax(np.where(np.isfinite(d), d, -1e9), r)
+            lo = -_winmax(np.where(np.isfinite(d), -d, 1e9), r)
+            # WATER-flat, not farmland-flat: a lake DEM is constant to
+            # centimetres over 600 m; the Boedeli plain (which a 1.5 m
+            # gate picked, measured) carries metres of micro-relief.
+            flat = ((hi - lo) < 0.6) & np.isfinite(d) \
+                & (d < spawn_h - 60.0)
+        nz, nx = d.shape
+        xs = fx0 + np.arange(nx) * csz
+        zs = fz0 + np.arange(nz) * csz
+        gx, gz = np.meshgrid(xs, zs)
+        dist = np.hypot(gx - sx, gz - sz)
+        ok = flat & (dist >= min_dist) & (dist <= max_dist)
+        if not ok.any():
+            continue
+        j, i = np.nonzero(ok)
+        # Nearest first, but VERIFY open water with a 400 m ring test —
+        # the flat window alone parked the boat on the shoreline
+        # (measured: 569 m point with the true 558 m lake 800 m north).
+        order = np.argsort(dist[j, i], kind="stable")
+        for k in order[:200]:
+            x, z = float(xs[i[k]]), float(zs[j[k]])
+            if self_water_check(scene, x, z):
+                cand = (float(dist[j[k], i[k]]), x, z)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+                break
+    return (best[1], best[2]) if best is not None else None
+
+
+def self_water_check(scene, x: float, z: float,
+                     ring_m: float = 400.0, tol: float = 0.75) -> bool:
+    """True when a full ring around (x, z) sits at the center height —
+    the signature of open water, never of a shore or a field."""
+    c = scene.ground_h(x, z)
+    if not np.isfinite(c):
+        return False
+    for a in np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False):
+        h = scene.ground_h(x + math.sin(a) * ring_m,
+                           z + math.cos(a) * ring_m)
+        if not np.isfinite(h) or abs(h - c) > tol:
+            return False
+    return True
+
+
 def survey_silo_site(scene, eye_h: float = 1.7) -> tuple:
     """Pick THE silo site for a scene: best-ranked candidate that also
     passes full-resolution obstacle checks over the compound box and a

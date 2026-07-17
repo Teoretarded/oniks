@@ -99,6 +99,9 @@ class IcbmSpec:
     shake_amp: float         # observer shake at the acoustic hit
     cutoff_event: bool       # liquids report engine shutdown
     yield_kt: float = 300.0  # warhead yield (crater + impact scale)
+    water_launch: bool = False   # sub-launched: broach + water column
+    mirv_count: int = 1      # RVs the bus can dispense (marks cap)
+    mirv_yield_kt: float = 300.0  # per-RV yield when dispensing
     # Visual identity (research doc 1.5 / 2.5 plume phenomenology).
     flame_core: tuple = (1.0, 0.98, 0.88)
     flame_edge: tuple = (1.0, 0.57, 0.14)
@@ -151,7 +154,8 @@ SARMAT = IcbmSpec(
     base_depth_m=33.0,       # ~39 m silo, TPK; tail rides near the bottom
     tof_floor_s=105.0, gate_agl_m=1800.0,
     shake_amp=1.8, cutoff_event=True,
-    yield_kt=800.0,          # single-warhead loadout (MIRV later)
+    yield_kt=800.0,          # single-mark loadout
+    mirv_count=10, mirv_yield_kt=500.0,   # "up to 10 heavy"
 
     # Hypergolic N2O4/UDMH: hard orange flame, thin brown-grey haze —
     # the mortar puff at the silo is the dirtiest moment of the launch.
@@ -161,8 +165,66 @@ SARMAT = IcbmSpec(
     smoke_per_m=0.9, width_mult=1.6,
     eject_exit_v=22.0, hang_s=1.45)
 
-ICBMS = (MINUTEMAN_III, SARMAT)
+TRIDENT_II = IcbmSpec(
+    id="trident", label="TRIDENT II D5", nation="USA",
+    blurb="UGM-133A - BROACHES FROM THE LAKE, 8 MIRV",
+    length_m=13.58, diameter_m=2.11, launch_mode="cold",
+    # docs/research/ammo_expansion_2026-07-17.md section 1 (~ splits).
+    stages=(
+        IcbmStage("D5-S1", 39000.0, 36000.0, 1470e3, 65.0),
+        IcbmStage("D5-S2", 11500.0, 10500.0, 444e3, 65.0),
+        IcbmStage("D5-S3", 2800.0, 2500.0, 175e3, 40.0),
+    ),
+    bus_kg=1200.0, bus_prop_kg=300.0, bus_thrust_n=3e3,
+    bus_isp_s=300.0,
+    door_s=0.8,              # submerged hatch: no visible slide
+    base_depth_m=30.0,       # boat keel depth under the lake surface
+    tof_floor_s=85.0, gate_agl_m=1200.0,
+    shake_amp=1.2, cutoff_event=False,
+    # Aluminized solid lit over its own splash: brilliant pillar,
+    # paler and thinner than the Minuteman's.
+    flame_core=(1.0, 0.99, 0.92), flame_edge=(1.0, 0.64, 0.18),
+    flame_len_x=1.5,
+    smoke_fresh=(0.95, 0.95, 0.92), smoke_old=(0.74, 0.76, 0.77),
+    smoke_per_m=2.6, width_mult=1.8,
+    eject_exit_v=22.0, hang_s=1.0,
+    yield_kt=475.0, water_launch=True,
+    mirv_count=8, mirv_yield_kt=475.0)    # 8 x W88
+
+ICBMS = (MINUTEMAN_III, SARMAT, TRIDENT_II)
 ICBM_BY_ID = {s.id: s for s in ICBMS}
+
+
+class _Rv:
+    """A released MIRV: pure ballistic from its dispense state to its
+    own mark (gravity only — the bus already gave it the velocity)."""
+
+    __slots__ = ("pos", "vel", "target", "ground_h", "done")
+
+    def __init__(self, pos, vel, target, ground_h):
+        self.pos = pos
+        self.vel = vel
+        self.target = target
+        self.ground_h = ground_h
+        self.done = False
+
+    def step(self, dt: float, events: list) -> None:
+        if self.done:
+            return
+        prev = self.pos.copy()
+        self.vel[1] -= GRAVITY * dt
+        self.pos += self.vel * dt
+        if self.vel[1] < 0.0:
+            g = float(self.ground_h(float(self.pos[0]),
+                                    float(self.pos[2])))
+            if np.isfinite(g) and self.pos[1] <= g:
+                denom = float(prev[1] - self.pos[1])
+                f = min(max((prev[1] - g) / denom, 0.0), 1.0) \
+                    if denom > 1e-9 else 1.0
+                self.pos = prev + (self.pos - prev) * f
+                self.pos[1] = g
+                events.append(("impact", self.pos.copy()))
+                self.done = True
 
 
 class IcbmLaunch:
@@ -177,7 +239,7 @@ class IcbmLaunch:
     """
 
     def __init__(self, spec: IcbmSpec, silo, target, ground_h,
-                 door_open: bool = False):
+                 door_open: bool = False, targets=None):
         self.spec = spec
         self.variant = spec              # .shake_amp / .label for sim_step
         self.ground_h = ground_h
@@ -185,9 +247,20 @@ class IcbmLaunch:
         self.done = False
         sx, sy, sz = float(silo[0]), float(silo[1]), float(silo[2])
         self._silo = np.array([sx, sy, sz], dtype=np.float64)
-        tx, tz = float(target[0]), float(target[2])
-        self._target = np.array([tx, float(ground_h(tx, tz)), tz],
-                                dtype=np.float64)
+        # MIRV: several designated marks -> the bus flies Lambert to
+        # mark 0 and dispenses one RV per further mark on the coast.
+        raw_marks = list(targets) if targets else [target]
+        raw_marks = raw_marks[:max(1, spec.mirv_count)]
+        self._marks = []
+        for mk in raw_marks:
+            mx, mz = float(mk[0]), float(mk[2])
+            self._marks.append(np.array(
+                [mx, float(ground_h(mx, mz)), mz], dtype=np.float64))
+        self._target = self._marks[0]
+        self._rvs: list = []
+        self._next_release = 1           # next mark index to dispense
+        self._release_t = None           # flight time of the next release
+        self._landed = False             # the bus/first RV is down
         # pos = missile TAIL, world coords.
         self.pos = np.array([sx, sy - spec.base_depth_m, sz],
                             dtype=np.float64)
@@ -449,7 +522,8 @@ class IcbmLaunch:
             hang = self.t - self._eject_t
             if not self._pallet_done and hang >= spec.hang_s:
                 self._pallet_done = True
-                events.append(("pallet", self.pos.copy()))
+                if not spec.water_launch:   # D5 sheds no visible pallet
+                    events.append(("pallet", self.pos.copy()))
             if hang >= spec.hang_s + 0.35:
                 self.ignite_t = self.t
                 self._ignited = True
@@ -457,6 +531,11 @@ class IcbmLaunch:
             return
 
         # --- powered + coast flight -------------------------------------
+        if self._landed:                 # bus down: only RVs still fly
+            for rv in self._rvs:
+                rv.step(dt, events)
+            self._check_all_done()
+            return
         thrusting = False
         burn = self.t - self.ignite_t
         if not self.rv_only:
@@ -477,6 +556,8 @@ class IcbmLaunch:
                 self.burnout_t = self.t
                 self.mass = spec.bus_kg + self._bus_prop_left
                 self._burned_in_stage = 0.0
+                if len(self._marks) > 1:   # MIRV: dispense on the coast
+                    self._release_t = self.t + 1.5
             elif burn < start + st.burn_s:
                 thrusting = True
                 # Thrust follows the guidance law EXACTLY — TVC autopilot
@@ -502,6 +583,8 @@ class IcbmLaunch:
                     self.rv_only = True
                     self.burnout_t = self.t
                     self.mass = spec.bus_kg + self._bus_prop_left
+                    if len(self._marks) > 1:
+                        self._release_t = self.t + 1.5
         elif self._bus_prop_left > 0.0 and not self._cut:
             vg = self.vg()
             nvg = float(np.linalg.norm(vg))
@@ -529,6 +612,25 @@ class IcbmLaunch:
         self.apex_m = max(self.apex_m, float(self.pos[1]))
         self._thrusting = thrusting
 
+        # MIRV dispensing: one RV per extra mark, every ~2.2 s of coast.
+        # The bus retargets (Lambert difference at the release state)
+        # and lets the RV go on its own required velocity — arrivals
+        # stagger ~1.5 s so the impacts WALK across the target area.
+        if (self._release_t is not None and self.t >= self._release_t
+                and self._next_release < len(self._marks)):
+            k = self._next_release
+            tgt = self._marks[k]
+            tau_k = max(self._tau() + 1.5 * k, 5.0)
+            v_req_k = ((tgt - self.pos) / tau_k
+                       + UP * (0.5 * GRAVITY * tau_k))
+            self._rvs.append(_Rv(self.pos.copy(), v_req_k.copy(), tgt,
+                                 self.ground_h))
+            events.append(("mirv_sep", self.pos.copy()))
+            self._next_release += 1
+            self._release_t = self.t + 2.2
+        for rv in self._rvs:
+            rv.step(dt, events)
+
         # Hot launch: the ring rolls the moment the tail clears the tube.
         if (spec.launch_mode == "hot" and not self._ring_done
                 and self.pos[1] >= self._silo[1]):
@@ -553,10 +655,25 @@ class IcbmLaunch:
                 self.pos = prev + (self.pos - prev) * f
                 self.pos[1] = g
                 events.append(("impact", self.pos.copy()))
-                self.done = True
+                self._landed = True
+                self._check_all_done()
                 return
         if self.t - (self.ignite_t or 0.0) > self._toa + 180.0:
+            for rv in self._rvs:         # never orphan a falling RV
+                rv.done = True
             self.done = True             # lost round guard
+
+    def _check_all_done(self) -> None:
+        if (self._landed
+                and self._next_release >= len(self._marks)
+                and all(rv.done for rv in self._rvs)):
+            self.done = True
+
+    def impact_yield_kt(self) -> float:
+        """Per-impact yield: dispensing flights crater per-RV."""
+        if len(self._marks) > 1:
+            return self.spec.mirv_yield_kt
+        return self.spec.yield_kt
 
     def heading(self) -> np.ndarray:
         n = float(np.linalg.norm(self.vel))
@@ -621,16 +738,28 @@ class IcbmLaunch:
                                  (w_bloom, w_bloom * 2.6),
                                  ((0.14, 0.12, 0.10), (0.05, 0.045, 0.04)),
                                  r)
-        # Reentry streak: the RV coming back down hot.
-        if (self.rv_only and self.vel[1] < -200.0
+        # Reentry streaks: every vehicle coming back down hot — the bus
+        # and each dispensed MIRV (ten streaks walking across the sky).
+        streaks = []
+        if (self.rv_only and not self._landed and self.vel[1] < -200.0
                 and 300.0 < rel_alt < 15000.0
                 and float(np.linalg.norm(self.vel)) > 450.0):
-            self._rv_carry = getattr(self, "_rv_carry", 0.0) + dt * 26.0
+            streaks.append((tail, self.vel))
+        for rv in self._rvs:
+            alt = max(0.0, float(rv.pos[1]) - float(self._silo[1]))
+            if (not rv.done and rv.vel[1] < -200.0
+                    and 300.0 < alt < 15000.0):
+                streaks.append((rv.pos, rv.vel))
+        if streaks:
+            self._rv_carry = getattr(self, "_rv_carry", 0.0) \
+                + dt * 26.0 * len(streaks)
             nrv = int(self._rv_carry)
             self._rv_carry -= nrv
-            hd = self.heading()
-            for _ in range(min(nrv, 3)):
-                fx.fire.emit(1, tail - hd * r.uniform(0.0, 14.0), 0.5,
+            for i in range(min(nrv, 3 * len(streaks))):
+                p, v = streaks[i % len(streaks)]
+                nv = float(np.linalg.norm(v))
+                hd = v / nv if nv > 1e-6 else UP
+                fx.fire.emit(1, p - hd * r.uniform(0.0, 14.0), 0.5,
                              -hd * 90.0, 10.0, (0.10, 0.30), (1.2, 3.4),
                              ((1.0, 0.82, 0.55), (1.0, 0.45, 0.15)), r,
                              stretch=0.03)
@@ -776,12 +905,42 @@ class IcbmLaunch:
             fx.smoke.vel[idx, 2] += (np.cos(ang) * sp).astype(np.float32)
 
     def eject_fx(self, fx, pos) -> None:
-        """Cold mortar exit: the huge dark PAD-gas puff venting from the
-        tube mouth as 208 t climbs out unlit (research 2.4/2.5-3)."""
+        """Cold mortar exit.  Silo: the huge dark PAD-gas puff venting
+        from the tube mouth (research 2.4/2.5-3).  Water launch: the
+        Trident broach — white water column, foam ring, falling spray
+        (ammo_expansion doc 1: a SPLASH, not smoke)."""
         r = fx.rng
         p = np.asarray(pos, dtype=np.float64)
         mouth = np.array([self._silo[0], self._silo[1] + 1.5,
                           self._silo[2]])
+        if self.spec.water_launch:
+            white = (0.93, 0.96, 0.99)
+            foam = (0.85, 0.90, 0.94)
+            # The rising column of lifted water around the airframe.
+            idx = fx.smoke.emit(60, mouth, 2.2, (0.0, 16.0, 0.0), 5.0,
+                                (2.5, 5.0), (2.0, 10.0), (white, foam),
+                                r, alpha01=(0.85, 0.10), fade_in=0.03,
+                                stretch=0.03)
+            if len(idx):
+                ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+                sp = r.uniform(1.0, 5.0, len(idx))
+                fx.smoke.vel[idx, 0] = (np.sin(ang) * sp).astype(np.float32)
+                fx.smoke.vel[idx, 2] = (np.cos(ang) * sp).astype(np.float32)
+            # Foam ring spreading on the lake.
+            idx = fx.smoke.emit(40, mouth, 1.5, (0.0, 0.6, 0.0), 0.4,
+                                (6.0, 12.0), (3.0, 18.0), (foam, foam),
+                                r, alpha01=(0.55, 0.04), fade_in=0.08)
+            if len(idx):
+                ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+                sp = r.uniform(10.0, 22.0, len(idx))
+                fx.smoke.vel[idx, 0] = (np.sin(ang) * sp).astype(np.float32)
+                fx.smoke.vel[idx, 2] = (np.cos(ang) * sp).astype(np.float32)
+                fx.smoke.vel[idx, 1] = r.uniform(0.2, 1.0, len(idx)) \
+                    .astype(np.float32)
+            # Spray sheets thrown up with the airframe, falling back.
+            fx.spray.emit(90, p, 1.6, (0.0, 14.0, 0.0), 7.0,
+                          (1.2, 2.6), (0.4, 1.6), (white, foam), r)
+            return
         from game.cinematic_missiles import _wind
         w = _wind(fx, float(mouth[1]))
         fx.smoke.emit(70, mouth, 3.0, w + np.array([0.0, 9.0, 0.0]), 4.0,

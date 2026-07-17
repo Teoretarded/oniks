@@ -1007,9 +1007,12 @@ def test_icbm_warp_only_while_a_bird_flies():
 
 
 def test_icbm_launcher_rows_and_s300_salvo_untouched():
+    from game.cinematic_icbm import ICBMS
     st = _icbm_state(with_fx=True)
     kinds = [k for k, *_ in st._rows()]
-    assert kinds.count("launcher") == 3
+    # One row per strategic weapon + the pad (roster grows by design:
+    # Trident II joined 2026-07-17, ammo_expansion doc).
+    assert kinds.count("launcher") == len(ICBMS) + 1
     st.launcher_i = 0                       # the S-300 pad still salvos
     st._pad = np.array([0.0, 0.0, 0.0])
     st._fire()

@@ -180,6 +180,22 @@ VARIANTS = (
         ground_blast_mult=2.30, shake_amp=1.10,
         mass_kg=1893.0, diam_m=0.519, cd=0.32, g_max=20.0,
         lift_q_gain=3.5e-4, range_km=380.0, warhead_kg=180.0),
+    MissileVariant(
+        # docs/research/ammo_expansion_2026-07-17.md section 3.
+        id="iskander", label="ISKANDER-M",
+        blurb="9M723 QUASI-BALLISTIC - FLAT, FAST, 700 KG",
+        length_m=7.3, eject_v0=14.0, ignite_delay=0.3,
+        boost_accel=75.0, burns=((0.0, 42.0),),
+        tilt_rate_deg=16.0, tilt_max_deg=52.0,
+        flame_len_m=8.5, flame_core=(1.0, 0.96, 0.84),
+        flame_edge=(1.0, 0.52, 0.12),
+        smoke_fresh=(0.85, 0.84, 0.79), smoke_old=(0.62, 0.63, 0.62),
+        smoke_rate=70.0, smoke_size=(6.0, 44.0), column_persist_s=200.0,
+        fireball_scale=1.1, life_s=60.0,
+        smoke_per_m=2.60, width_mult=1.30, base_cloud_mult=1.60,
+        ground_blast_mult=1.70, shake_amp=0.95,
+        mass_kg=3800.0, diam_m=0.92, cd=0.30, g_max=30.0,
+        lift_q_gain=4.5e-4, range_km=500.0, warhead_kg=700.0),
 )
 
 VARIANT_BY_ID = {v.id: v for v in VARIANTS}
