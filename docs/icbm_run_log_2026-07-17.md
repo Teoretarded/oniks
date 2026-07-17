@@ -80,6 +80,26 @@ designation, full flight through state events to impact < 150 m).
 - Impact is a conventional-scale blast — the nuclear question is the
   plan's open question #1 for the user.
 
+## Map expansion (same day — USER GO, "extend by 80-150 km")
+
+Shipped: 160 x 160 km world. fetch_cinematic_ring.py (7,601 files:
+3,796 km2 swissALTI3D 2 m + 3,796 SWISSIMAGE 2 m + 9 GLO-30 tiles,
+~4 GB, parallel/resumable) -> bake_cinematic_ring.py (surround2: 16 km
+chunks / 64 m cells / 8 m-per-px ortho; surround3: 40 km chunks /
+250 m GLO-30 / baked altitude+slope alpine tint) -> CinematicScene
+ring physics chain + renderer consumes all rings (per-rec cell) +
+220 km designation ray. Verified: ext ±80 km; ASL spot checks right
+(Rhone floor 657 m at 70 km W); walkable at 25 km; **60 km Minuteman
+shot lands 60 m from the point (t=341.5 s)** — same TOA/GEMS core,
+zero physics changes. Probe: tools/probe_expansion.py, shots 40-45.
+
+Defects found by eye in round 1 (fix = fill ring2 holes from the
+GLO-30 mosaic + alpine tint instead of column-means/zero-RGB):
+- black wedge artifact at one ridge in shot 43 (DEM hole fill)
+- grey zero-ortho patches mid-ground in shot 44 (missing/border tiles)
+Also: far-ring green tint reads too saturated without haze; far rings
+skip baked terrain shadows (haze-dominated; logged).
+
 ## Next (user-gated)
 
 1. User playtest of the whole flow ([[playtest-before-polish]]).
