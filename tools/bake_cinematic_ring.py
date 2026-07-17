@@ -104,12 +104,33 @@ def _bake_ring2(scene: str, man2: dict, sj: dict, out_dir: str) -> list:
             rgb[j0:j0 + R2_PX_KM, i0:i0 + R2_PX_KM] = np.flipud(a)[..., :3]
         n_files += 1
     print(f"  {n_files} ring tiles mosaicked")
-    # Holes (lakes, missing tiles): fill from column means so the mesh
-    # never spikes; the finer layers cover the interesting middle anyway.
+    # Holes (lakes, border gaps, missing tiles): fill DEM from the
+    # GLO-30 mosaic — column-means built a black cliff wedge in probe
+    # shot 43 — then column-means only as the last resort.
+    nan = np.isnan(dem)
+    if nan.any():
+        tiles30 = _load_glo30(scene)
+        if tiles30:
+            jj, ii = np.nonzero(nan)
+            e = re0 * 1000.0 + (ii + 0.5) * 8.0
+            n = rn0 * 1000.0 + (jj + 0.5) * 8.0
+            dem[jj, ii] = (_sample_glo30(tiles30, e, n)
+                           - float(origin_alt))
+            print(f"  {len(jj)} DEM hole px filled from GLO-30")
     if np.isnan(dem).any():
         col = np.nanmean(np.where(np.isnan(dem), np.nan, dem), axis=0)
         col = np.where(np.isnan(col), 0.0, col)
         dem = np.where(np.isnan(dem), col[None, :], dem).astype(np.float32)
+    # Zero-RGB ortho gaps (grey patches, probe shot 44): paint the
+    # alpine tint so holes read as terrain, not primer.
+    black = rgb.sum(axis=2) == 0
+    if black.any():
+        h_asl = dem + float(origin_alt)
+        dzdx = np.gradient(h_asl, 8.0, axis=1)
+        dzdy = np.gradient(h_asl, 8.0, axis=0)
+        tint = _alpine_tint(h_asl, np.hypot(dzdx, dzdy))
+        rgb[black] = tint[black]
+        print(f"  {int(black.sum())} ortho hole px tinted")
 
     # The existing surround rect (finer) — chunks fully inside skip out,
     # partial overlaps get tucked below it.  Bounds come from the baked
@@ -158,6 +179,47 @@ def _bake_ring2(scene: str, man2: dict, sj: dict, out_dir: str) -> list:
                         "size": R2_CHUNK_KM * 1000.0,
                         "hgt": base + "_hgt.npz", "tex": base + ".jpg"})
     print(f"  ring2: {len(out)} chunks")
+    return out
+
+
+# ---------------------------------------------------------- GLO-30 helpers
+
+def _load_glo30(scene: str) -> dict:
+    glo_dir = os.path.join(RAW_ROOT, scene, "glo30")
+    tiles = {}
+    if os.path.isdir(glo_dir):
+        for fn in sorted(os.listdir(glo_dir)):
+            if fn.endswith(".tif"):
+                lat = int(fn.split("_N")[1][:2])
+                lon = int(fn.split("_E")[1][:3])
+                tiles[(lat, lon)] = tifffile.imread(
+                    os.path.join(glo_dir, fn))
+    return tiles
+
+
+def _sample_glo30(tiles: dict, e: np.ndarray, n: np.ndarray) -> np.ndarray:
+    """Bilinear GLO-30 heights at LV95 points (mirrors the ring-3 grid
+    sampler for scattered hole-fill points)."""
+    lon, lat = _lv95_to_wgs84(np.asarray(e, np.float64),
+                              np.asarray(n, np.float64))
+    out = np.zeros(lon.shape, np.float32)
+    lat_i = np.floor(lat).astype(int)
+    lon_i = np.floor(lon).astype(int)
+    for (tlat, tlon), arr in tiles.items():
+        m = (lat_i == tlat) & (lon_i == tlon)
+        if not m.any():
+            continue
+        rows, cols = arr.shape
+        fr = (1.0 - (lat - tlat)) * (rows - 1)
+        fc = (lon - tlon) * (cols - 1)
+        r0 = np.clip(fr.astype(int), 0, rows - 2)
+        c0 = np.clip(fc.astype(int), 0, cols - 2)
+        wr = np.clip(fr - r0, 0.0, 1.0)
+        wc = np.clip(fc - c0, 0.0, 1.0)
+        v = ((arr[r0, c0] * (1 - wc) + arr[r0, c0 + 1] * wc) * (1 - wr)
+             + (arr[r0 + 1, c0] * (1 - wc)
+                + arr[r0 + 1, c0 + 1] * wc) * wr)
+        out = np.where(m, v.astype(np.float32), out)
     return out
 
 
