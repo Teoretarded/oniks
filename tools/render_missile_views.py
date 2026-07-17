@@ -33,7 +33,7 @@ from models.missiles import (build_40n6, build_48n6, build_57e6,
                              build_tomahawk, build_zircon)
 from models.oniks import build_oniks
 
-OUT = os.path.join("documentation and research",
+OUT = os.path.join("..", "Markdown", "documentation and research",
                    "01_missile_physics_and_models", "renders")
 
 BUILDERS = {

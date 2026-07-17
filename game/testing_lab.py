@@ -270,6 +270,28 @@ class TestingLabState(GameState):
         self._flight_result_rects = []
         self._flight_results_box = None
 
+        # TEST MAP tab (F8): the 6-DOF test chamber — one all-new test
+        # article on a bland flat plate (docs/plans/sixdof_plan_2026-07-17.md).
+        self.testmap_body = None          # sim.sixdof.SixDofBody
+        self.testmap_ground = None        # uploaded meshes (lazy, on entry)
+        self.testmap_pad = None
+        self.testmap_meshes = {}          # article name -> uploaded mesh
+        self.testmap_article = 0          # LEFT/RIGHT cycles the roster
+        self.testmap_misaligned = False   # G: 2 deg thrust misalignment
+        self.testmap_unstable = False     # U: CP ahead of CG
+        self.testmap_engine = "fan"       # E: fan <-> rocket motor (hopper)
+        self.testmap_spin = True          # G on the dart: spin on/off
+        self.testmap_wind = 0             # W: index into WIND_STEPS
+        self.testmap_scenarios = {}       # article -> deterministic preset
+        self.testmap_target_altitudes = (25.0, 55.0, 100.0)
+        self.testmap_force_mode = False   # P: bounded attitude-disturbance tool
+        self._testmap_grabbing = False    # LMB on body while tool is armed
+        self._testmap_pick_z = None       # persistent exact picked station
+        self._testmap_action_rects: list[tuple[int, tuple]] = []
+        self._testmap_prev_rect = None
+        self._testmap_next_rect = None
+        self._tab_testmap_rect = None
+
     # -------------------------------------------------------------- lifecycle
 
     def enter(self) -> None:
@@ -310,7 +332,11 @@ class TestingLabState(GameState):
             self.sky = None
 
     def effective_time_scale(self) -> float:
-        return 0.0
+        # The lab freezes sim time — EXCEPT the TEST MAP, whose whole point
+        # is real 120 Hz physics (found 2026-07-17: with 0.0 here the main
+        # loop never accumulates sim time, so the hopper's engine turned on
+        # but physics never stepped — thrust stayed 0.0 N on the pad).
+        return 1.0 if self.lab_mode == "testmap" else 0.0
 
     # --------------------------------------------------------------- catalog
 
@@ -713,7 +739,7 @@ class TestingLabState(GameState):
     # ------------------------------------------------------ missile workbench
 
     def _set_lab_mode(self, mode: str) -> None:
-        if mode not in ("assets", "flight", "cinematic") \
+        if mode not in ("assets", "flight", "cinematic", "testmap") \
                 or mode == self.lab_mode:
             return
         if mode == "cinematic":
@@ -723,6 +749,8 @@ class TestingLabState(GameState):
             self.cinema_sel = min(self.cinema_sel,
                                   max(0, len(self.cinema_scenes) - 1))
             self._cinema_meta_cache.clear()
+        if mode == "testmap":
+            self._enter_testmap()
         self.lab_mode = mode
         self.search_active = False
         self.angle_entry_active = False
@@ -821,6 +849,802 @@ class TestingLabState(GameState):
         if _inside(pos, self._flight_run_rect):
             self._start_flight_batch()
 
+    # -------------------------------------------------------- test map tab
+
+    TESTMAP_ROSTER = (
+        "TEST HOPPER", "SPIN DART", "TVC STICK",
+        "GYRO-GIMBAL", "FLIP BRAKE", "RCS NEEDLE",
+    )
+    TESTMAP_WIND_STEPS = (0.0, 6.0, 14.0)
+
+    def _enter_testmap(self) -> None:
+        """Build the test chamber once and (re)spawn the article."""
+        if self.testmap_ground is None and self._Mesh is not None:
+            from models.test_rocket import (build_launch_pad,
+                                            build_flip_brake,
+                                            build_flip_brake_open,
+                                            build_gyro_gimbal,
+                                            build_pulse_lander,
+                                            build_rcs_needle,
+                                            build_returner,
+                                            build_spin_dart,
+                                            build_test_ground,
+                                            build_test_hopper,
+                                            build_tvc_stick)
+            self.testmap_ground = self._Mesh(build_test_ground())
+            self.testmap_pad = self._Mesh(build_launch_pad())
+            self.testmap_meshes = {
+                "TEST HOPPER": self._Mesh(build_test_hopper()),
+                "SPIN DART": self._Mesh(build_spin_dart()),
+                "TVC STICK": self._Mesh(build_tvc_stick()),
+                "RETURNER": self._Mesh(build_returner()),
+                "GYRO-GIMBAL": self._Mesh(build_gyro_gimbal()),
+                "FLIP BRAKE": self._Mesh(build_flip_brake()),
+                "FLIP BRAKE:OPEN": self._Mesh(build_flip_brake_open()),
+                "RCS NEEDLE": self._Mesh(build_rcs_needle()),
+                "PULSE LANDER": self._Mesh(build_pulse_lander()),
+            }
+        self._reset_testmap_body()
+
+    def _reset_testmap_body(self) -> None:
+        from sim.sixdof import (configure_flip_brake_scenario,
+                                configure_rcs_scenario,
+                                configure_returner_scenario,
+                                make_flip_brake, make_gyro_gimbal,
+                                make_pulse_lander, make_rcs_needle,
+                                make_returner, make_spin_dart,
+                                make_test_hopper, make_tvc_stick)
+        article = self.TESTMAP_ROSTER[self.testmap_article]
+        if article == "SPIN DART":
+            self.testmap_body = make_spin_dart(spin=True)
+            self.testmap_body.spin_enabled = self.testmap_spin
+        elif article == "TVC STICK":
+            self.testmap_body = make_tvc_stick()
+        elif article == "RETURNER":
+            self.testmap_body = make_returner()
+            index = self.testmap_scenarios.get(article, 0)
+            configure_returner_scenario(self.testmap_body, index)
+        elif article == "GYRO-GIMBAL":
+            self.testmap_body = make_gyro_gimbal()
+        elif article == "FLIP BRAKE":
+            self.testmap_body = make_flip_brake()
+            index = self.testmap_scenarios.get(article, 0)
+            configure_flip_brake_scenario(self.testmap_body, index)
+        elif article == "RCS NEEDLE":
+            self.testmap_body = make_rcs_needle()
+            index = self.testmap_scenarios.get(article, 0)
+            configure_rcs_scenario(self.testmap_body, index)
+            # This exhibit is about direct reaction-jet authority, not another
+            # invisible attitude-hold controller.
+            self.testmap_body.rcs_hold_on = False
+        elif article == "PULSE LANDER":
+            self.testmap_body = make_pulse_lander()
+        else:
+            self.testmap_body = make_test_hopper(
+                misalign_deg=2.0 if self.testmap_misaligned else 0.0,
+                unstable=self.testmap_unstable,
+                engine=self.testmap_engine)
+        wind = self.TESTMAP_WIND_STEPS[self.testmap_wind]
+        self.testmap_body.wind = np.array([wind, 0.0, 0.0])
+        self.target = self.testmap_body.pos.copy()
+        self.orbit_az = math.radians(35.0)
+        self.orbit_el = math.radians(12.0)
+        self.orbit_dist = max(11.0, self.testmap_body.d.length * 4.0)
+        self.min_dist, self.max_dist = 4.0, 600.0
+        self.auto_orbit = False
+        self._testmap_grabbing = False
+        self._testmap_pick_z = None
+        self._apply_camera()
+
+    def _testmap_mouse_ray(self, pos):
+        """(eye, unit dir) of the world ray under a preview-box pixel."""
+        box = self._preview_box
+        if box is None:
+            return None
+        px, py, qx, qy = box
+        pw, ph = qx - px, qy - py
+        if pw < 2 or ph < 2:
+            return None
+        nx = (pos[0] - px) / pw * 2.0 - 1.0
+        ny = 1.0 - (pos[1] - py) / ph * 2.0
+        cam = self.camera
+        t = math.tan(cam.fov_y * 0.5)
+        d = (cam.forward + cam.right * (nx * t * pw / ph) + cam.up * (ny * t))
+        return cam.eye.copy(), d / np.linalg.norm(d)
+
+    def _testmap_try_grab(self, pos) -> bool:
+        """Ray-pick the visible article; attach the disturbance spring."""
+        body = self.testmap_body
+        if not self.testmap_force_mode or body is None \
+                or not _inside(pos, self._preview_box):
+            return False
+        ray = self._testmap_mouse_ray(pos)
+        if ray is None:
+            return False
+        eye, d = ray
+        c = body.pos
+        a = body.body_axis_world()
+        h = 0.5 * body.d.length
+        w0 = eye - c
+        b = float(d @ a)
+        d_w = float(d @ w0)
+        a_w = float(a @ w0)
+        den = 1.0 - b * b
+        if abs(den) < 1e-9:                   # looking straight down the axis
+            s = _clamp(-a_w, -h, h)
+        else:
+            t_ray = (a_w * b - d_w) / den
+            s = _clamp(t_ray * b + a_w, -h, h)
+        p_axis = c + a * s
+        t_ray = max(0.1, float((p_axis - eye) @ d))
+        miss = float(np.linalg.norm(eye + d * t_ray - p_axis))
+        # Match the visible airframe instead of the old 0.7 m invisible halo.
+        # Fins/control pods extend roughly one body diameter from the axis.
+        pick_radius = max(0.12, body.d.diameter)
+        if miss > pick_radius:
+            return False
+        body.set_grab(np.array([0.0, 0.0, s]), p_axis)
+        self._testmap_pick_z = s
+        return True
+
+    def _testmap_update_grab(self) -> None:
+        """Per-frame: pull target = mouse ray hit on the camera-parallel
+        plane through the grabbed point (so depth stays put)."""
+        body = self.testmap_body
+        if not self._testmap_grabbing or body is None \
+                or body.grab_point_body is None:
+            return
+        ray = self._testmap_mouse_ray(self._last_mouse)
+        p_grab = body.grab_point_world()
+        if ray is None or p_grab is None:
+            return
+        eye, d = ray
+        fwd = self.camera.forward
+        denom = float(d @ fwd)
+        if denom > 1e-6:
+            depth = float((p_grab - eye) @ fwd)
+            body.move_grab(eye + d * (depth / denom))
+
+    def _testmap_project(self, world):
+        """World point -> preview-box pixel (None when behind the eye)."""
+        box = self._preview_box
+        if box is None:
+            return None
+        px, py, qx, qy = box
+        rel = np.append(np.asarray(world, dtype=np.float64)
+                        - self.camera.eye, 1.0)
+        clip = (self.renderer.proj @ self.renderer.view_rot) @ rel
+        if clip[3] <= 1e-6:
+            return None
+        return (px + (clip[0] / clip[3] * 0.5 + 0.5) * (qx - px),
+                py + (0.5 - clip[1] / clip[3] * 0.5) * (qy - py))
+
+    def _testmap_overlay(self) -> None:
+        """Screen-space instrumentation anchored to the live rigid body."""
+        body = self.testmap_body
+        if body is None:
+            return
+        text = self.text
+
+        # Motor vector: exhaust-side line starts exactly at the nozzle and
+        # grows 1 metre per 500 N. It remains readable instead of disappearing
+        # inside the body, while its label states the force on the vehicle.
+        nozzle = body.nozzle_world()
+        vector_len = min(6.0, body.thrust_n / 500.0)
+        exhaust_end = nozzle - body.thrust_direction_world() * vector_len
+        p0, p1 = self._testmap_project(nozzle), self._testmap_project(exhaust_end)
+        if p0 is not None and p1 is not None:
+            text.draw_lines([p0, p1], (*ACCENT, 1.0), 2.5)
+            dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+            mag = math.hypot(dx, dy)
+            if mag > 4.0:
+                ux, uy = dx / mag, dy / mag
+                nx, ny = -uy, ux
+                a = (p1[0] - ux * 9 + nx * 4, p1[1] - uy * 9 + ny * 4)
+                b = (p1[0] - ux * 9 - nx * 4, p1[1] - uy * 9 - ny * 4)
+                text.draw_lines([a, p1, b], (*ACCENT, 1.0), 2.0)
+            text.draw_text(p1[0] + 8, p1[1] - 8,
+                           f"THRUST {body.thrust_n:.0f} N", ACCENT,
+                           SMALL_SIZE)
+
+        # Make the abstract mass/aero relationship visible on the article.
+        for point, label, color in (
+                (body.cg_world(), "CG  BALANCE", BELIEF),
+                (body.cp_world(), "CP  AERO FORCE", OK_COL)):
+            p = self._testmap_project(point)
+            if p is not None:
+                x, y = p
+                text.draw_lines([(x - 5, y), (x + 5, y)], (*color, 1.0), 1.5)
+                text.draw_lines([(x, y - 5), (x, y + 5)], (*color, 1.0), 1.5)
+                text.draw_text(x + 7, y - 7, label, color, SMALL_SIZE)
+
+        if not self.testmap_force_mode:
+            return
+
+        # Oriented box around the actual model. It only appears while the
+        # P-key disturbance tool is armed, making camera orbit vs force input
+        # unambiguous before the user clicks.
+        bounds = {
+            "TEST HOPPER": (0.38, -1.65, 1.50),
+            "SPIN DART": (0.21, -0.96, 0.90),
+            "TVC STICK": (0.19, -1.93, 1.80),
+            "RETURNER": (0.60, -2.71, 2.40),
+            "GYRO-GIMBAL": (0.27, -1.48, 1.35),
+            "FLIP BRAKE": (0.58 if body.airbrake_deployed else 0.29,
+                           -1.72, 1.60),
+            "RCS NEEDLE": (0.22, -1.33, 1.25),
+            "PULSE LANDER": (0.39, -1.57, 1.45),
+        }
+        radius, z0, z1 = bounds.get(
+            body.d.name, (body.d.diameter, -0.5 * body.d.length,
+                          0.5 * body.d.length))
+        from sim.sixdof import quat_to_mat
+        matrix = quat_to_mat(body.quat)
+        cg = body._cg_z()
+        corners = []
+        for z in (z0, z1):
+            for y in (-radius, radius):
+                for x in (-radius, radius):
+                    local = np.array([x, y, z - cg])
+                    corners.append(self._testmap_project(body.pos + matrix @ local))
+        edges = ((0, 1), (0, 2), (1, 3), (2, 3),
+                 (4, 5), (4, 6), (5, 7), (6, 7),
+                 (0, 4), (1, 5), (2, 6), (3, 7))
+        for a, b in edges:
+            if corners[a] is not None and corners[b] is not None:
+                text.draw_lines([corners[a], corners[b]],
+                                (*BELIEF, 0.85), 1.25)
+        if self._testmap_pick_z is not None:
+            p = self._testmap_project(body.body_point_world(self._testmap_pick_z))
+            if p is not None:
+                x, y = p
+                text.draw_lines([(x - 7, y - 7), (x + 7, y + 7)],
+                                (*DANGER, 1.0), 2.0)
+                text.draw_lines([(x - 7, y + 7), (x + 7, y - 7)],
+                                (*DANGER, 1.0), 2.0)
+                text.draw_text(x + 9, y + 7, "FORCE POINT", DANGER, SMALL_SIZE)
+
+    def sim_step(self, dt: float) -> None:
+        """Fixed 120 Hz step from the main loop: real physics, only for
+        the TEST MAP article (the rest of the lab owns no simulation)."""
+        if self.lab_mode == "testmap" and self.testmap_body is not None:
+            self.testmap_body.step(dt)
+
+    def _testmap_event(self, ev) -> None:
+        body = self.testmap_body
+        article = (self.TESTMAP_ROSTER[self.testmap_article]
+                   if body is not None else "")
+        if ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_ESCAPE:
+                self.app.close_testing_lab()
+            elif ev.key == pygame.K_SPACE and body is not None:
+                if body.engine_on:
+                    body.cutoff()
+                    self._show_status("ENGINE CUT")
+                else:
+                    body.ignite()
+                    self._show_status("IGNITION - THROTTLE "
+                                      f"{body.throttle:.0%}")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_UP and body is not None:
+                body.throttle = _clamp(body.throttle + 0.05, 0.0, 1.0)
+            elif ev.key == pygame.K_DOWN and body is not None:
+                body.throttle = _clamp(body.throttle - 0.05, 0.0, 1.0)
+            elif ev.key in (pygame.K_LEFT, pygame.K_RIGHT):
+                step = 1 if ev.key == pygame.K_RIGHT else -1
+                self.testmap_article = (self.testmap_article + step) % len(
+                    self.TESTMAP_ROSTER)
+                self._reset_testmap_body()
+                self._show_status(
+                    f"ARTICLE: {self.TESTMAP_ROSTER[self.testmap_article]}")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_g:
+                if article in ("SPIN DART", "GYRO-GIMBAL"):
+                    body.spin_enabled = not body.spin_enabled
+                    if article == "SPIN DART":
+                        self.testmap_spin = body.spin_enabled
+                    self._show_status(
+                        "CANTED NOZZLES - IT SPINS UP AND FLIES TRUE"
+                        if body.spin_enabled else
+                        "SPIN OFF - THE BENT MOTOR WALKS IT OFF COURSE")
+                elif article == "TEST HOPPER":
+                    self.testmap_misaligned = not self.testmap_misaligned
+                    self._reset_testmap_body()
+                    self._show_status(
+                        "THRUST MISALIGNED 2 DEG - WATCH IT TIP"
+                        if self.testmap_misaligned else "THRUST ALIGNED")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_u and article == "TEST HOPPER":
+                self.testmap_unstable = not self.testmap_unstable
+                self._reset_testmap_body()
+                self._show_status(
+                    "CP AHEAD OF CG - AERODYNAMICALLY UNSTABLE"
+                    if self.testmap_unstable else "STABLE ARTICLE")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_e and article == "TEST HOPPER":
+                self.testmap_engine = ("rocket" if self.testmap_engine
+                                       == "fan" else "fan")
+                self._reset_testmap_body()
+                self._show_status(
+                    "ROCKET MOTOR - THRUST GROWS WITH ALTITUDE"
+                    if self.testmap_engine == "rocket"
+                    else "TURBOFAN - THRUST STARVES WITH ALTITUDE")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_f and body is not None \
+                    and body.d.fcs_kp > 0.0:
+                body.fcs_on = not body.fcs_on
+                self._show_status(
+                    "AUTO-GIMBAL ON - ATTITUDE HOLD ACTIVE" if body.fcs_on
+                    else "MANUAL TVC - AIM THE NOZZLE WITH I K J L")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_b and body is not None \
+                    and body.d.airbrake_drag_mult > 1.0:
+                body.airbrake_deployed = not body.airbrake_deployed
+                self._show_status(
+                    "AERODYNAMIC BRAKES DEPLOYED - DRAG AND DAMPING UP"
+                    if body.airbrake_deployed else "AERODYNAMIC BRAKES RETRACTED")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_x and article in ("SPIN DART", "GYRO-GIMBAL"):
+                body.spin_direction *= -1.0
+                self._show_status("ROLL JETS REVERSED")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_m and article in (
+                    "SPIN DART", "TVC STICK", "GYRO-GIMBAL"):
+                levels = ((0.0, 1.5, 4.0) if article == "SPIN DART" else
+                          ((0.0, 2.0, 5.0) if article == "TVC STICK" else
+                           (0.0, 2.5, 6.0)))
+                now = math.degrees(body.d.misalign_rad)
+                index = min(range(len(levels)), key=lambda i: abs(levels[i] - now))
+                value = levels[(index + 1) % len(levels)]
+                body.d.misalign_rad = math.radians(value)
+                self._show_status(f"MOTOR BEND {value:.1f} DEG")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_t and article in ("TVC STICK", "GYRO-GIMBAL"):
+                modes = ("UPRIGHT", "LEAN 12 DEG", "PROGRADE")
+                body.fcs_target_mode = modes[(modes.index(body.fcs_target_mode) + 1)
+                                             % len(modes)]
+                self._show_status(f"AUTO-GIMBAL TARGET: {body.fcs_target_mode}")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_y and article in ("TVC STICK", "GYRO-GIMBAL"):
+                levels = (0.25, 1.0, 1.75)
+                index = min(range(len(levels)),
+                            key=lambda i: abs(levels[i] - body.gimbal_authority))
+                body.gimbal_authority = levels[(index + 1) % len(levels)]
+                self._show_status(
+                    f"GIMBAL AUTHORITY {body.gimbal_authority:.0%}")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_n and article in ("TVC STICK", "GYRO-GIMBAL"):
+                body.gimbal_jammed = not body.gimbal_jammed
+                self._show_status("GIMBAL JAMMED AT CURRENT ANGLE"
+                                  if body.gimbal_jammed else "GIMBAL JAM CLEARED")
+                self.app.audio.ui_click()
+            elif ev.key in (pygame.K_i, pygame.K_k, pygame.K_j, pygame.K_l) \
+                    and article in ("TVC STICK", "GYRO-GIMBAL"):
+                step = math.radians(1.0)
+                pitch, yaw = {
+                    pygame.K_i: (step, 0.0),
+                    pygame.K_k: (-step, 0.0),
+                    pygame.K_j: (0.0, -step),
+                    pygame.K_l: (0.0, step),
+                }[ev.key]
+                moved = body.nudge_gimbal(pitch, yaw)
+                if moved:
+                    self._show_status(
+                        "MANUAL NOZZLE  "
+                        f"P {math.degrees(float(body.gimbal[0])):+.0f}  "
+                        f"Y {math.degrees(float(body.gimbal[1])):+.0f} DEG")
+                elif body.gimbal_jammed:
+                    self._show_status("GIMBAL IS JAMMED - PRESS N TO CLEAR")
+                else:
+                    self._show_status("PRESS F FOR MANUAL TVC")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_a and article in ("RETURNER", "PULSE LANDER"):
+                body.autopilot_on = not body.autopilot_on
+                if article == "RETURNER":
+                    body.rcs_hold_on = body.autopilot_on
+                self._show_status("AUTONOMOUS CONTROL ON" if body.autopilot_on
+                                  else "AUTONOMOUS CONTROL OFF - MANUAL MOTOR")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_v and article in (
+                    "RETURNER", "FLIP BRAKE", "RCS NEEDLE"):
+                count = 3 if article == "RETURNER" else 2
+                self.testmap_scenarios[article] = (
+                    self.testmap_scenarios.get(article, 0) + 1) % count
+                self._reset_testmap_body()
+                self._show_status(
+                    f"{article} SCENARIO {self.testmap_scenarios[article] + 1}")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_h and article == "PULSE LANDER":
+                values = self.testmap_target_altitudes
+                index = min(range(len(values)),
+                            key=lambda i: abs(values[i] - body.target_altitude))
+                body.target_altitude = values[(index + 1) % len(values)]
+                self._show_status(f"PULSE TARGET {body.target_altitude:.0f} M")
+                self.app.audio.ui_click()
+            elif ev.key in (pygame.K_i, pygame.K_k, pygame.K_j, pygame.K_l,
+                            pygame.K_q, pygame.K_e) \
+                    and article == "RCS NEEDLE":
+                pulse = {
+                    pygame.K_i: (1.0, 0.0, 0.0),
+                    pygame.K_k: (-1.0, 0.0, 0.0),
+                    pygame.K_j: (0.0, 1.0, 0.0),
+                    pygame.K_l: (0.0, -1.0, 0.0),
+                    pygame.K_q: (0.0, 0.0, 1.0),
+                    pygame.K_e: (0.0, 0.0, -1.0),
+                }[ev.key]
+                body.pulse_rcs(pulse)
+                axis = ("PITCH" if ev.key in (pygame.K_i, pygame.K_k) else
+                        ("YAW" if ev.key in (pygame.K_j, pygame.K_l)
+                         else "ROLL"))
+                self._show_status(f"{axis} REACTION-JET PULSE")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_p:
+                self.testmap_force_mode = not self.testmap_force_mode
+                if not self.testmap_force_mode:
+                    self._testmap_grabbing = False
+                    self._testmap_pick_z = None
+                    if body is not None:
+                        body.clear_grab()
+                self._show_status(
+                    "DISTURBANCE TOOL ARMED - CLICK INSIDE THE BOX"
+                    if self.testmap_force_mode else
+                    "DISTURBANCE TOOL SAFE - LEFT DRAG ORBITS")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_w:
+                self.testmap_wind = (self.testmap_wind + 1) % len(
+                    self.TESTMAP_WIND_STEPS)
+                wind = self.TESTMAP_WIND_STEPS[self.testmap_wind]
+                if body is not None:
+                    body.wind = np.array([wind, 0.0, 0.0])
+                self._show_status(f"WIND {wind:.0f} M/S FROM THE WEST")
+                self.app.audio.ui_click()
+            elif ev.key == pygame.K_r:
+                self._reset_testmap_body()
+                self._show_status("ARTICLE RESET")
+            elif ev.key == pygame.K_F2:
+                self._request_clean_capture()
+            elif ev.key == pygame.K_TAB:
+                self.ui_hidden = not self.ui_hidden
+            return
+        if ev.type == pygame.MOUSEMOTION:
+            self._last_mouse = ev.pos
+            if self._drag_button is not None and not self._testmap_grabbing:
+                rel = getattr(ev, "rel", (0, 0))
+                self._orbit(rel[0], rel[1])
+            return
+        if ev.type == pygame.MOUSEBUTTONUP:
+            if ev.button == 1 and self._testmap_grabbing:
+                self._testmap_grabbing = False
+                if body is not None:
+                    body.clear_grab()
+            if ev.button == self._drag_button:
+                self._drag_button = None
+            return
+        if ev.type == pygame.MOUSEWHEEL:
+            steps = -ev.y if getattr(ev, "flipped", False) else ev.y
+            self._zoom(steps)
+            return
+        if ev.type != pygame.MOUSEBUTTONDOWN:
+            return
+        pos = getattr(ev, "pos", self._last_mouse)
+        if ev.button in (4, 5):
+            self._zoom(1 if ev.button == 4 else -1)
+            return
+        if ev.button == 1 and _inside(pos, self._tab_asset_rect):
+            self._set_lab_mode("assets")
+            return
+        if ev.button == 1 and _inside(pos, self._tab_flight_rect):
+            self._set_lab_mode("flight")
+            return
+        if ev.button == 1 and _inside(pos, self._tab_cinema_rect):
+            self._set_lab_mode("cinematic")
+            return
+        if ev.button == 1 and not self.ui_hidden:
+            if _inside(pos, self._testmap_prev_rect):
+                self._testmap_event(pygame.event.Event(
+                    pygame.KEYDOWN, key=pygame.K_LEFT, mod=0))
+                return
+            if _inside(pos, self._testmap_next_rect):
+                self._testmap_event(pygame.event.Event(
+                    pygame.KEYDOWN, key=pygame.K_RIGHT, mod=0))
+                return
+            for key, rect in self._testmap_action_rects:
+                if _inside(pos, rect):
+                    self._testmap_event(pygame.event.Event(
+                        pygame.KEYDOWN, key=key, mod=0))
+                    return
+        if ev.button == 1 and self._testmap_try_grab(pos):
+            self._testmap_grabbing = True
+            self._last_mouse = pos
+            return
+        if ev.button in (1, 3):
+            self._drag_button = ev.button
+
+    def _draw_testmap_ui(self, w: int, h: int) -> None:
+        text = self.text
+        body = self.testmap_body
+        self._testmap_action_rects = []
+        self._testmap_prev_rect = None
+        self._testmap_next_rect = None
+        panel_h = max(1, h - SCREEN_PAD * 2)
+        self._sidebar_box = (SCREEN_PAD, SCREEN_PAD,
+                             SCREEN_PAD + SIDEBAR_W, SCREEN_PAD + panel_h)
+        draw_panel(text, SCREEN_PAD, SCREEN_PAD, SIDEBAR_W, panel_h,
+                   fill=PLATE_INK, strip=True)
+        x = SCREEN_PAD + 16
+        text.draw_text(x, 27, "TEST LAB // INTERNAL", ACCENT, SMALL_SIZE)
+        text.draw_text(x, 49, "TEST MAP", TEXT_COL, HEADER_SIZE)
+        text.draw_text(x, 72, "6-DOF TEST MAP", MUTED, SMALL_SIZE)
+        self._tab_asset_rect = (x + 206, 24, x + 338, 48)
+        text.draw_lines(
+            [(x + 206, 24), (x + 338, 24), (x + 338, 48),
+             (x + 206, 48), (x + 206, 24)], (*ACCENT_DIM, 1.0), 1.0)
+        text.draw_text(x + 216, 29, "ASSETS [F8]", MUTED, SMALL_SIZE)
+        self._tab_flight_rect = (x + 206, 52, x + 338, 76)
+        text.draw_lines(
+            [(x + 206, 52), (x + 338, 52), (x + 338, 76),
+             (x + 206, 76), (x + 206, 52)], (*ACCENT_DIM, 1.0), 1.0)
+        text.draw_text(x + 216, 57, "MISSILE [F6]", MUTED, SMALL_SIZE)
+        self._tab_cinema_rect = (x + 206, 80, x + 338, 104)
+        text.draw_lines(
+            [(x + 206, 80), (x + 338, 80), (x + 338, 104),
+             (x + 206, 104), (x + 206, 80)], (*ACCENT_DIM, 1.0), 1.0)
+        text.draw_text(x + 216, 85, "CINEMATIC [F7]", MUTED, SMALL_SIZE)
+        if body is None:
+            return
+
+        alt = float(body.pos[1])
+        tw = body.thrust_n / max(body.weight_n, 1e-9)
+        article = self.TESTMAP_ROSTER[self.testmap_article]
+
+        def card(cy, ch):
+            text.draw_rect(x, cy, 340, ch, (*BG2, 0.72))
+            text.draw_lines([(x, cy), (x + 340, cy), (x + 340, cy + ch),
+                             (x, cy + ch), (x, cy)],
+                            (*LINE_COL, 0.75), 1.0)
+
+        meta = {
+            "TEST HOPPER": (
+                "CG / CP / MOTOR MISALIGNMENT",
+                ("COMPARE A SELF-RIGHTING CP WITH AN",
+                 "UNSTABLE ONE. THEN BEND THE MOTOR AND",
+                 "WATCH THRUST CREATE TORQUE.")),
+            "SPIN DART": (
+                "ANGULAR MOMENTUM / CANTED ROLL JETS",
+                ("SPIN DOES NOT FREEZE IT. ANGULAR MOMENTUM",
+                 "RESISTS TIPPING; ROTATION AVERAGES A BENT",
+                 "MOTOR'S ERROR.")),
+            "TVC STICK": (
+                "MANUAL NOZZLE AIM / THRUST VECTORING",
+                ("AIM THE NOZZLE, AIM THE FORCE. MANUAL TVC",
+                 "LETS YOU STEER BY MOVING THE ENGINE'S",
+                 "EXHAUST DIRECTION.")),
+            "GYRO-GIMBAL": (
+                "SPIN + TVC / TWO SYSTEMS, ONE AIRFRAME",
+                ("SPIN RESISTS FAST TIPPING WHILE TVC",
+                 "STEERS THE AXIS. BREAK EITHER SYSTEM AND",
+                 "WATCH THE OTHER FIGHT ALONE.")),
+            "FLIP BRAKE": (
+                "HIGH-ALPHA DRAG / MOVING CENTER OF PRESSURE",
+                ("PETALS TURN BROADSIDE SPEED INTO DRAG AND",
+                 "MOVE THE CP, MAKING A CHAOTIC FALL",
+                 "AERODYNAMICALLY SELF-RIGHT.")),
+            "RCS NEEDLE": (
+                "VACUUM ATTITUDE / SIX REACTION JETS",
+                ("FINS FADE AS AIR GETS THIN. SMALL ROCKET",
+                 "JETS APPLY TORQUE WITHOUT AIRFLOW, IN ALL",
+                 "THREE ROTATION AXES.")),
+        }
+        subtitle, concept = meta[article]
+
+        # Selected experiment: a real selector rather than telemetry disguised
+        # as a row. Both arrows are mouse controls as well as keyboard hints.
+        article_y = 116
+        card(article_y, 76)
+        self._testmap_prev_rect = (x + 8, article_y + 22,
+                                   x + 40, article_y + 56)
+        self._testmap_next_rect = (x + 300, article_y + 22,
+                                   x + 332, article_y + 56)
+        for rect, glyph in ((self._testmap_prev_rect, "<"),
+                            (self._testmap_next_rect, ">")):
+            rx0, ry0, rx1, ry1 = rect
+            text.draw_rect(rx0, ry0, rx1 - rx0, ry1 - ry0,
+                           (*ACCENT_DIM, 0.26))
+            text.draw_lines([(rx0, ry0), (rx1, ry0), (rx1, ry1),
+                             (rx0, ry1), (rx0, ry0)],
+                            (*ACCENT_DIM, 1.0), 1.0)
+            text.draw_text(rx0 + 12, ry0 + 7, glyph, ACCENT, BODY_SIZE)
+        text.draw_text(x + 50, article_y + 10,
+                       f"EXPERIMENT {self.testmap_article + 1:02d} / "
+                       f"{len(self.TESTMAP_ROSTER):02d}", MUTED, SMALL_SIZE)
+        text.draw_text(x + 50, article_y + 29, article, TEXT_COL, HEADER_SIZE)
+        text.draw_text(x + 50, article_y + 54, subtitle, ACCENT, SMALL_SIZE)
+
+        rho_ratio = math.exp(-max(0.0, alt) / 8500.0)
+        if article == "SPIN DART":
+            special = (
+                ("SPIN", f"{float(body.omega[2]):+.1f} RAD/S"),
+                ("ROLL JETS", ("ON" if body.spin_enabled else "OFF")
+                 + (" / REV" if body.spin_direction < 0 else "")),
+                ("MOTOR BEND", f"{math.degrees(body.d.misalign_rad):.1f} DEG"),
+                ("ROLL BRAKE", "OPEN" if body.airbrake_deployed else "STOWED"),
+                ("WIND", f"{self.TESTMAP_WIND_STEPS[self.testmap_wind]:.0f} M/S"))
+        elif article in ("TVC STICK", "GYRO-GIMBAL"):
+            special = (
+                ("TVC MODE", "AUTO" if body.fcs_on else "MANUAL"),
+                ("NOZZLE P", f"{math.degrees(float(body.gimbal[0])):+.1f} DEG"),
+                ("NOZZLE Y", f"{math.degrees(float(body.gimbal[1])):+.1f} DEG"),
+                ("LIMIT", f"{body.gimbal_authority:.0%}"),
+                (("SPIN" if article == "GYRO-GIMBAL" else "ACTUATOR"),
+                 (("ON" if body.spin_enabled else "OFF")
+                  if article == "GYRO-GIMBAL" else
+                  ("JAMMED" if body.gimbal_jammed else "FREE"))))
+        elif article == "FLIP BRAKE":
+            special = (
+                ("PETALS", "OPEN" if body.airbrake_deployed else "CLOSED"),
+                ("DRAG", f"X{body.d.airbrake_drag_mult:.1f}"
+                 if body.airbrake_deployed else "X1.0"),
+                ("CP", "AFT / STABLE" if body.airbrake_deployed
+                 else "FORWARD / UNSTABLE"),
+                ("AIR", f"{rho_ratio:.3f} SEA LEVEL"),
+                ("ENTRY", str(body.scenario_index + 1)))
+        elif article == "RCS NEEDLE":
+            special = (
+                ("CONTROL", "MANUAL JETS"),
+                ("JET PULSE", "FIRING" if body.rcs_pulse_left > 0.0 else "READY"),
+                ("ROLL RATE", f"{float(body.omega[2]):+.2f} RAD/S"),
+                ("AIR", f"{rho_ratio:.3f} SEA LEVEL"),
+                ("TUMBLE", str(body.scenario_index + 1)))
+        else:
+            special = (
+                ("MOTOR", body.d.engine.upper()),
+                ("THROTTLE", f"{body.throttle:.0%}"),
+                ("STABILITY", "UNSTABLE" if self.testmap_unstable else "STABLE"),
+                ("MOTOR BEND", "2.0 DEG" if self.testmap_misaligned else "NONE"),
+                ("WIND", f"{self.TESTMAP_WIND_STEPS[self.testmap_wind]:.0f} M/S"))
+
+        telemetry_y = 204
+        card(telemetry_y, 176)
+        text.draw_text(x + 12, telemetry_y + 10, "LIVE TELEMETRY", ACCENT,
+                       SMALL_SIZE)
+        motor_state = "MOTOR ON" if body.engine_on else "MOTOR SAFE"
+        text.draw_text(x + 242, telemetry_y + 10, motor_state,
+                       OK_COL if body.engine_on else MUTED, SMALL_SIZE)
+        common = (
+            ("ALTITUDE", f"{alt:.1f} M"),
+            ("VERT SPEED", f"{float(body.vel[1]):+.2f} M/S"),
+            ("THRUST", f"{body.thrust_n:.0f} N"),
+            ("T / W", f"{tw:.2f}"),
+            ("PITCH", f"{body.pitch_deg():+.1f} DEG"),
+        )
+        for col, rows in enumerate((common, special)):
+            rx = x + 12 + col * 166
+            for row, (label, value) in enumerate(rows):
+                ry = telemetry_y + 36 + row * 26
+                text.draw_text(rx, ry, label, MUTED, SMALL_SIZE)
+                text.draw_text(rx, ry + 12, value, TEXT_COL, SMALL_SIZE)
+
+        concept_y = 392
+        card(concept_y, 94)
+        text.draw_text(x + 12, concept_y + 10, "WHAT THIS SHOWS", ACCENT,
+                       SMALL_SIZE)
+        text.draw_text(x + 12, concept_y + 34, concept[0], TEXT_COL, SMALL_SIZE)
+        text.draw_text(x + 12, concept_y + 53, concept[1], TEXT_COL, SMALL_SIZE)
+        text.draw_text(x + 12, concept_y + 72, concept[2], TEXT_COL, SMALL_SIZE)
+
+        controls = {
+            "TEST HOPPER": (
+                (pygame.K_SPACE, "SPACE", "MOTOR"),
+                (pygame.K_e, "E", "MOTOR TYPE"),
+                (pygame.K_g, "G", "BEND MOTOR"),
+                (pygame.K_u, "U", "MOVE CP"),
+                (pygame.K_w, "W", "WIND"),
+                (pygame.K_p, "P", "FORCE TOOL"),
+                (pygame.K_UP, "UP", "THROTTLE +"),
+                (pygame.K_r, "R", "RESET")),
+            "SPIN DART": (
+                (pygame.K_SPACE, "SPACE", "MOTOR"),
+                (pygame.K_g, "G", "SPIN JETS"),
+                (pygame.K_x, "X", "REVERSE"),
+                (pygame.K_m, "M", "MOTOR BEND"),
+                (pygame.K_b, "B", "ROLL BRAKE"),
+                (pygame.K_w, "W", "WIND"),
+                (pygame.K_p, "P", "FORCE TOOL"),
+                (pygame.K_r, "R", "RESET")),
+            "TVC STICK": (
+                (pygame.K_SPACE, "SPACE", "MOTOR"),
+                (pygame.K_f, "F", "AUTO / MANUAL"),
+                (pygame.K_i, "I", "PITCH +"),
+                (pygame.K_k, "K", "PITCH -"),
+                (pygame.K_j, "J", "YAW -"),
+                (pygame.K_l, "L", "YAW +"),
+                (pygame.K_t, "T", "AUTO TARGET"),
+                (pygame.K_y, "Y", "TVC LIMIT"),
+                (pygame.K_n, "N", "JAM ACTUATOR"),
+                (pygame.K_m, "M", "MOTOR BEND")),
+            "GYRO-GIMBAL": (
+                (pygame.K_SPACE, "SPACE", "MOTOR"),
+                (pygame.K_g, "G", "SPIN JETS"),
+                (pygame.K_f, "F", "AUTO / MANUAL"),
+                (pygame.K_i, "I", "PITCH +"),
+                (pygame.K_k, "K", "PITCH -"),
+                (pygame.K_j, "J", "YAW -"),
+                (pygame.K_l, "L", "YAW +"),
+                (pygame.K_y, "Y", "TVC LIMIT"),
+                (pygame.K_n, "N", "JAM ACTUATOR"),
+                (pygame.K_x, "X", "REVERSE SPIN")),
+            "FLIP BRAKE": (
+                (pygame.K_b, "B", "BRAKE PETALS"),
+                (pygame.K_v, "V", "NEXT ENTRY"),
+                (pygame.K_SPACE, "SPACE", "MOTOR"),
+                (pygame.K_p, "P", "FORCE TOOL"),
+                (pygame.K_w, "W", "WIND"),
+                (pygame.K_r, "R", "RESET")),
+            "RCS NEEDLE": (
+                (pygame.K_i, "I", "PITCH + JET"),
+                (pygame.K_k, "K", "PITCH - JET"),
+                (pygame.K_j, "J", "YAW + JET"),
+                (pygame.K_l, "L", "YAW - JET"),
+                (pygame.K_q, "Q", "ROLL + JET"),
+                (pygame.K_e, "E", "ROLL - JET"),
+                (pygame.K_v, "V", "NEXT TUMBLE"),
+                (pygame.K_r, "R", "RESET")),
+        }[article]
+
+        controls_y = 498
+        card(controls_y, 184)
+        text.draw_text(x + 12, controls_y + 10, "EXPERIMENT CONTROLS", ACCENT,
+                       SMALL_SIZE)
+        active_keys = set()
+        if body.engine_on:
+            active_keys.add(pygame.K_SPACE)
+        if body.spin_enabled:
+            active_keys.add(pygame.K_g)
+        if body.fcs_on:
+            active_keys.add(pygame.K_f)
+        if body.airbrake_deployed:
+            active_keys.add(pygame.K_b)
+        if body.gimbal_jammed:
+            active_keys.add(pygame.K_n)
+        if self.testmap_force_mode:
+            active_keys.add(pygame.K_p)
+        for index, (key, key_label, label) in enumerate(controls):
+            col, row = index % 2, index // 2
+            bx, by = x + 10 + col * 166, controls_y + 34 + row * 29
+            bw, bh = 156, 24
+            active = key in active_keys
+            text.draw_rect(bx, by, bw, bh,
+                           (*(ACCENT_DIM if active else BG0),
+                            0.42 if active else 0.58))
+            text.draw_lines([(bx, by), (bx + bw, by), (bx + bw, by + bh),
+                             (bx, by + bh), (bx, by)],
+                            (*(ACCENT if active else LINE_COL), 0.9), 1.0)
+            text.draw_rect(bx + 4, by + 4, 44, 16, (*ACCENT_DIM, 0.28))
+            text.draw_text(bx + 7, by + 5, key_label,
+                           ACCENT if active else MUTED, SMALL_SIZE)
+            text.draw_text(bx + 55, by + 5, label, TEXT_COL, SMALL_SIZE)
+            self._testmap_action_rects.append(
+                (key, (bx, by, bx + bw, by + bh)))
+
+        footer_y = min(696, h - 42)
+        text.draw_text(x, footer_y,
+                       "LEFT / RIGHT  EXPERIMENT       R  RESET",
+                       FAINT, SMALL_SIZE)
+        text.draw_text(x, footer_y + 18,
+                       "DRAG  ORBIT    WHEEL  ZOOM    TAB  HIDE UI",
+                       FAINT, SMALL_SIZE)
+        # The pull line: grabbed body point -> mouse, with the live force.
+        if self._testmap_grabbing and body.grab_point_body is not None:
+            p = self._testmap_project(body.grab_point_world())
+            if p is not None:
+                mx, my = self._last_mouse
+                text.draw_lines([(p[0], p[1]), (mx, my)],
+                                (*ACCENT, 1.0), 1.5)
+                text.draw_text((p[0] + mx) * 0.5 + 8, (p[1] + my) * 0.5,
+                               f"{body.grab_force_n:.0f} N", ACCENT,
+                               SMALL_SIZE)
+        self._testmap_overlay()
+
     # ------------------------------------------------------- cinematic tab
 
     def _cinema_meta(self, scene_dir: str) -> dict:
@@ -899,6 +1723,13 @@ class TestingLabState(GameState):
         if ev.type == pygame.KEYDOWN and ev.key == pygame.K_F7:
             self._set_lab_mode(
                 "cinematic" if self.lab_mode != "cinematic" else "assets")
+            return
+        if ev.type == pygame.KEYDOWN and ev.key == pygame.K_F8:
+            self._set_lab_mode(
+                "testmap" if self.lab_mode != "testmap" else "assets")
+            return
+        if self.lab_mode == "testmap":
+            self._testmap_event(ev)
             return
         if self.lab_mode == "cinematic":
             self._cinematic_lab_event(ev)
@@ -1044,6 +1875,10 @@ class TestingLabState(GameState):
         if not self.ui_hidden and ev.button == 1 \
                 and _inside(pos, self._tab_cinema_rect):
             self._set_lab_mode("cinematic")
+            return
+        if not self.ui_hidden and ev.button == 1 \
+                and _inside(pos, self._tab_testmap_rect):
+            self._set_lab_mode("testmap")
             return
         if not self.ui_hidden and ev.button == 1:
             if _inside(pos, self._category_prev_rect):
@@ -1219,7 +2054,15 @@ class TestingLabState(GameState):
             self.orbit_az = (self.orbit_az + dt * 0.32) % (2.0 * math.pi)
             self._apply_camera()
 
+        if self.lab_mode == "testmap" and self.testmap_body is not None:
+            # Follow first, then freeze the camera matrices for this frame.
+            # Updating the camera after renderer.begin mixed the old view with
+            # the new camera-relative positions and caused jumpy/partial frames
+            # while dragging or following a fast article.
+            self.target = self.testmap_body.pos.copy()
         self._apply_camera()
+        if self.lab_mode == "testmap":
+            self._testmap_update_grab()
         self._advance_weather(dt)
         w, h = self.window.size()
         px = min(w - 1, SIDEBAR_W + SCREEN_PAD * 2)
@@ -1242,6 +2085,19 @@ class TestingLabState(GameState):
         self.renderer.begin(self.camera, pw / max(ph, 1))
         self._bind_cloud_shadows()
         self.sky.draw(self.renderer)
+        if self.lab_mode == "testmap" and self.testmap_body is not None:
+            from sim.sixdof import quat_to_mat
+            body = self.testmap_body
+            if self.testmap_ground is not None:
+                self.renderer.draw_mesh(self.testmap_ground, np.zeros(3))
+            if self.testmap_pad is not None:
+                self.renderer.draw_mesh(self.testmap_pad, np.zeros(3))
+            mesh_key = ("FLIP BRAKE:OPEN" if body.d.name == "FLIP BRAKE"
+                        and body.airbrake_deployed else body.d.name)
+            mesh = self.testmap_meshes.get(mesh_key)
+            if mesh is not None:
+                self.renderer.draw_mesh(mesh, body.pos,
+                                        rot3x3=quat_to_mat(body.quat))
         if self.lab_mode == "assets" and self.model_mesh is not None:
             if self.chamber_mesh is not None and self.orbit_el > math.radians(-8):
                 self.renderer.draw_mesh(self.chamber_mesh, np.zeros(3))
@@ -1311,6 +2167,9 @@ class TestingLabState(GameState):
         if self.lab_mode == "cinematic":
             self._draw_cinematic_ui(w, h)
             return
+        if self.lab_mode == "testmap":
+            self._draw_testmap_ui(w, h)
+            return
         text = self.text
         panel_h = max(1, h - SCREEN_PAD * 2)
         self._sidebar_box = (SCREEN_PAD, SCREEN_PAD,
@@ -1320,17 +2179,21 @@ class TestingLabState(GameState):
         x = SCREEN_PAD + 16
         text.draw_text(x, 27, "TEST LAB // INTERNAL", ACCENT, SMALL_SIZE)
         text.draw_text(x, 49, "ASSET INSPECTOR", TEXT_COL, HEADER_SIZE)
-        self._tab_flight_rect = (x + 206, 24, x + 338, 48)
+        self._tab_flight_rect = (x + 206, 24, x + 338, 42)
         text.draw_lines(
-            [(x + 206, 24), (x + 338, 24), (x + 338, 48),
-             (x + 206, 48), (x + 206, 24)], (*ACCENT_DIM, 1.0), 1.0)
-        text.draw_text(x + 216, 29, "MISSILE LAB [F6]", MUTED, SMALL_SIZE)
-        self._tab_cinema_rect = (x + 206, 52, x + 338, 76)
+            [(x + 206, 24), (x + 338, 24), (x + 338, 42),
+             (x + 206, 42), (x + 206, 24)], (*ACCENT_DIM, 1.0), 1.0)
+        text.draw_text(x + 216, 27, "MISSILE LAB [F6]", MUTED, SMALL_SIZE)
+        self._tab_cinema_rect = (x + 206, 46, x + 338, 64)
         text.draw_lines(
-            [(x + 206, 52), (x + 338, 52), (x + 338, 76),
-             (x + 206, 76), (x + 206, 52)], (*ACCENT_DIM, 1.0), 1.0)
-        text.draw_text(x + 216, 57, "CINEMATIC [F7]", MUTED, SMALL_SIZE)
-
+            [(x + 206, 46), (x + 338, 46), (x + 338, 64),
+             (x + 206, 64), (x + 206, 46)], (*ACCENT_DIM, 1.0), 1.0)
+        text.draw_text(x + 216, 49, "CINEMATIC [F7]", MUTED, SMALL_SIZE)
+        self._tab_testmap_rect = (x + 206, 68, x + 338, 86)
+        text.draw_lines(
+            [(x + 206, 68), (x + 338, 68), (x + 338, 86),
+             (x + 206, 86), (x + 206, 68)], (*ACCENT_DIM, 1.0), 1.0)
+        text.draw_text(x + 216, 71, "TEST MAP [F8]", MUTED, SMALL_SIZE)
         y = 91
         self._category_prev_rect = (x, y, x + 32, y + 26)
         self._category_next_rect = (x + SIDEBAR_W - 64, y,

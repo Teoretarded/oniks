@@ -1,92 +1,126 @@
 # ONIKS
 
-A standalone missile-warfare game set in a to-scale 600 x 600 km world. You
-command a coastal Bastion battery — P-800 Oniks supersonic cruise missiles,
-an S-300 SAM battery, Pantsir point defense and more — against a naval
-strike group that fights back. The simulation runs a fixed-timestep (120 Hz)
-float64 physics core with camera-relative float32 OpenGL 3.3 rendering,
-logarithmic depth, atmospheric haze, ring-LOD ocean, and procedurally
-generated terrain, models and audio (sounds synthesize on first launch).
+A standalone missile-warfare game in a to-scale 600 × 600 km world — a
+coastal Bastion battery versus a naval strike group run by a sensor-honest
+AI commander. Fixed-timestep 120 Hz float64 physics core, camera-relative
+float32 OpenGL 3.3 renderer, and procedurally generated terrain, models and
+audio (there are no art assets on disk; everything bakes on first launch).
 
-## Quick start (playing the game)
+This README documents the **repository**: layout, filing system, regression
+testing, verification tooling, and the systems hidden inside it. AI
+contributors: `CLAUDE.md` is the session-start brief — read it first.
+Player-facing info lives in the game itself: **F1** shows the always-current
+controls table (generated from the action registry in `game/keybinds.py`).
 
-1. Install [Python 3.11+](https://www.python.org/downloads/) (tick
-   "Add python.exe to PATH" in the installer).
-2. Download this repo (green **Code** button → **Download ZIP**, unzip) or
-   `git clone` it.
-3. In the game folder:
+## Running
 
 ```
-pip install -r requirements.txt
+pip install -r requirements.txt      # pygame-ce, PyOpenGL, numpy — nothing else
+python main.py                       # or run_game.bat; Python 3.11+, OpenGL 3.3 GPU
 ```
 
-4. Double-click `run_game.bat` (or run `python main.py`).
+Modes in one line each: **SANDBOX** (all-seeing war toybox with a red-force
+director), **COMBAT** (fog-of-war battle with setup screen, victory/defeat,
+after-action report), **CAMPAIGN** (linked battles, carried-over ammo).
 
-Needs a GPU with OpenGL 3.3 (any reasonably modern PC). The first launch
-takes a few extra seconds while terrain, models and audio build.
+## The database (repository layout)
 
-## Game modes
-
-- **SANDBOX** — the war sandbox: the full order of battle on both sides
-  (destroyers, a carrier, submarines, fighters, AWACS, a jammer, amphibious
-  transports vs. your full armory) with an all-seeing map and no game-over.
-  Enemies are passive until you say otherwise: open the map (M) and press
-  **I** for the RED-FORCE DIRECTOR — order enemy ships/subs/jets to launch
-  at any point you click, or flip global AUTO-ENGAGE and fight the war.
-  Click any contact on the map and close it to **spectate** that thing
-  (arrow keys cycle targets, drag orbits, wheel zooms, C exits).
-- **COMBAT** — the fog-of-war battle: a four-page setup screen (world seed,
-  enemy fleet, your armory and defenses), a radar-gated sensor picture,
-  an enemy commander that hunts your radar down, victory/defeat, an
-  after-action report with grades, and a forensics debrief (J).
-- **CAMPAIGN** — linked battles with escalation and carried-over ammo.
-
-## Controls
-
-Default bindings, generated from the action registry (`game/keybinds.py`).
-Everything below is rebindable in SETTINGS (persisted to
-`%APPDATA%\ONIKS\settings.json`) except the reserved ESC and F1 — press
-**F1 in game for the always-current table**.
-
-| Key | Action |
+| Path | What lives there |
 |---|---|
-| **ENGAGEMENT** | |
-| SPACE | launch weapon |
-| TAB | cycle platform (Bastion / S-300 / drone / Buk / swarm) |
-| M | tactical map |
-| 1 / 2 | flight profile hi-lo / lo-lo |
-| X | clear waypoints (map open) |
-| R | radar emissions on/off (EMCON) |
-| V | S-300 round select (48N6 / 40N6) |
-| B | Bastion round select (Oniks / Zircon / ASBM / Kh-31P) |
-| F / Y | salvo fire / salvo mode (ripple, fan, time-on-target) |
-| U / K | sonobuoy drop (map) / ASW launch |
-| G / H | drone EW pod / swarm arrival mode |
-| I | red-force director (sandbox, map open) |
-| **SIMULATION** | |
-| O | battery status panel |
-| J | forensics / shot debrief |
-| T | auto time-warp |
-| F4 / F5 | map layout board-classic / launch-cinema PiP |
-| P / N | pause / frame step |
-| - / = | time scale (1-16x, locked to 1x during launch cinematics) |
-| **CAMERA** | |
-| C | camera mode (chase/orbit/target/launcher/free) |
-| [ / ] | camera subject prev / next |
-| LEFT / RIGHT | spectate cycle (sandbox) |
-| W A S D, E / Q | free cam (SHIFT fast, CTRL+SHIFT very fast) |
-| **SYSTEM** | |
-| F2 | screenshot to renders/ |
-| F3 | report bug (ledger mark + bundle to bug_reports/) |
-| F1 | controls overlay *(reserved)* |
-| ESC | menu / back *(reserved)* |
+| `main.py` | THE loop: real time → fixed 120 Hz sim steps (× `time_scale`), render once per frame |
+| `engine/` | GL primitives: window, shaders, lit-mesh renderer, particles, text, math3d, camera |
+| `world/` | Terrain/ocean/sky/clouds, world constants (`generation.py`), `CombatWorld` + `SandboxWorld` orchestrators, `CombatConfig` |
+| `sim/` | Pure-numpy, **GL-free** simulation — every weapon, sensor, ship, aircraft, sub, and the enemy commander |
+| `game/` | Game states, HUD/UI, cameras, tactical map, forensics, cinematic walk mode, audio |
+| `models/` | Procedural mesh builders, one file per unit family |
+| `tools/` | ~145 headless probes, visual/perf harnesses, replay, digests (see Testing) |
+| `tests/` | ~1400 GL-free pytest tests (no conftest.py; fixtures are local) |
+| `../Markdown/docs/` | Plans, specs, run logs, audits, research (see Filing system) |
+| `documentation and research/` | Per-session evidence folders `NN_topic/` |
+| `renders/` | Screenshot/video output from the visual harnesses |
+| `blackbox/` | Bit-exact battle ledgers, auto-recorded every battle |
+| `bug_reports/` | F3 in-battle repro bundles (report + ledger + commands + screenshot) |
+| `assets/`, `cache/`, `data/` | Baked cinematic scenes and generated caches — never hand-edit |
+| `sounds/` | Synthesized on first launch |
 
-Mouse: map — LMB target/select, RMB waypoint, wheel zoom, MMB/arrows pan;
-orbit & spectate cams — LMB/RMB drag rotates, wheel zooms; chase cam —
-wheel adjusts follow distance; free cam — RMB-drag mouse look.
+## The filing system
 
-## Development
+- `../Markdown/docs/superpowers/specs/` — signed design specs; `../Markdown/docs/plans/` — approved
+  build plans, many with **verbatim test contracts** (e.g.
+  `feature_expansion_review_2026-07-06.md`).
+- `../Markdown/docs/*_run_log_*.md` + `../Markdown/docs/combat_build_log.md` +
+  `../Markdown/docs/overnight_run_log.md` — measured evidence for every shipped feature:
+  what was built, what was probed, what numbers gated it.
+- `../Markdown/docs/reviews/` + `../Markdown/docs/combat_code_audit_2026-07-17.md` — adversarial
+  audits and their fix status.
+- `../Markdown/docs/research/` — normative real-world references feeding sim constants
+  (missile physics, radar bands, sea clutter, ICBM/MANPADS/S-300 data …).
+  Check here **before** re-researching anything.
+- `../Markdown/docs/research/handoff/` — a self-contained orientation bundle for fresh
+  sessions: `HANDOFF_README.md` (file map + non-negotiables), `ROADMAP.md`,
+  numbered feature specs, `CONTINUE_HERE.md` (shipped-vs-remaining ledger).
+- `../Markdown/docs/session_notes_*.md` — cross-session coordination: which files other
+  concurrent sessions own (**HANDS OFF** lists).
+- `documentation and research/` — each work session takes the next free
+  `NN_topic/` folder and leaves reference photos, renders, probe CSVs and a
+  `FINDINGS.md` (convention in its README).
+- Runtime settings persist to `%APPDATA%\ONIKS\settings.json`.
 
-Tests (~1400, GL-free): `python -m pytest -q -n auto`.
-Visual/perf gates live in `tools/` (screenshot_harness, perf_harness,
-shoot_sandbox_war, perf_sandbox_war). Design docs and run logs in `docs/`.
+## Regression testing
+
+- Full suite: `python -m pytest -q -n auto` — **always `-n auto`**
+  (pytest-xdist); serial takes ~22 min.
+- Only the tests your change touches:
+  `python -m tools.select_tests --run` (static import-graph selection;
+  falls back to the full suite when in doubt).
+- Combat smoke gate: `python tools/smoke_combat.py` (all-pass, exit 0).
+- **Locked contracts never weaken.** Same seed ⇒ byte-identical battles,
+  proven by `state_digest` hashes and the `tools/wf_*_digest.py` gates;
+  flagship duels and flight envelopes are pinned by dedicated tests; new
+  features default OFF in `CombatConfig` when they would change existing
+  battles.
+- Bit-exact replay: every battle ledgers to `blackbox/`; F3 in-battle
+  bundles a repro into `bug_reports/bug_NNN/`. Verify or inspect with
+  `python tools/replay_battle.py <ledger> [--to-tick N]` — hash mismatches
+  exit 1, `--to-tick` dumps the full world state at the flagged moment.
+
+## How things get tested beyond pytest
+
+- **Headless physics/AI probes** — `tools/probe_*.py`:
+  `probe_fc_transcript.py` dumps every flight-computer replan (candidate
+  corridors, costs, choice) as JSON and grades the flight; the
+  `probe_audit_*.py` family audits the enemy AI for truth-leaks, sensor by
+  sensor.
+- **Visual verification ("AI eyes")** — render, don't guess:
+  - `tools/screenshot_harness.py` — scripted scenes → `renders/*.png`.
+  - `tools/record_missile_chase.py [oniks|s300] [--cam hero|side|chase]` —
+    boots the real app hidden, fires through the real launch pipeline,
+    chase-cam frames + 1:1 `telemetry.json` (attitude, AoA, peak g, turn
+    rate, flight-computer commands per frame) + 8-frame annotated contact
+    strips + `chase.mp4`.
+  - `tools/shoot_*.py` — per-feature visual audits (missile models, model
+    orbits, battery layouts, hitcam, MANPADS, cinematic scenes, sandbox
+    war, UI reference …).
+  - `python -m tools.probe_cloud_suite` — the deterministic cloud
+    acceptance matrix (`../Markdown/docs/cloud_playtest_tooling.md`).
+- **Performance gates** — `tools/perf_harness.py`,
+  `tools/perf_sandbox_war.py`.
+- **Scripted playtests** — `tools/playtest_harness.py` and the
+  `pt_battle*.py` scenarios.
+
+## Hidden inside the database (you wouldn't normally see these)
+
+- **F3 on the main menu** → the hidden testing lab: true-scale asset
+  inspector, missile workbench batch runner (headless twin:
+  `tools/run_missile_workbench.py`), EFFECTS catalog, the CINEMATIC
+  tab — first-person walk mode on 1:1 LiDAR-baked real terrain
+  (Lauterbrunnen, Yosemite) with shoulder-fired MANPADS and full ICBM
+  launches (Sarmat / Minuteman III) — and the TEST MAP tab (F8): the
+  6-DOF rigid-body physics test map (`sim/sixdof.py`).
+- **F3 in battle** → bug reporter (ledger mark + repro bundle).
+- **I on the sandbox map** → RED-FORCE DIRECTOR: order any enemy ship, sub
+  or jet to launch at a clicked point, or flip global auto-engage.
+- **J in game** → forensics/shot debrief with fog-honest death attribution.
+- **Weather composer** (Settings → Graphics) — per-layer cloud recipe
+  editor driving the volumetric sky.
+- `game/blackbox.py` silently records every battle for bit-exact replay.

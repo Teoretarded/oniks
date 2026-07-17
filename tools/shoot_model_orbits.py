@@ -36,7 +36,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.environ.get(
     "ORBIT_OUT_DIR",
     os.path.join(
-        REPO_ROOT, "documentation and research",
+        REPO_ROOT, "..", "Markdown", "documentation and research",
         "02_vehicle_structure_models", "renders", "current",
     ),
 )

@@ -45,7 +45,7 @@ from sim.physics import cd_from_mach_scalar, mach_scalar
 
 DT = 1.0 / 120.0
 SAMPLE_S = 0.1
-OUT_DIR = os.path.join("documentation and research",
+OUT_DIR = os.path.join("..", "Markdown", "documentation and research",
                        "01_missile_physics_and_models")
 
 

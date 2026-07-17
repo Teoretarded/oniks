@@ -13,6 +13,7 @@ import numpy as np
 # --- Physical constants (tuning lives here, never inline in formulas) -------
 GRAVITY = 9.81                # m/s^2, standard gravity
 RHO0 = 1.225                  # kg/m^3, sea-level air density (ISA)
+P0 = 101_325.0                # Pa, sea-level ambient pressure (ISA)
 DENSITY_SCALE_HEIGHT = 8500.0  # m, exponential atmosphere scale height
 
 # Speed-of-sound profile: linear lapse in the troposphere, constant above.
@@ -32,6 +33,22 @@ CD_VALUES = np.array([0.30, 0.30, 0.85, 0.32, 0.30])
 def air_density(alt_m):
     """Air density (kg/m^3) at altitude via exponential atmosphere."""
     return RHO0 * np.exp(-np.maximum(alt_m, 0.0) / DENSITY_SCALE_HEIGHT)
+
+
+def air_pressure(alt_m):
+    """Ambient pressure (Pa): same isothermal scale height as density, so
+    p/p0 == rho/rho0 and nozzle pressure thrust stays consistent with drag."""
+    return P0 * np.exp(-np.maximum(alt_m, 0.0) / DENSITY_SCALE_HEIGHT)
+
+
+def air_pressure_scalar(alt_m: float) -> float:
+    """Plain-float air_pressure (per-step 6-DOF fast path)."""
+    return P0 * math.exp(-max(alt_m, 0.0) / DENSITY_SCALE_HEIGHT)
+
+
+def air_density_scalar(alt_m: float) -> float:
+    """Plain-float air_density (per-step 6-DOF fast path)."""
+    return RHO0 * math.exp(-max(alt_m, 0.0) / DENSITY_SCALE_HEIGHT)
 
 
 def speed_of_sound(alt_m):

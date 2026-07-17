@@ -80,6 +80,86 @@ def _install_row(state: TestingLabState, asset_id: str):
     return ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
 
 
+def test_testmap_disturbance_tool_requires_p_and_disarms_cleanly():
+    from sim.sixdof import make_test_hopper
+
+    state = TestingLabState(_App())
+    state.lab_mode = "testmap"
+    state.testmap_body = make_test_hopper()
+    assert not state.testmap_force_mode
+
+    state._testmap_event(_key(pygame.K_p))
+    assert state.testmap_force_mode
+    state.testmap_body.set_grab([0.0, 0.0, 1.0], [2.0, 2.0, 0.0])
+    state._testmap_grabbing = True
+    state._testmap_pick_z = 1.0
+
+    state._testmap_event(_key(pygame.K_p))
+    assert not state.testmap_force_mode
+    assert not state._testmap_grabbing
+    assert state._testmap_pick_z is None
+    assert state.testmap_body.grab_point_body is None
+
+
+def test_testmap_roster_focuses_on_hands_on_physics_experiments():
+    roster = TestingLabState.TESTMAP_ROSTER
+    assert roster == ("TEST HOPPER", "SPIN DART", "TVC STICK",
+                      "GYRO-GIMBAL", "FLIP BRAKE", "RCS NEEDLE")
+    assert not set(("TRACTOR", "RETURNER", "PULSE LANDER")) & set(roster)
+
+
+def test_spin_and_tvc_new_controls_mutate_live_body_without_reset():
+    from sim.sixdof import make_spin_dart, make_tvc_stick
+
+    state = TestingLabState(_App())
+    state.lab_mode = "testmap"
+    state.testmap_article = state.TESTMAP_ROSTER.index("SPIN DART")
+    state.testmap_body = make_spin_dart()
+    spin_body = state.testmap_body
+    state._testmap_event(_key(pygame.K_g))
+    assert state.testmap_body is spin_body
+    assert not spin_body.spin_enabled
+    state._testmap_event(_key(pygame.K_x))
+    assert spin_body.spin_direction < 0.0
+    state._testmap_event(_key(pygame.K_b))
+    assert spin_body.airbrake_deployed
+
+    state.testmap_article = state.TESTMAP_ROSTER.index("TVC STICK")
+    state.testmap_body = make_tvc_stick()
+    tvc_body = state.testmap_body
+    state._testmap_event(_key(pygame.K_t))
+    state._testmap_event(_key(pygame.K_f))
+    state._testmap_event(_key(pygame.K_i))
+    state._testmap_event(_key(pygame.K_j))
+    state._testmap_event(_key(pygame.K_y))
+    state._testmap_event(_key(pygame.K_n))
+    assert state.testmap_body is tvc_body
+    assert tvc_body.fcs_target_mode == "LEAN 12 DEG"
+    assert not tvc_body.fcs_on
+    assert tvc_body.gimbal[0] > 0.0
+    assert tvc_body.gimbal[1] < 0.0
+    assert tvc_body.gimbal_authority == 1.75
+    assert tvc_body.gimbal_jammed
+
+
+def test_rcs_needle_has_manual_pitch_yaw_and_roll_pulses():
+    from sim.sixdof import make_rcs_needle
+
+    state = TestingLabState(_App())
+    state.lab_mode = "testmap"
+    state.testmap_article = state.TESTMAP_ROSTER.index("RCS NEEDLE")
+    state.testmap_body = make_rcs_needle()
+    state.testmap_body.rcs_hold_on = False
+
+    for key, expected in ((pygame.K_i, (1.0, 0.0, 0.0)),
+                          (pygame.K_l, (0.0, -1.0, 0.0)),
+                          (pygame.K_q, (0.0, 0.0, 1.0)),
+                          (pygame.K_e, (0.0, 0.0, -1.0))):
+        state._testmap_event(_key(key))
+        assert tuple(state.testmap_body.rcs_pulse) == expected
+        assert state.testmap_body.rcs_pulse_left > 0.0
+
+
 def test_horizontal_preview_drag_tracks_mouse_direction():
     state = TestingLabState(_App())
     state._preview_box = (SIDEBAR_W + 40, 20, SIDEBAR_W + 700, 600)
