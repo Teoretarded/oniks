@@ -29,3 +29,28 @@
 
 Implication for the combat session: combat-side files are free to edit;
 engine/particles.py is shared — additive changes only.
+
+## 4. "User feedback round" session (evening 2026-07-17) — committed
+Worked the user's 5-item playtest feedback. Files touched (all committed
+on feat/combat-expansion, a94d2e2..d28703b):
+- world/cinematic_scene.py — halo_axes (crater-grid off-by-one crash
+  fix), CUT-TO-TARGET craters (5-tuple with gz_h; crater_delta_grid now
+  takes a `baked` grid + optional per-ring `tuck`), nuclear_crater_dims
+  (fireball-anchored: nukes decapitate summits), punch_core_hole.
+- world/cinematic_terrain.py — ring-1 punched out of the core (the
+  "overlapping mountains"), per-ring crater tuck, baked-DSM crater path.
+- world/cinematic_trees.py — fell_mask + apply_craters (blast felling).
+- world/sky.py — starfield + u_space_k space blend (dome now draws in
+  orbit); world/earth_globe.py — wide terminator + dusk band.
+- game/cinematic_missiles.py + game/cinematic_icbm.py — REAL flight
+  physics everywhere (drag, mass, slew-limited attitude, drag-biased
+  ICBM targeting); ICBM launch fx upgraded (silo apron blast trio,
+  double vortex ring, Trident steam flash, Sarmat cutoff vent, shock
+  diamonds).  NuclearBurst untouched.
+- New tests: test_cinematic_flight_physics.py, test_cinematic_surround_
+  punch.py, test_cinematic_tree_fell.py (+ crater additions).  Probes:
+  tools/probe_icbm_physics.py, probe_icbm_bias_debug.py.
+Open nits logged: mushroom-cloud scale at 300 kt reads small; crater rim
+spikes at chunk edges; scorch texture lands a beat after impact; long-
+range (3500 km) landing residual ~94 m; per-variant S-300 meshes still
+share build_s300_missile in cinematic mode.
