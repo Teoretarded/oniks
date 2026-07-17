@@ -130,6 +130,12 @@ LAUNCHERS = (("s300", "S-300 PAD", "THE COLD-LAUNCH CLASSIC"),) + tuple(
 # Coast time-warp ladder while an ICBM flies ('.' cycles).
 WARPS = (1.0, 8.0, 30.0)
 
+# M orbit view: pure camera play onto a real Earth (world/earth_globe).
+GLOBE_ASCEND_S = 5.0         # ride up to orbit (and back down)
+GLOBE_ALT0 = 500_000.0       # LEO entry altitude (user: "500 km out")
+GLOBE_ALT_MIN = 80_000.0
+GLOBE_ALT_MAX = 20_000_000.0
+
 
 class CinematicState(GameState):
     """Walkable 1:1 real-world location viewer (see module docstring)."""
@@ -192,6 +198,19 @@ class CinematicState(GameState):
         self.icbm_target = None      # np (3,) designated ground point
         self.icbm_targets: list = []  # MIRV: every live mark, in order
         self._lake_site = None       # np (3,) open water (Trident)
+
+        # M orbit view (world/earth_globe): camera-play state machine.
+        self.globe = None            # EarthGlobe once built (GL)
+        self.globe_mode = "off"      # off / ascend / orbit / descend
+        self.globe_t = 0.0
+        self.globe_lat = 0.0         # camera nadir on the planet
+        self.globe_lon = 0.0
+        self.globe_alt = GLOBE_ALT0  # height above sea level (m)
+        self._g_anchor = (0.0, 0.0)  # the player's lat/lon at M-press
+        self._g_eye0 = None          # walker/freecam pose at M-press
+        self._g_fwd0 = None
+        self._g_desc0 = None         # (lat, lon, alt) at descend start
+        self._space_k = 0.0          # 0 = in the air, 1 = in space
         self.follow = False          # C: chase cam on the newest round
         self.warp_i = 0              # WARPS index (ICBM flight only)
         self._silo_site = None       # np (3,) surveyed compound center
@@ -314,7 +333,7 @@ class CinematicState(GameState):
             self._shadow_futs = {}
         for res in (self.terrain, self.trees, self.sky, self.particles,
                     self.tel_mesh, self.missile_mesh, self.overlay,
-                    self.clouds, self.weapons):
+                    self.clouds, self.weapons, self.globe):
             if res is None:
                 continue
             fn = getattr(res, "dispose", None) or getattr(res, "delete",
@@ -473,7 +492,9 @@ class CinematicState(GameState):
         if self.weapons.handle_event(ev, self):
             return
         if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
-            if self.ui_open:
+            if self.globe_mode in ("ascend", "orbit"):
+                self._globe_return()
+            elif self.ui_open:
                 self.ui_open = False
             elif self.zoom_i > 0:
                 self.zoom_i = 0
@@ -510,6 +531,8 @@ class CinematicState(GameState):
             elif ev.key == pygame.K_c:
                 self.follow = not self.follow
                 self._say("CHASE CAM" if self.follow else "CHASE CAM OFF")
+            elif ev.key == pygame.K_m:
+                self._toggle_globe()
             elif ev.key == pygame.K_PERIOD:
                 if any(isinstance(m, (IcbmLaunch, GuidedLaunch))
                        and not m.done for m in self.launches):
@@ -519,9 +542,26 @@ class CinematicState(GameState):
                     self._say("TIME WARP NEEDS A BIRD IN FLIGHT")
         elif ev.type == pygame.MOUSEMOTION:
             rx, ry = getattr(ev, "rel", (0, 0))
+            if self.globe_mode == "orbit":
+                # Drag scrubs the planet under the camera; pan rate
+                # scales with altitude so it always feels 1:1.
+                deg = min(max(0.055 * self.globe_alt / 1.0e6, 0.004),
+                          0.6)
+                self.globe_lon += rx * deg
+                self.globe_lat = float(np.clip(
+                    self.globe_lat - ry * deg, -85.0, 85.0))
+                return
+            if self.globe_mode != "off":
+                return                     # riding the elevator: no look
             sens = MOUSE_SENS * (self._fov() / BASE_FOV)
             self.walker.look(rx * sens, -ry * sens)
         elif ev.type == pygame.MOUSEWHEEL:
+            if self.globe_mode == "orbit":
+                self.globe_alt = float(np.clip(
+                    self.globe_alt * (1.3 ** -ev.y),
+                    GLOBE_ALT_MIN, GLOBE_ALT_MAX))
+                self._say(f"ALT {self.globe_alt / 1000.0:.0f} KM")
+                return
             if self.freecam:
                 self.fc_speed = float(np.clip(
                     self.fc_speed * (1.25 ** ev.y), 4.0, 1200.0))
@@ -535,6 +575,105 @@ class CinematicState(GameState):
         elif (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1
               and self.freecam):
             self._teleport_to_view()
+
+    # --------------------------------------------------------- orbit view
+
+    def _toggle_globe(self) -> None:
+        """M: ride the camera to LEO over your own position (and back).
+        Not a map — the same world from a different distance."""
+        if self.globe_mode in ("ascend", "orbit"):
+            self._globe_return()
+            return
+        if self.globe_mode == "descend":
+            return                       # already riding down
+        if self.terrain is None:
+            return                       # headless / not entered yet
+        if self.globe is None:
+            try:
+                from world.earth_globe import EarthGlobe
+                self.globe = EarthGlobe(self.scene)
+            except Exception as exc:     # noqa: BLE001 — data missing
+                self._say("NO EARTH DATA - RUN fetch_cinematic_earth")
+                print(f"[cinematic] globe unavailable: {exc}")
+                return
+        from world.earth_globe import local_to_latlon
+        eye = np.asarray(self._eye(), dtype=np.float64)
+        anchor = local_to_latlon(float(eye[0]), float(eye[2]),
+                                 self.globe.lat0, self.globe.lon0)
+        self._g_anchor = anchor
+        self.globe_lat, self.globe_lon = anchor
+        self.globe_alt = GLOBE_ALT0
+        self._g_eye0 = eye.copy()
+        yaw, pitch = self.walker.yaw, self.walker.pitch
+        cp = math.cos(pitch)
+        self._g_fwd0 = np.array([math.sin(yaw) * cp, math.sin(pitch),
+                                 math.cos(yaw) * cp])
+        self.globe_t = 0.0
+        self.globe_mode = "ascend"
+        self.zoom_i = 0
+        self._say("ORBIT VIEW - DRAG PANS   WHEEL ALT   "
+                  "T MARKS CENTER   M RETURNS")
+
+    def _globe_return(self) -> None:
+        self._g_desc0 = (self.globe_lat, self.globe_lon, self.globe_alt)
+        self.globe_t = 0.0
+        self.globe_mode = "descend"
+        self._say("RETURNING")
+
+    def _globe_pose(self, dt_real: float):
+        """Advance the orbit state machine; (eye, forward, up) for the
+        camera this frame."""
+        from world.earth_globe import EARTH_R, geo_unit, geo_frame
+        g = self.globe
+        frame = geo_frame(g.lat0, g.lon0)
+        center = np.array([0.0, g.center_y, 0.0])
+
+        def pose_at(lat, lon, alt):
+            unit = frame @ geo_unit(lat, lon)
+            north = frame @ np.array(
+                [-math.sin(math.radians(lat)) * math.cos(math.radians(lon)),
+                 math.cos(math.radians(lat)),
+                 -math.sin(math.radians(lat)) * math.sin(math.radians(lon))])
+            eye = center + unit * (EARTH_R + alt)
+            return eye, -unit, north
+
+        self.globe_t += max(dt_real, 0.0)
+        a0 = float(self._g_eye0[1]) + self.scene.origin_alt
+        a0 = max(a0, 50.0)
+        if self.globe_mode == "ascend":
+            f = min(self.globe_t / GLOBE_ASCEND_S, 1.0)
+            f = f * f * (3.0 - 2.0 * f)
+            alt = a0 * (GLOBE_ALT0 / a0) ** f
+            eye_n, fwd_n, up_n = pose_at(*self._g_anchor, alt)
+            # First rise, then tip over: view blends late (f^2).
+            b = f * f
+            fwd = self._g_fwd0 * (1.0 - b) + fwd_n * b
+            up = np.array([0.0, 1.0, 0.0]) * (1.0 - b) + up_n * b
+            eye0 = self._g_eye0 + np.array([0.0, alt - a0, 0.0])
+            eye = eye0 * (1.0 - f) + eye_n * f
+            if self.globe_t >= GLOBE_ASCEND_S:
+                self.globe_mode = "orbit"
+            return eye, fwd, up
+        if self.globe_mode == "descend":
+            f = min(self.globe_t / GLOBE_ASCEND_S, 1.0)
+            f = f * f * (3.0 - 2.0 * f)
+            lat0, lon0, alt0 = self._g_desc0
+            lat = lat0 + (self._g_anchor[0] - lat0) * f
+            lon = lon0 + (self._g_anchor[1] - lon0) * f
+            alt = alt0 * (a0 / alt0) ** f
+            eye_n, fwd_n, up_n = pose_at(lat, lon, alt)
+            b = (1.0 - f) ** 2
+            fwd = self._g_fwd0 * (1.0 - b) + fwd_n * b
+            up = np.array([0.0, 1.0, 0.0]) * (1.0 - b) + up_n * b
+            eye0 = self._g_eye0 + np.array([0.0, alt - a0, 0.0])
+            eye = eye0 * f + eye_n * (1.0 - f)
+            if self.globe_t >= GLOBE_ASCEND_S:
+                self.globe_mode = "off"
+                self._apply_mood()       # restore haze/sky exactly
+            return eye, fwd, up
+        eye, fwd, up = pose_at(self.globe_lat, self.globe_lon,
+                               self.globe_alt)
+        return eye, fwd, up
 
     def _toggle_freecam(self) -> None:
         self.freecam = not self.freecam
@@ -616,14 +755,32 @@ class CinematicState(GameState):
         """T: mark the ground point under the view ray.  In chase cam
         the WALKER's view is stale — the mark must follow the ray the
         player actually sees, i.e. the camera's (user report: rounds
-        'not going where I mark')."""
-        if self.follow and self.launch is not None:
-            eye = np.array(self.camera.eye, dtype=np.float64)
-            direction = np.array(self.camera.forward, dtype=np.float64)
+        'not going where I mark').  From ORBIT the reticle (screen
+        center = the camera nadir) is the mark."""
+        if self.globe_mode == "orbit" and self.globe is not None:
+            from world.earth_globe import latlon_to_local
+            lx, lz = latlon_to_local(self.globe_lat, self.globe_lon,
+                                     self.globe.lat0, self.globe.lon0)
+            sc = self.scene
+            if not (sc.ext_x0 <= lx <= sc.ext_x1
+                    and sc.ext_z0 <= lz <= sc.ext_z1):
+                d_km = math.hypot(lx, lz) / 1000.0
+                self._say(f"OUTSIDE THE BAKED WORLD - {d_km:.0f} KM OUT")
+                return
+            g = sc.ground_h(lx, lz)
+            if not np.isfinite(g):
+                self._say("NO TERRAIN DATA UNDER THE RETICLE")
+                return
+            hit = np.array([lx, g, lz], dtype=np.float64)
         else:
-            eye = np.array(self._eye(), dtype=np.float64)
-            direction = None
-        hit = self._view_ground_hit(eye, direction)
+            if self.follow and self.launch is not None:
+                eye = np.array(self.camera.eye, dtype=np.float64)
+                direction = np.array(self.camera.forward,
+                                     dtype=np.float64)
+            else:
+                eye = np.array(self._eye(), dtype=np.float64)
+                direction = None
+            hit = self._view_ground_hit(eye, direction)
         if hit is None:
             self._say("NO GROUND UNDER THE MARK")
             return
@@ -748,7 +905,8 @@ class CinematicState(GameState):
 
         fwd = strafe = 0.0
         sprint = False
-        if pygame.display.get_init() and not self.ui_open:
+        if (pygame.display.get_init() and not self.ui_open
+                and self.globe_mode == "off"):
             keys = pygame.key.get_pressed()
             fwd = (1.0 if keys[pygame.K_w] else 0.0) - \
                   (1.0 if keys[pygame.K_s] else 0.0)
@@ -966,7 +1124,8 @@ class CinematicState(GameState):
             [math.sin(yaw) * cp, math.sin(pitch), math.cos(yaw) * cp]))
         # C: chase cam — ride just behind/beside the newest round and
         # WATCH it fly (smoothed so staging kicks don't snap the view).
-        if self.follow and self.launch is not None and not self.launch.done:
+        if (self.follow and self.launch is not None
+                and not self.launch.done and self.globe_mode == "off"):
             m = self.launch
             spec_len = getattr(getattr(m, "spec", None), "length_m", 8.0)
             dist = max(60.0, spec_len * 7.0)
@@ -992,6 +1151,30 @@ class CinematicState(GameState):
         else:
             self._chase_eye = None
 
+        # M orbit view: the camera rides to LEO and back — the SAME
+        # world pass keeps rendering (the sphere hides under the Alps
+        # at walking height; from up high the rings sit on the planet).
+        if self.globe_mode != "off" and self.globe is not None:
+            g_eye, g_fwd, g_up = self._globe_pose(dt_real)
+            self.camera.fov_y = math.radians(BASE_FOV)
+            self.camera.eye = g_eye
+            self.camera.set_orientation(g_fwd, g_up)
+            eye = g_eye
+        # Sky -> space blend with camera altitude (ASL).
+        mood = MOODS[self.mood_i]
+        if self.globe_mode != "off":
+            alt_asl = float(self.camera.eye[1]) + self.scene.origin_alt
+            k = float(np.clip((alt_asl - 12_000.0) / 60_000.0, 0.0, 1.0))
+            self._space_k = k
+            r = self.app.renderer
+            space = (0.004, 0.006, 0.012)
+            r.haze_color = tuple(
+                mc * (1.0 - k) + sc * k
+                for mc, sc in zip(mood.haze_color, space))
+            r.haze_density = mood.haze_density * (1.0 - k) + 1e-9 * k
+        else:
+            self._space_k = 0.0
+
         self.terrain.update(eye)
         self.app.renderer.alt_offset = self.scene.origin_alt
         self.app.renderer.begin(self.camera, w / max(h, 1))
@@ -1002,7 +1185,10 @@ class CinematicState(GameState):
         else:
             self.app.renderer.lit.use()
             self.app.renderer.lit.set_float("u_cloud_amt", 0.0)
-        self.sky.draw(self.app.renderer)
+        if self._space_k < 0.55:
+            self.sky.draw(self.app.renderer)
+        if self.globe_mode != "off" and self.globe is not None:
+            self.globe.draw(self.app.renderer, self.camera)
         self.terrain.draw(self.app.renderer, self.camera)
         self.trees.draw(self.app.renderer, self.camera, self.t)
 
@@ -1025,7 +1211,7 @@ class CinematicState(GameState):
                 continue
             self.app.renderer.draw_mesh(self.missile_mesh, m.pos, rot)
         self.weapons.draw_world(self)
-        if self.clouds is not None:
+        if self.clouds is not None and self._space_k < 0.5:
             cloud_cam = self._cloud_camera()
             if hasattr(self.clouds, "using_v2"):
                 self.clouds.draw(self.app.renderer, cloud_cam,
@@ -1176,18 +1362,33 @@ class CinematicState(GameState):
         if self.t > 6.0 and hint_fade > 0.0:
             hint = ("WASD WALK   WHEEL BINOCULARS   I SPOTTER   F FREECAM"
                     "   G DIRECTOR   F1 WEAPONS   K ROUND   L LAUNCH"
-                    "   ESC EXIT")
+                    "   M ORBIT   ESC EXIT")
             hw = text.text_width(hint, SMALL_SIZE)
             text.draw_text((w - hw) * 0.5, h - 56, hint,
                            (*UI_DIM, hint_fade), SMALL_SIZE)
             drew = True
-        if self.freecam:
-            # Center marker: a dot + four ticks (the teleport aim point).
+        if self.freecam or self.globe_mode == "orbit":
+            # Center marker: a dot + four ticks (teleport / orbit aim).
             cx, cy = w // 2, h // 2
             text.draw_rect(cx - 2, cy - 2, 4, 4, (*UI_ACC, 1.0))
             for dx, dy, rw, rh in ((-14, -1, 8, 2), (7, -1, 8, 2),
                                    (-1, -14, 2, 8), (-1, 7, 2, 8)):
                 text.draw_rect(cx + dx, cy + dy, rw, rh, (*UI_ACC, 0.85))
+            drew = True
+        if self.globe_mode == "orbit":
+            text.draw_text(28, h - 56,
+                           f"ORBIT {self.globe_alt / 1000.0:6.0f} KM   "
+                           f"{self.globe_lat:6.2f}N {self.globe_lon:6.2f}E",
+                           (*UI_ACC, 0.9), SMALL_SIZE)
+            text.draw_text(28, h - 30,
+                           "DRAG PANS   WHEEL ALT   T MARKS CENTER   "
+                           "L LAUNCHES   M RETURNS",
+                           (*UI_DIM, 0.85), SMALL_SIZE)
+            if self.globe is not None:
+                cred = self.globe.attribution
+                cw = text.text_width(cred, SMALL_SIZE)
+                text.draw_text(w - cw - 24, h - 30, cred,
+                               (*UI_DIM, 0.6), SMALL_SIZE)
             drew = True
         if self._toast_left > 0.0:
             a = min(1.0, self._toast_left / 0.4)

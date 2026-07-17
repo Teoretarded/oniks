@@ -94,7 +94,10 @@ HAZE_DENSITY = 2.5e-5
 HAZE_COLOR = (0.62, 0.70, 0.80)
 SUN_HAZE_COLOR = (0.95, 0.86, 0.72)
 
-FAR = 900_000.0
+FAR = 30_000_000.0     # the M orbit view renders the whole planet from
+                       # up to 20,000 km out; log depth loses only ~26%
+                       # resolution vs the old 900 km ceiling (measured:
+                       # the globe vanished beyond it, 2026-07-17)
 MAX_DRAW_DIST = 700_000.0
 
 
