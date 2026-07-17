@@ -308,7 +308,10 @@ class IcbmLaunch:
             / self.spec.weave_period_s))
         ratio = min(max(nvg / cap, 0.0), 1.0)
         theta = math.acos(ratio)
-        return e * math.cos(theta) + n * (math.sin(theta) * sgn)
+        d = e * math.cos(theta) + n * (math.sin(theta) * sgn)
+        # Unit thrust always: mid-flip |sgn|<1 shrank the vector to ~0.2
+        # — a solid motor cannot throttle (review design note).
+        return d / max(float(np.linalg.norm(d)), 1e-9)
 
     def _slew(self, want: np.ndarray, dt: float) -> None:
         """Rate-limit the attitude toward the commanded direction."""
@@ -423,6 +426,7 @@ class IcbmLaunch:
                     if spec.cutoff_event:
                         events.append(("cutoff", self.pos.copy()))
 
+        prev = self.pos.copy()
         self.vel[1] -= GRAVITY * dt
         self.pos += self.vel * dt
         self.apex_m = max(self.apex_m, float(self.pos[1]))
@@ -443,6 +447,13 @@ class IcbmLaunch:
             g = float(self.ground_h(float(self.pos[0]),
                                     float(self.pos[2])))
             if self.pos[1] <= g:
+                # Sub-tick backtrack: at Mach-class descent one tick
+                # overshoots the surface by |vel|*dt (review note — the
+                # probe's impact error was 2-4x inflated by this).
+                denom = float(prev[1] - self.pos[1])
+                f = min(max((prev[1] - g) / denom, 0.0), 1.0) \
+                    if denom > 1e-9 else 1.0
+                self.pos = prev + (self.pos - prev) * f
                 self.pos[1] = g
                 events.append(("impact", self.pos.copy()))
                 self.done = True

@@ -277,14 +277,15 @@ def _bake_surround(scene, man, out_dir, origin_e, origin_n, origin_alt,
             n_cells = chunk_km * 1000 // 32
             gj0 = cj * chunk_km * px_km
             gi0 = ci * chunk_km * px_km
+            # Explicit clipped indices: a clamped slice START shifted the
+            # west chunk column one cell east of its texture (32 m; found
+            # by the 2026-07-17 expansion review, same bug as ring2).
+            cols = np.clip(gi0 + (np.arange(n_cells + 3) - 1) * step_px,
+                           0, dem.shape[1] - 1)
             grid = np.empty((n_cells + 3, n_cells + 3), np.float32)
             for jj in range(n_cells + 3):
                 sj = min(max(gj0 + (jj - 1) * step_px, 0), dem.shape[0] - 1)
-                row = dem[sj, max(gi0 - step_px, 0):
-                          gi0 + (n_cells + 2) * step_px:step_px]
-                row = np.pad(row, (0, max(0, n_cells + 3 - len(row))),
-                             mode="edge")
-                grid[jj] = row[:n_cells + 3]
+                grid[jj] = dem[sj, cols]
             base = f"surround_{ci}_{cj}"
             tex = Image.fromarray(
                 np.flipud(rgb[gj0:gj0 + chunk_km * px_km,

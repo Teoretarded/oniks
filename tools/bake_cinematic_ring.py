@@ -77,10 +77,32 @@ def _finer_field(chunks: list, out_dir: str):
     return (field, cell, x0, z0, x1, z1)
 
 
+def _min_filter(field: np.ndarray, rad: int) -> np.ndarray:
+    """Dense (2*rad+1)-window minimum via shifted fmin (NaN-transparent)."""
+    out = field.copy()
+    n0, n1 = field.shape
+    for dj in range(-rad, rad + 1):
+        j0, j1 = max(dj, 0), min(n0 + dj, n0)
+        s0, s1 = max(-dj, 0), min(n0 - dj, n0)
+        for di in range(-rad, rad + 1):
+            i0, i1 = max(di, 0), min(n1 + di, n1)
+            t0, t1 = max(-di, 0), min(n1 - di, n1)
+            np.fmin(out[s0:s1, t0:t1], field[j0:j1, i0:i1],
+                    out=out[s0:s1, t0:t1])
+    return out
+
+
 def _clamp_under(grid: np.ndarray, xs: np.ndarray, zs: np.ndarray,
-                 finer, tuck: float) -> np.ndarray:
-    """Force every cell that lies inside the finer field's rect to sit
-    at least ``tuck`` below the finer surface (nearest-sample)."""
+                 finer, tuck: float, coarse_cell: float,
+                 filtered: np.ndarray) -> np.ndarray:
+    """Force every cell inside the finer field's rect UNDER the finer
+    surface.  ``filtered`` is the finer field min-filtered at radius
+    ceil(coarse_cell/finer_cell) — a 3x3 window was provably too small
+    for ring3 (second-session review: 103.6 m bleed over a couloir
+    notch at 250 m cells vs a 32 m field).  The tuck FEATHERS to zero
+    over the outermost 2 coarse cells so the physics hand-off at the
+    rect boundary is a slope, not an 18-50 m trench the walker falls
+    into."""
     field, cell, fx0, fz0, fx1, fz1 = finer
     inside = ((xs[None, :] >= fx0) & (xs[None, :] <= fx1)
               & (zs[:, None] >= fz0) & (zs[:, None] <= fz1))
@@ -90,33 +112,29 @@ def _clamp_under(grid: np.ndarray, xs: np.ndarray, zs: np.ndarray,
                  0, field.shape[1] - 1)
     jj = np.clip(np.round((zs - fz0) / cell).astype(int),
                  0, field.shape[0] - 1)
-    # MIN over a 3x3 finer-field window: a coarse cell interpolating
-    # between clamped posts can still bulge ABOVE the finer surface
-    # mid-cell on knife ridges (user report: uncolored blobs all over
-    # the massif faces).  Clamping to the local minimum kills that.
-    lim = None
-    for dj in (-1, 0, 1):
-        j2 = np.clip(jj + dj, 0, field.shape[0] - 1)
-        for di in (-1, 0, 1):
-            i2 = np.clip(ii + di, 0, field.shape[1] - 1)
-            v = field[j2[:, None], i2[None, :]]
-            lim = v if lim is None else np.fmin(lim, v)
-    lim = lim - tuck
+    lim = filtered[jj[:, None], ii[None, :]]
+    edge = np.minimum(np.minimum(xs[None, :] - fx0, fx1 - xs[None, :]),
+                      np.minimum(zs[:, None] - fz0, fz1 - zs[:, None]))
+    w = np.clip(edge / (2.0 * coarse_cell), 0.0, 1.0)
+    lim = lim - tuck * w
     ok = inside & np.isfinite(lim)
     out = np.where(ok, np.minimum(grid, lim), grid)
-    return np.where(inside & ~np.isfinite(lim), grid - tuck, out)
+    return np.where(inside & ~np.isfinite(lim), grid - tuck * w, out)
 
 
 def _grid_from_dem(dem: np.ndarray, gj0: int, gi0: int, n_cells: int,
                    step: int) -> np.ndarray:
     """(n+3, n+3) height grid sampled every ``step`` px with edge pad —
     mirrors _bake_surround's layout (1-halo + closing row)."""
+    # Explicit clipped index array — a clamped SLICE START silently
+    # shifted every west-column chunk one cell east of its texture
+    # (second-session review, bug 2).
+    cols = np.clip(gi0 + (np.arange(n_cells + 3) - 1) * step,
+                   0, dem.shape[1] - 1)
     grid = np.empty((n_cells + 3, n_cells + 3), np.float32)
     for jj in range(n_cells + 3):
         sj = min(max(gj0 + (jj - 1) * step, 0), dem.shape[0] - 1)
-        row = dem[sj, max(gi0 - step, 0):gi0 + (n_cells + 2) * step:step]
-        row = np.pad(row, (0, max(0, n_cells + 3 - len(row))), mode="edge")
-        grid[jj] = row[:n_cells + 3]
+        grid[jj] = dem[sj, cols]
     return grid
 
 
@@ -194,8 +212,11 @@ def _bake_ring2(scene: str, man2: dict, sj: dict, out_dir: str) -> list:
     finer_sur = _finer_field(sj.get("surround", []), out_dir)
     if finer_sur is not None:
         sur_x0, sur_z0, sur_x1, sur_z1 = finer_sur[2:6]
+        rad = max(1, int(math.ceil(R2_CELL_M / finer_sur[1])))
+        sur_minf = _min_filter(finer_sur[0], rad)
     else:
         sur_x0 = sur_x1 = sur_z0 = sur_z1 = 0.0
+        sur_minf = None
 
     rx0 = re0 * 1000.0 - origin_e
     rz0 = rn0 * 1000.0 - origin_n
@@ -219,7 +240,8 @@ def _bake_ring2(scene: str, man2: dict, sj: dict, out_dir: str) -> list:
             xs = x0c + (np.arange(n_cells + 3) - 1) * float(R2_CELL_M)
             zs = z0c + (np.arange(n_cells + 3) - 1) * float(R2_CELL_M)
             if finer_sur is not None:
-                grid = _clamp_under(grid, xs, zs, finer_sur, TUCK_M)
+                grid = _clamp_under(grid, xs, zs, finer_sur, TUCK_M,
+                                    float(R2_CELL_M), sur_minf)
             base = f"surround2_{ci}_{cj}"
             tex = Image.fromarray(np.flipud(
                 rgb[gj0:gj0 + R2_CHUNK_KM * R2_PX_KM,
@@ -356,6 +378,12 @@ def _bake_ring3(scene: str, sj: dict, man2: dict, out_dir: str,
              + (arr[r0 + 1, c0] * (1 - wc) + arr[r0 + 1, c0 + 1] * wc)
              * wr)
         dem = np.where(m, v.astype(np.float32), dem)
+    covered = np.zeros(lon.shape, bool)
+    for (tlat, tlon) in tiles:
+        covered |= (lat_i == tlat) & (lon_i == tlon)
+    if not covered.all():
+        print(f"  !! GLO-30 coverage gap: {int((~covered).sum())} posts "
+              f"defaulting to 0 m (fetch more 1-deg tiles)", flush=True)
     dem_local = dem - float(origin_alt)
 
     # Finer coverage to tuck under: the R2 rect.
@@ -387,8 +415,9 @@ def _bake_ring3(scene: str, sj: dict, man2: dict, out_dir: str,
                               mode="edge")
             cxs = x0c + (np.arange(n_cells + 3) - 1) * float(R3_CELL_M)
             czs = z0c + (np.arange(n_cells + 3) - 1) * float(R3_CELL_M)
-            for finer in finers:
-                grid = _clamp_under(grid, cxs, czs, finer, TUCK_M)
+            for finer, minf in finers:
+                grid = _clamp_under(grid, cxs, czs, finer, TUCK_M,
+                                    float(R3_CELL_M), minf)
             # Baked tint from ASL height + slope.
             h_asl = grid[1:-2, 1:-2] + float(origin_alt)
             dzdx = np.gradient(h_asl, float(R3_CELL_M), axis=1)
@@ -416,10 +445,14 @@ def main() -> None:
               encoding="utf-8") as f:
         man2 = json.load(f)
     sj["surround2"] = _bake_ring2(scene, man2, sj, out_dir)
-    # Ring 3 clamps under BOTH finer layers' freshly-baked surfaces.
-    finers3 = [f for f in (_finer_field(sj["surround2"], out_dir),
-                           _finer_field(sj.get("surround", []), out_dir))
-               if f is not None]
+    # Ring 3 clamps under BOTH finer layers' freshly-baked surfaces,
+    # each min-filtered at the cell-ratio radius (review bug 1).
+    finers3 = []
+    for f in (_finer_field(sj["surround2"], out_dir),
+              _finer_field(sj.get("surround", []), out_dir)):
+        if f is not None:
+            rad = max(1, int(math.ceil(R3_CELL_M / f[1])))
+            finers3.append((f, _min_filter(f[0], rad)))
     sj["surround3"] = _bake_ring3(scene, sj, man2, out_dir, finers3)
     sj["far_attribution"] = man2.get("glo30_attribution", "")
     tmp = os.path.join(out_dir, "scene.json.tmp")
