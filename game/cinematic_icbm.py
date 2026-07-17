@@ -1053,3 +1053,152 @@ class IcbmLaunch:
 
     def pad_roll_fx(self, fx, pos) -> None:    # duck-type safety.
         pass
+
+
+class NuclearBurst:
+    """The full nuclear surface-burst timeline at one impact point.
+
+    Deterministic phase clock from Glasstone & Dolan (the numbers the
+    user green-lit: a 1 Mt fireball is ~150 m at 1 ms and ~2,200 m
+    across by 10 s, rises at ~100 m/s, and the cap flattens into the
+    tropopause); ``fx.rng`` touches only particle jitter.  Yield scales
+    by the standard cube-root-family exponents.  When several bursts
+    run at once (MIRV), emission rates divide by sqrt(n) so ten
+    mushrooms cannot drain the pools.
+    """
+
+    TROPOPAUSE_M = 11_000.0
+
+    def __init__(self, pos, yield_kt: float, ground_y: float):
+        self.pos = np.asarray(pos, dtype=np.float64).copy()
+        self.ground_y = float(ground_y)
+        w_mt = max(yield_kt / 1000.0, 1e-3)
+        self.r10 = 1100.0 * w_mt ** 0.4        # fireball radius at 10 s
+        self.rise = 100.0 * w_mt ** 0.1        # m/s ball climb
+        self.ring_v0 = 420.0 * w_mt ** 0.15    # ground dust ring speed
+        self.cap_alt = min(self.TROPOPAUSE_M * (0.55 + 0.45 * w_mt ** 0.2),
+                           self.TROPOPAUSE_M + 3000.0)
+        self.t = 0.0
+        self.done = False
+        self._flash = False
+        self._carry = 0.0
+        self._cap_carry = 0.0
+        self._ring_carry = 0.0
+        self._stem_carry = 0.0
+        self.life_s = 110.0                    # cap keeps drifting after
+
+    def _ball_r(self) -> float:
+        """Fireball radius: fast early growth flattening toward r10."""
+        return self.r10 * min((max(self.t, 0.001) / 10.0) ** 0.4, 1.35)
+
+    def _ball_y(self) -> float:
+        """Ball center: half-buried at detonation, then buoyant rise
+        (starts ~2 s in as the ball stabilizes)."""
+        rise_t = max(self.t - 2.0, 0.0)
+        y = self.ground_y + self._ball_r() * 0.6 + self.rise * rise_t
+        return min(y, self.ground_y + self.cap_alt)
+
+    def step(self, dt: float) -> None:
+        self.t += dt
+        if self.t >= self.life_s:
+            self.done = True
+
+    def emit(self, fx, dt: float, crowd: int = 1) -> None:
+        """Per-tick staged emission; ``crowd`` = live burst count."""
+        if self.done:
+            return
+        r = fx.rng
+        scale = 1.0 / math.sqrt(max(crowd, 1))
+        ball_r = self._ball_r()
+        cy = self._ball_y()
+        center = np.array([self.pos[0], cy, self.pos[2]])
+        t = self.t
+        if not self._flash:
+            # 1) FLASH: the milliseconds-long white sphere, far larger
+            # than anything conventional — one huge additive sprite.
+            self._flash = True
+            fx.fire.emit(4, center, ball_r * 0.1, (0.0, 0.0, 0.0), 0.0,
+                         (0.10, 0.20), (ball_r * 2.2, ball_r * 3.0),
+                         ((1.0, 1.0, 0.98), (1.0, 0.95, 0.8)), r)
+        if t < 14.0:
+            # 2) FIREBALL: boiling ball of flame filling the current
+            # radius, whitest at birth, reddening as it cools.
+            heat = max(0.0, 1.0 - t / 12.0)
+            core = (1.0, 0.75 + 0.24 * heat, 0.45 + 0.5 * heat)
+            edge = (0.9 + 0.1 * heat, 0.35 + 0.3 * heat, 0.12)
+            self._carry += dt * 90.0 * scale
+            n = int(self._carry)
+            self._carry -= n
+            if n:
+                fx.fire.emit(n, center, ball_r * 0.42,
+                             (0.0, self.rise * 0.5, 0.0), ball_r * 0.10,
+                             (0.5, 1.4),
+                             (ball_r * 0.35, ball_r * 0.8),
+                             (core, edge), r)
+        # 3) STEM: the dark dust column sucked up under the ball.
+        if 1.5 < t < 70.0:
+            self._stem_carry += dt * 26.0 * scale
+            n = int(self._stem_carry)
+            self._stem_carry -= n
+            for _ in range(n):
+                f = r.uniform(0.05, 0.95)
+                p = np.array([self.pos[0], self.ground_y
+                              + (cy - self.ground_y) * f, self.pos[2]])
+                # Stem stays NARROW — the cap/stem width contrast is
+                # what makes the silhouette read as a mushroom (audit
+                # shot 63: equal widths read as a blob).
+                w = ball_r * (0.10 + 0.14 * (1.0 - f))
+                fx.smoke.emit(1, p, w * 0.5,
+                              (0.0, self.rise * 0.35, 0.0), 6.0,
+                              (30.0, 70.0), (w, w * 2.6),
+                              ((0.36, 0.32, 0.28), (0.26, 0.24, 0.22)),
+                              r, alpha01=(0.62, 0.04), fade_in=0.25)
+        # 4) CAP: past ~8 s the cooled ball smokes over and spreads —
+        # FEWER, FATTER, SOFTER puffs that merge into one rolling
+        # toroid instead of discrete balls (audit shot 63).
+        if t > 8.0:
+            self._cap_carry += dt * 26.0 * scale
+            n = int(self._cap_carry)
+            self._cap_carry -= n
+            if n:
+                spread = ball_r * (1.4 + min((t - 8.0) / 30.0, 1.6))
+                idx = fx.smoke.emit(
+                    n, center, spread * 0.40,
+                    (0.0, max(self.rise * 0.3, 4.0), 0.0), 8.0,
+                    (70.0, 150.0), (ball_r * 0.9, spread * 1.5),
+                    ((0.44, 0.40, 0.36), (0.33, 0.32, 0.31)), r,
+                    alpha01=(0.34, 0.03), fade_in=0.9)
+                if len(idx):
+                    ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+                    sp = r.uniform(0.2, 1.0, len(idx)) \
+                        * spread * 0.02
+                    fx.smoke.vel[idx, 0] += (np.sin(ang) * sp) \
+                        .astype(np.float32)
+                    fx.smoke.vel[idx, 2] += (np.cos(ang) * sp) \
+                        .astype(np.float32)
+        # 5) GROUND RING: dust wall racing outward, decelerating.
+        if t < 12.0:
+            ring_r = self.ring_v0 * t * (1.0 - 0.55 * min(t / 12.0, 1.0))
+            self._ring_carry += dt * 60.0 * scale
+            n = int(self._ring_carry)
+            self._ring_carry -= n
+            if n and ring_r > 1.0:
+                idx = fx.smoke.emit(
+                    n, np.array([self.pos[0],
+                                 self.ground_y + 6.0, self.pos[2]]),
+                    2.0, (0.0, 6.0, 0.0), 3.0, (14.0, 30.0),
+                    (18.0, 90.0),
+                    ((0.52, 0.47, 0.41), (0.40, 0.38, 0.35)), r,
+                    alpha01=(0.7, 0.05), fade_in=0.08)
+                if len(idx):
+                    ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+                    fx.smoke.pos[idx, 0] += (np.sin(ang) * ring_r) \
+                        .astype(np.float32)
+                    fx.smoke.pos[idx, 2] += (np.cos(ang) * ring_r) \
+                        .astype(np.float32)
+                    sp = r.uniform(0.5, 1.0, len(idx)) * max(
+                        self.ring_v0 * (1.0 - t / 12.0), 30.0)
+                    fx.smoke.vel[idx, 0] = (np.sin(ang) * sp) \
+                        .astype(np.float32)
+                    fx.smoke.vel[idx, 2] = (np.cos(ang) * sp) \
+                        .astype(np.float32)

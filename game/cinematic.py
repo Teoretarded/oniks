@@ -31,7 +31,8 @@ from engine.camera import Camera
 from engine import math3d
 import engine.renderer as renderer_mod
 from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
-from game.cinematic_icbm import ICBM_BY_ID, ICBMS, IcbmLaunch
+from game.cinematic_icbm import (ICBM_BY_ID, ICBMS, IcbmLaunch,
+                                 NuclearBurst)
 from game.cinematic_missiles import (
     CinematicEffects,
     GuidedLaunch,
@@ -166,6 +167,7 @@ class CinematicState(GameState):
         self._shadow_texs = {}
         self.walker = None
         self.launches: list = []     # every live round (salvo-friendly)
+        self._bursts: list = []      # live NuclearBurst timelines
         self.t = 0.0
         self._min_relaunch_s = 2.5   # L works again this soon after a shot
         self._sound_queue = []       # (due_t, name, pos, gain)
@@ -967,14 +969,23 @@ class CinematicState(GameState):
                 elif kind == "cutoff":
                     self._say("ENGINE CUTOFF - BALLISTIC ARC")
                 elif kind == "impact":
-                    m.impact_fx(self.effects, pos)
                     self._queue_sound("boom", pos)
                     eye = np.asarray(self._eye(), dtype=np.float64)
                     delay = float(np.linalg.norm(pos - eye)) \
                         / SPEED_OF_SOUND
-                    self._shake_queue.append((self.t + delay, 2.2))
+                    if isinstance(m, IcbmLaunch):
+                        # The nuclear timeline replaces the old
+                        # conventional puff (user green-lit; Glasstone
+                        # numbers in NuclearBurst).
+                        self._bursts.append(NuclearBurst(
+                            pos, m.impact_yield_kt(), float(pos[1])))
+                        self._shake_queue.append((self.t + delay, 4.5))
+                        self._say("DETONATION")
+                    else:
+                        m.impact_fx(self.effects, pos)
+                        self._shake_queue.append((self.t + delay, 2.2))
+                        self._say("IMPACT")
                     self._spawn_crater(m, pos)
-                    self._say("IMPACT")
             m.emit(self.effects, dt)
         # Shoulder weapons fly AFTER the targets moved (their rounds home
         # on the fresh positions; a kill marks the launch done for the
@@ -999,6 +1010,15 @@ class CinematicState(GameState):
         if not any(isinstance(m, (IcbmLaunch, GuidedLaunch))
                    for m in self.launches):
             self.warp_i = 0          # warp is a targeted-flight tool only
+        # Nuclear bursts run their own long timelines after the rounds
+        # are pruned (flash -> fireball -> stem -> cap -> ground ring).
+        if self._bursts:
+            crowd = len(self._bursts)
+            for b in self._bursts:
+                b.step(dt)
+                if self.effects is not None:
+                    b.emit(self.effects, dt, crowd=crowd)
+            self._bursts = [b for b in self._bursts if not b.done]
         if self.effects is not None:
             self.effects.update(dt)
         if self.fog is not None:
