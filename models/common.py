@@ -43,7 +43,7 @@ PALETTE = dict(
     shroud_dark=(0.22, 0.21, 0.23),
     sarmat_dark=(0.11, 0.13, 0.11), sarmat_nose=(0.72, 0.70, 0.66),
     silo_door=(0.46, 0.45, 0.43), silo_rail=(0.30, 0.30, 0.32),
-    silo_bore=(0.03, 0.03, 0.04),
+    silo_bore=(0.03, 0.03, 0.04), silo_gravel=(0.38, 0.36, 0.32),
 )
 
 

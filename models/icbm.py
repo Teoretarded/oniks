@@ -194,6 +194,11 @@ def build_minuteman_lf() -> MeshData:
     personnel hatch, antenna bumps, fence."""
     b = MeshBuilder()
     conc = PALETTE["concrete"]
+    # The gravel lot: real LFs are a fenced gravel rectangle (audit round
+    # 2: bare meadow inside the fence read wrong).
+    b.add_mesh(make_box((2.0 * LF_FENCE_HALF - 1.0, 0.07,
+                         2.0 * LF_FENCE_HALF - 1.0),
+                        PALETTE["silo_gravel"], offset=(0.0, 0.035, 0.0)))
     b.add_mesh(make_box((22.0, 0.3, 26.0), conc, offset=(0.0, 0.15, 1.5)))
     # Tube collar and the clean metal RING of the open mouth.
     _add_vlathe(b, [(0.30, LF_TUBE_R), (0.30, LF_COLLAR_R),
@@ -238,6 +243,8 @@ def build_sarmat_silo() -> MeshData:
     in the mouth (checklist 8/10), lid rails, perimeter bollards."""
     b = MeshBuilder()
     conc = PALETTE["concrete"]
+    b.add_mesh(make_box((33.0, 0.07, 33.0), PALETTE["silo_gravel"],
+                        offset=(0.0, 0.035, 0.0)))
     b.add_mesh(make_box((34.0, 0.5, 34.0), conc, offset=(0.0, 0.25, 0.0)))
     b.add_mesh(make_box((26.0, 0.55, 26.0), conc, offset=(0.0, 0.78, 0.0)))
     # Tube collar, bore, and the TPK rim standing in the mouth.

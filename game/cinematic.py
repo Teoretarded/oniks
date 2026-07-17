@@ -871,13 +871,15 @@ class CinematicState(GameState):
         if self.follow and self.launch is not None and not self.launch.done:
             m = self.launch
             spec_len = getattr(getattr(m, "spec", None), "length_m", 8.0)
-            dist = max(45.0, spec_len * 4.0)
+            dist = max(60.0, spec_len * 7.0)
             hd = m.heading()
             side = np.cross(hd, np.array([0.0, 1.0, 0.0]))
             ns = float(np.linalg.norm(side))
             side = side / ns if ns > 1e-6 else np.array([1.0, 0.0, 0.0])
-            want = (m.pos - hd * dist + side * dist * 0.38
-                    + np.array([0.0, dist * 0.22, 0.0]))
+            # Mostly LATERAL: the airframe silhouettes against the sky
+            # instead of hiding inside its own exhaust glow (audit r3).
+            want = (m.pos - hd * dist * 0.55 + side * dist * 0.85
+                    + np.array([0.0, dist * 0.18, 0.0]))
             if self._chase_eye is None:
                 self._chase_eye = want.copy()
             blend = min(1.0, dt_real * 3.0)

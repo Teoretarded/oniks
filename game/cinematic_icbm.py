@@ -488,10 +488,12 @@ class IcbmLaunch:
                 fx.fire.emit(1, tail - h * back, 0.4, -h * 130.0, 8.0,
                              (0.08, 0.26), (size * 0.5, size * 1.6),
                              (col, col), r, stretch=0.025)
+            # Far-visibility glow: flame-length scale — a 2x-length sprite
+            # blinded the chase cam (audit shot 30, a white ball).
             fx.fire.emit(1, tail - h * flame_len * 0.3, 0.1,
                          (0.0, 0.0, 0.0), 0.0, (0.05, 0.09),
-                         (flame_len * 1.6, flame_len * 2.0),
-                         ((0.50, 0.44, 0.33), (0.44, 0.35, 0.24)), r)
+                         (flame_len * 0.8, flame_len * 1.1),
+                         ((0.42, 0.37, 0.28), (0.36, 0.29, 0.20)), r)
             if rel_alt > self.BLOOM_ALT:
                 # Vacuum bloom: the plume widens into a huge faint cone.
                 self._bloom_carry = getattr(self, "_bloom_carry", 0.0) \
@@ -611,12 +613,14 @@ class IcbmLaunch:
                      (0.22, 0.5), (d_fb * 0.5, d_fb * 1.3),
                      ((1.0, 0.85, 0.45), spec.flame_edge), r)
         if spec.launch_mode == "hot":
-            # The annulus eruption: flame + smoke ring blasting UP out of
-            # the gap between airframe and tube wall.
-            idx = fx.fire.emit(30, p + np.array([0.0, 0.6, 0.0]), 1.2,
-                               (0.0, 26.0, 0.0), 6.0, (0.3, 0.7),
-                               (0.8, 2.6),
-                               (spec.flame_core, spec.flame_edge), r)
+            # The annulus eruption: flame + smoke blasting UP out of the
+            # gap between airframe and tube wall — round-3 audit read as
+            # a sparkle; a tube full of M55 efflux is a GEYSER.
+            idx = fx.fire.emit(64, p + np.array([0.0, 0.6, 0.0]), 1.2,
+                               (0.0, 34.0, 0.0), 8.0, (0.35, 0.8),
+                               (1.4, 4.2),
+                               (spec.flame_core, spec.flame_edge), r,
+                               stretch=0.02)
             ring_r = 1.35
             if len(idx):
                 ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
@@ -625,9 +629,9 @@ class IcbmLaunch:
                 fx.fire.pos[idx, 2] += (np.cos(ang) * ring_r) \
                     .astype(np.float32)
             from game.cinematic_missiles import _wind
-            fx.smoke.emit(46, p + np.array([0.0, 1.0, 0.0]), 2.2,
-                          _wind(fx, float(p[1])) + np.array([0., 14., 0.]),
-                          5.0, (8.0, 16.0), (2.0, 20.0),
+            fx.smoke.emit(80, p + np.array([0.0, 1.0, 0.0]), 2.2,
+                          _wind(fx, float(p[1])) + np.array([0., 18., 0.]),
+                          6.0, (8.0, 16.0), (3.0, 26.0),
                           (spec.smoke_fresh, spec.smoke_old), r,
                           alpha01=(0.85, 0.06), fade_in=0.05)
         else:

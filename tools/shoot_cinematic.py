@@ -257,6 +257,94 @@ def main() -> None:
     frames(state, 5)
     shot(app, "08_after_walk_ground_detail")
 
+    # ------------------------------------------------------------- ICBMs
+    # Minuteman III: door slide, fire-in-the-hole, THE smoke ring, pillar,
+    # chase cam, RV impact; then the Sarmat cold sequence.  Timings track
+    # docs/research/icbm_reference_2026-07-17.md.
+    from game.cinematic_icbm import IcbmLaunch
+
+    # Stand 110 m from the compound — from the spawn a moraine hides the
+    # whole site and fence posts are sub-pixel; at 200 m the flat apron
+    # still washes out against the meadow (audit rounds 1-2).
+    wk = state.walker
+    (sx0, sz0), _syaw = state.scene.spawn_pos_yaw()
+    silo = state._silo_site
+    d = np.array([sx0 - silo[0], 0.0, sz0 - silo[2]])
+    d /= max(float(np.linalg.norm(d)), 1e-6)
+    wk.x = float(silo[0] + d[0] * 110.0)
+    wk.z = float(silo[2] + d[2] * 110.0)
+    wk.y = state.scene.ground_h(wk.x, wk.z)
+    wk.vx = wk.vy = wk.vz = 0.0
+    wk.on_ground = True
+    eye = np.array(wk.eye, dtype=np.float64)
+    yaw_silo = math.degrees(math.atan2(silo[0] - eye[0],
+                                       silo[2] - eye[2]))
+    # Target: 4 km past the silo along the spawn->silo line.
+    tx = float(silo[0] - d[0] * 4000.0)
+    tz = float(silo[2] - d[2] * 4000.0)
+    state.icbm_target = np.array(
+        [tx, state.scene.ground_h(tx, tz), tz])
+
+    state.launcher_i = 1                       # MINUTEMAN III
+    aim(state, yaw_silo, -1.0)
+    frames(state, 5)
+    shot(app, "25_minuteman_lf_compound")
+    state._fire()
+    sim_only(state, 1.0)
+    frames(state, 3)
+    shot(app, "26_lf_door_sliding")
+    sim_only(state, 0.75)                      # ignition + 0.25 s: the
+    frames(state, 3)                           # annulus eruption is LIVE
+    shot(app, "27_fire_in_the_hole")
+    sim_only(state, 2.8)                       # ring rolled, bird ~200 m up
+    aim(state, yaw_silo, 25.0)
+    frames(state, 3)
+    shot(app, "28_smoke_ring")
+    sim_only(state, 9.0)
+    aim(state, yaw_silo, 55.0)
+    frames(state, 3)
+    shot(app, "29_white_pillar")
+    state.follow = True
+    frames(state, int(1.5 / PHYS_DT / 2))
+    shot(app, "30_chase_cam")
+    state.follow = False
+    # Fast-forward the coast at a coarser (still honest) step.
+    m = next(x for x in state.launches if isinstance(x, IcbmLaunch))
+    print("coasting to impact ...", flush=True)
+    guard = 0
+    while not m.done and guard < 60000:
+        state.sim_step(1.0 / 30.0)
+        guard += 1
+    # Impact lands 4 km down-valley: face the TARGET, not the silo.
+    yaw_tgt = math.degrees(math.atan2(tx - eye[0], tz - eye[2]))
+    aim(state, yaw_tgt, 2.0)
+    sim_only(state, 2.0)
+    frames(state, 5)
+    shot(app, "31_rv_impact_cloud")
+
+    state.launcher_i = 2                       # SARMAT
+    aim(state, yaw_silo, -1.0)
+    frames(state, 5)
+    shot(app, "32_sarmat_silo")
+    state._fire()
+    sim_only(state, 4.0)                       # the huge lid mid-slide
+    frames(state, 3)
+    shot(app, "32b_sarmat_lid_sliding")
+    sim_only(state, 5.3)                       # mortar ride: 35 m of black
+    aim(state, yaw_silo, 8.0)                  # missile climbing UNLIT
+    frames(state, 3)
+    shot(app, "33_sarmat_mortar_eject")
+    sim_only(state, 2.0)                       # hang + pallet + light-off
+    aim(state, yaw_silo, 12.0)
+    frames(state, 3)
+    shot(app, "34_sarmat_lightoff")
+    sim_only(state, 6.0)
+    aim(state, yaw_silo, 40.0)
+    frames(state, 3)
+    shot(app, "35_sarmat_climb")
+    for x in state.launches:                   # leave the pad quiet
+        x.done = True
+
     print("audit complete ->", OUT, flush=True)
     app.close_cinematic()
     app.close_testing_lab()
