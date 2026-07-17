@@ -1205,8 +1205,11 @@ class CinematicState(GameState):
         else:
             self.app.renderer.lit.use()
             self.app.renderer.lit.set_float("u_cloud_amt", 0.0)
-        if self._space_k < 0.55:
-            self.sky.draw(self.app.renderer)
+        # One continuous sky for the whole M ride: the dome keeps
+        # drawing into orbit, thinning to black + stars via u_space_k
+        # (the old hard cutoff at 0.55 left a bland flat clear color).
+        self.sky.space_k = self._space_k
+        self.sky.draw(self.app.renderer)
         if self.globe_mode != "off" and self.globe is not None:
             self.globe.draw(self.app.renderer, self.camera)
         self.terrain.draw(self.app.renderer, self.camera)

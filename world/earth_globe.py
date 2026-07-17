@@ -121,11 +121,15 @@ void main(){
     vec3 albedo = texture(u_tex, v_uv).rgb;
     vec3 n = normalize(v_nrm);
     float raw = dot(n, u_sun_dir);
-    // Day side + a soft terminator; the night side keeps a faint
-    // moon/starlight floor so the planet never reads as a hole.
-    float day = clamp((raw + 0.12) / 1.12, 0.0, 1.0);
-    day = day * day * (3.0 - 2.0 * day);
-    vec3 lit = albedo * (u_sun_color * (0.15 + 1.05 * day));
+    // Wide smooth terminator (~20 deg of twilight) between the sunlit
+    // day and a moonlit blue night floor - the same sun vector the
+    // terrain mood uses, so the split matches the scene lighting.
+    float day = smoothstep(-0.16, 0.20, raw);
+    vec3 lit = albedo * mix(vec3(0.035, 0.045, 0.070),
+                            u_sun_color * 1.10, day);
+    // Warm dusk band hugging the terminator on the day side.
+    float dusk = exp(-raw * raw / 0.012);
+    lit += albedo * vec3(0.50, 0.18, 0.02) * dusk * 0.30;
     // Atmosphere limb: fresnel rim, blue on the day side.
     vec3 vdir = normalize(-v_view_vec);
     float rim = pow(1.0 - clamp(dot(n, vdir), 0.0, 1.0), 3.0);

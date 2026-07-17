@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pygame
 
-from tools.shoot_cinematic import frames, shot, wait_for_l0
+from tools.shoot_cinematic import frames, set_mood, shot, wait_for_l0
 from main import App
 
 
@@ -45,6 +45,17 @@ def main() -> None:
     state.globe_alt = 4_000_000.0
     frames(state, 5, sim=False)
     shot(app, "52_earth_4000km")
+
+    # Terminator sweep: low golden sun puts the day/night line across
+    # the visible disc; night mood shows the moonlit floor + stars.
+    set_mood(state, "golden")
+    frames(state, 5, sim=False)
+    shot(app, "52b_terminator_golden")
+    set_mood(state, "night")
+    frames(state, 5, sim=False)
+    shot(app, "52c_night_side_stars")
+    set_mood(state, "alpine")
+    frames(state, 5, sim=False)
 
     # Pan away (Italy-ish) and back.
     state.globe_lat -= 4.0
