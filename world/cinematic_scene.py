@@ -358,6 +358,18 @@ class CinematicScene:
             np.radians(s.get("yaw_deg", 0.0)))
 
 
+def halo_axes(x0: float, z0: float, size: float,
+              cell: float) -> tuple[np.ndarray, np.ndarray]:
+    """World-space sample axes for a haloed tile grid: the ``size/cell``
+    interior cells plus the 1-cell halo on each side — exactly the
+    ``(n_cells + 3)`` samples per side that ``build_tile_arrays``
+    expects, so crater-delta grids broadcast onto the stored DSMs."""
+    n = int(round(size / cell)) + 3
+    xs = x0 + (np.arange(n, dtype=np.float64) - 1.0) * cell
+    zs = z0 + (np.arange(n, dtype=np.float64) - 1.0) * cell
+    return xs, zs
+
+
 def build_tile_arrays(h: np.ndarray, cell: float, size: float,
                       skirt_drop: float, clutter: np.ndarray | None = None):
     """Textured-tile geometry from a haloed height grid (GL-free).

@@ -12,7 +12,7 @@ import json
 import numpy as np
 import pytest
 
-from world.cinematic_scene import CinematicScene
+from world.cinematic_scene import CinematicScene, halo_axes
 
 
 @pytest.fixture()
@@ -103,3 +103,27 @@ def test_walker_and_designation_see_the_crater(flat_scene):
     h1 = sc.ground_h(128.0, 128.0)
     h2 = sc.ground_h(128.5, 128.0)
     assert abs(h1 - h2) < 0.5
+
+
+def test_halo_axes_match_stored_dsm_grids(flat_scene):
+    """Regression (2026-07-17 crash): the renderer's crater-delta grid
+    must be the SAME shape as the stored haloed DSMs.  A 1 km tile
+    stores (503, 503) at 2 m, (253, 253) at 4 m, (53, 53) at 20 m —
+    the old n+2 axes produced 252 and broadcast-crashed _apply_craters
+    the moment a crater touched a fine tile."""
+    for cell, want in ((2.0, 503), (4.0, 253), (20.0, 53)):
+        xs, zs = halo_axes(3000.0, -1000.0, 1000.0, cell)
+        assert len(xs) == want and len(zs) == want
+        # Two-sided: exactly one halo cell each side, not zero, not two.
+        assert xs[0] == pytest.approx(3000.0 - cell)
+        assert xs[-1] == pytest.approx(3000.0 + 1000.0 + cell)
+        assert zs[0] == pytest.approx(-1000.0 - cell)
+        assert zs[-1] == pytest.approx(-1000.0 + 1000.0 + cell)
+    # And the delta grid built on those axes broadcasts onto the DSM.
+    sc = CinematicScene(str(flat_scene))
+    sc.add_crater(128.0, 128.0, radius_m=40.0, depth_m=15.0)
+    xs, zs = halo_axes(0.0, 0.0, 256.0, 4.0)
+    dsm_like = np.zeros((len(zs), len(xs)), np.float32)
+    summed = dsm_like + sc.crater_delta_grid(xs, zs)
+    assert summed.shape == dsm_like.shape
+    assert summed.min() < -10.0          # the bowl actually landed

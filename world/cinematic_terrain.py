@@ -91,7 +91,7 @@ from PIL import Image
 from engine.shader import Shader
 from engine.shaderlib import HAZE_GLSL
 from world.cinematic_scene import SKIRT_MARGIN, build_tile_arrays, \
-    skirt_drops
+    halo_axes, skirt_drops
 
 # EXT_texture_filter_anisotropic constants (core-adopted everywhere real).
 _GL_TEXTURE_MAX_ANISOTROPY = 0x84FE
@@ -474,9 +474,7 @@ class CinematicTerrain:
         if not sc.craters_intersecting(t.x0, t.z0, t.x0 + t.size,
                                        t.z0 + t.size):
             return None
-        n = int(round(t.size / cell))
-        xs = t.x0 + (np.arange(n + 2, dtype=np.float64) - 1.0) * cell
-        zs = t.z0 + (np.arange(n + 2, dtype=np.float64) - 1.0) * cell
+        xs, zs = halo_axes(t.x0, t.z0, t.size, cell)
         return sc.crater_delta_grid(xs, zs)
 
     def _apply_craters(self) -> None:
