@@ -100,9 +100,51 @@ GLO-30 mosaic + alpine tint instead of column-means/zero-RGB):
 Also: far-ring green tint reads too saturated without haze; far rings
 skip baked terrain shadows (haze-dominated; logged).
 
+## Overnight autonomous run (2026-07-17 night, second session)
+
+User abandoned the first session, ordered: fix the flight computer,
+universal T-targeting incl. S-300 ("fastest route, account for drag"),
+more big ammunition, terrain deformation, the M globe. Six commits:
+
+1. **Flight computer** (88115aa): GEMS burn-to-depletion RETIRED at
+   map scale — measured 28-30 km cross-track on an 8 km Sarmat shot
+   (= the user's "flies off into the distance"). New law: fastest
+   feasible tau by a forward twin of the law itself, thrust dead along
+   Vg, THRUST TERMINATION at Vg~0 (real Minuteman I/II vent-port
+   mechanism), 30 deg terminal dive floor + 800 m terrain clearance.
+   After: miss 17-126 m, tof 76-142 s (was 278-550), cross-track 0.
+   Long shots still stage naturally (700 km: 233 s, 100 m off).
+2. **Universal T-targeting** (f87b17d): GuidedLaunch — piecewise
+   drag-aware Lambert with terrain GATES + bit-exact verification (the
+   plan is flown on the real step() before launch). 16/16 dead hits
+   across all four pad rounds, 5-45 km. Known: L-press plans up to
+   ~1.9 s synchronously (worker thread = polish item).
+3. **Terrain deformation** (craters): bowl+lip delta on ground_h
+   (physics = renderer = same math), dirty-tile remesh + async ash
+   scorch, Glasstone sizing. IcbmSpec.yield_kt (MM3 300 kt W87).
+4. **Ammo expansion**: Trident II D5 from REAL water (survey found the
+   Thunersee at 557.6 m ASL; broach + water column + spray), MIRV
+   (Sarmat 10x500 kt, Trident 8x475 kt; one RV per T-mark, impacts
+   walk 1.3-26 m off their marks), Iskander-M pad round (30 km < 90 s).
+5. **M orbit view**: true-scale Blue Marble Earth UNDER the scene
+   (surface = sea level, anchor = real LV95->WGS84 lat/lon), one
+   continuous camera ride valley->LEO->full planet, drag/wheel/T-from-
+   orbit, engine FAR 900 km -> 30,000 km. Probe frames 50-56.
+6. **Nuclear impact timeline** (NuclearBurst): flash/fireball/stem/
+   cap/ground-ring on the Glasstone clock, yield-scaled, per-RV.
+   Probe frames 60-65; round-2 cap/stem tune from my own audit.
+
+Honest remaining for the next session:
+- 60 fps x 15 s captures per weapon vs real footage values (user's
+  explicit ask — structural work landed, the art loop needs eyes).
+- Launch-FX eyeball passes: Trident broach, Iskander column, MIRV sep.
+- GuidedLaunch route planning off the L-press thread.
+- Globe nits: terrain patch brighter than Blue Marble + hard patch
+  edge from orbit; cap top edge still shows discrete puffs.
+- Targeting MENU (user: LAST, high design) still not started.
+
 ## Next (user-gated)
 
 1. User playtest of the whole flow ([[playtest-before-polish]]).
 2. The bespoke high-design targeting menu (user: LAST, must not look
    generic).
-3. Map/LiDAR expansion — parked for the user's explicit go.
