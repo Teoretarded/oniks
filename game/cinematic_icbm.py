@@ -26,11 +26,15 @@ uses the REAL mechanisms, no dice and no fudge (research doc section 3):
   track).  On long shots the budget binds, stages burn through and
   separate naturally, so full staging returns with real ranges.
 
-Straight-line boost drag is ignored (near-vertical climb at GEMS-shaped
-moderate speeds; error is small against the PBV trim authority) and the
-RV falls the exact uniform-gravity arc — the trajectory is closed-form
-consistent with the guidance, so impact lands on the designated point
-deterministically.  Zero RNG anywhere in this module.
+Atmosphere (2026-07-17, missile_flight_physics_reference.md): the
+boosting stack fights Mach drag on its frontal area (live flight and
+the feasibility twin share ONE force helper), thrust rides the slew-
+limited body axis until the Vg error is small (then vernier-exact),
+and every descending vehicle decelerates on the beta-model reentry
+drag — guidance stays on the mark because the trim aim is DRAG-BIASED:
+the flight computer flies the coast forward once and aims long by the
+predicted horizontal miss, exactly how real targeting folds drag in.
+Zero RNG anywhere in this module.
 """
 
 from __future__ import annotations
@@ -40,15 +44,62 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from sim.physics import (cd_from_mach_scalar, drag_force_scalar,
+                         mach_scalar)
+
 GRAVITY = 9.81
 UP = np.array([0.0, 1.0, 0.0])
+
+# Atmosphere interaction (docs/research/missile_flight_physics_reference
+# .md): the boosting stack fights Mach drag on its frontal area; the
+# reentering RV is characterized by its ballistic coefficient
+# beta = m/(Cd*A) — Mk21-class ~8,000 kg/m^2 (range 2,000-13,000), which
+# puts peak deceleration in the tens of g below ~30 km.
+RV_BETA = 8000.0             # kg/m^2
+FINE_STEER_VG_MS = 300.0     # below this |Vg| TVC tracks the demand
+                             # exactly (few-degree nozzle trim); above
+                             # it thrust rides the slew-limited body
+                             # axis.  300 covers the post-lock drag-
+                             # bias correction burn, whose live slew
+                             # transient otherwise diverges from the
+                             # impulse-exact predictor (9 km at 700 km)
+
+
+def _stack_drag_dv(pos, vel, mass: float, diameter_m: float,
+                   dt: float) -> np.ndarray:
+    """This tick's drag delta-v for the boosting/coasting stack — ONE
+    force model shared by the live flight and the feasibility twin."""
+    sp = float(np.linalg.norm(vel))
+    if sp < 1.0:
+        return np.zeros(3)
+    alt = max(float(pos[1]), 0.0)
+    cd = cd_from_mach_scalar(mach_scalar(sp, alt))
+    area = math.pi * (diameter_m * 0.5) ** 2
+    a = drag_force_scalar(sp, alt, cd, area) / max(mass, 1.0)
+    return -(vel / sp) * min(a * dt, sp * 0.5)
+
+
+def _rv_drag_dv(pos, vel, dt: float, beta: float = RV_BETA) -> np.ndarray:
+    """This tick's drag delta-v for a reentry vehicle: deceleration is
+    0.5 * rho * v^2 / beta (mass folds into the ballistic coeff)."""
+    sp = float(np.linalg.norm(vel))
+    if sp < 1.0:
+        return np.zeros(3)
+    alt = max(float(pos[1]), 0.0)
+    a = drag_force_scalar(sp, alt, 1.0, 1.0) / beta
+    return -(vel / sp) * min(a * dt, sp * 0.5)
 
 # Guidance shape knobs (shared; per-weapon numbers live in the specs).
 GATE_TILT_DEG = 3.0        # programmed tilt toward target below the gate
 SLEW_DEG_S = 30.0          # attitude slew limit (TVC authority, visual)
 VG_TRIM_MS = 0.4           # PBV stops trimming below this |Vg|
 TAU_GUARD_S = 2.0          # stop guiding this close to arrival
-TERM_VG_MS = 2.0           # boost thrust-terminates below this |Vg|
+TERM_VG_MS = 0.5           # boost thrust-terminates below this |Vg|
+                           # (fine-steer tracks exactly at this scale;
+                           # a 2.0 residual left the bus ~300 m of
+                           # unpredicted trim drift over a long coast)
+BUS_TRIM_WINDOW_S = 3.0    # PBV insertion trim closes this long after
+                           # burnout; it never chases drag downhill
 TAU_GROWTH = 1.12          # fastest-route search: tau bump per retry
 TWIN_DT = 0.0625           # feasibility twin's step (16 Hz: measured
                            # 0.25 s let real flights clip ridges the
@@ -196,8 +247,9 @@ ICBM_BY_ID = {s.id: s for s in ICBMS}
 
 
 class _Rv:
-    """A released MIRV: pure ballistic from its dispense state to its
-    own mark (gravity only — the bus already gave it the velocity)."""
+    """A released MIRV: ballistic from its dispense state to its own
+    mark — gravity plus beta-model reentry drag (the dispense velocity
+    is drag-aim-biased so it still arrives on the mark)."""
 
     __slots__ = ("pos", "vel", "target", "ground_h", "done")
 
@@ -212,6 +264,7 @@ class _Rv:
         if self.done:
             return
         prev = self.pos.copy()
+        self.vel += _rv_drag_dv(self.pos, self.vel, dt)
         self.vel[1] -= GRAVITY * dt
         self.pos += self.vel * dt
         if self.vel[1] < 0.0:
@@ -257,6 +310,14 @@ class IcbmLaunch:
             self._marks.append(np.array(
                 [mx, float(ground_h(mx, mz)), mz], dtype=np.float64))
         self._target = self._marks[0]
+        self._aim = self._target.copy()  # drag-biased aim point (set
+                                         # at the exact-state passes:
+                                         # term gate / depletion /
+                                         # MIRV dispense — a coast
+                                         # predicted from an early-
+                                         # boost state is garbage)
+        self._bias_locked = False        # the pass runs exactly once
+        self.slew_deg_s = SLEW_DEG_S     # exposed for the no-snap test
         self._rvs: list = []
         self._next_release = 1           # next mark index to dispense
         self._release_t = None           # flight time of the next release
@@ -342,6 +403,21 @@ class IcbmLaunch:
             nvg = float(np.linalg.norm(vg))
             agl = float(pos[1] - self._silo[1])
             if agl >= spec.gate_agl_m and nvg <= TWIN_TERM_MS:
+                # Drag-coast gate: the REAL (drag-bearing) coast from
+                # here must land close enough that boost-phase aim
+                # biasing can absorb the shortfall — otherwise the arc
+                # is a flat transit through dense air that no amount
+                # of aiming long can fix, and a longer (lofted) tau is
+                # the physical answer.
+                hit = self._ballistic_impact(pos, vel)
+                if hit is None:
+                    return False
+                d = self._target - self._silo
+                rng = max(math.hypot(float(d[0]), float(d[2])), 1.0)
+                miss = math.hypot(float(hit[0] - self._target[0]),
+                                  float(hit[2] - self._target[2]))
+                if miss > max(0.25 * rng, 2000.0):
+                    return False
                 return self._coast_clears(pos, vel, tau - t)
             if idx >= len(spec.stages):
                 return False             # depleted with Vg still open
@@ -361,6 +437,8 @@ class IcbmLaunch:
                 vel = vel + (vg / max(nvg, 1e-9)) * min(a * TWIN_DT, nvg)
             mass -= st.mdot * TWIN_DT
             burned += TWIN_DT
+            vel = vel + _stack_drag_dv(pos, vel, mass,
+                                       spec.diameter_m, TWIN_DT)
             vel = vel - UP * (GRAVITY * TWIN_DT)
             pos = pos + vel * TWIN_DT
             t += TWIN_DT
@@ -440,7 +518,7 @@ class IcbmLaunch:
 
     def _v_req(self) -> np.ndarray:
         tau = max(self._tau(), 1.0)
-        d = self._target - self.pos
+        d = self._aim - self.pos
         return d / tau + UP * (0.5 * GRAVITY * tau)
 
     def vg(self) -> np.ndarray:
@@ -467,6 +545,147 @@ class IcbmLaunch:
         if nvg < 1e-6:
             return self.axis.copy()
         return vg / nvg
+
+    def _ballistic_impact(self, pos, vel, t_max: float = 2400.0):
+        """Forward flight (gravity + RV drag) to the ground; None when
+        the arc never comes down inside ``t_max``.  The step adapts to
+        altitude: coarse in vacuum, fine through the dense band where
+        drag is stiff (dt 0.25 Euler there left a 790 m live-vs-
+        predicted gap on a 3500 km shot, measured)."""
+        p = pos.copy()
+        v = vel.copy()
+        t = 0.0
+        while t < t_max:
+            alt = float(p[1])
+            # Dense band matches the live 1/120 tick exactly: at 0.031
+            # the stiff-drag Euler gap left an 8 km shot 1.4 km long.
+            dt = 1.0 if alt > 100_000.0 else (
+                0.25 if alt > 30_000.0 else 1.0 / 120.0)
+            prev = p.copy()
+            # Leapfrog gravity split: plain semi-implicit Euler drifts
+            # 0.5*g*dt*T low (2.9 km over a 600 s coast at dt 1.0,
+            # measured as a 4 km aim error); the half-step split is
+            # exact for constant g at ANY dt.
+            v = v + _rv_drag_dv(p, v, dt)
+            v[1] -= 0.5 * GRAVITY * dt
+            p = p + v * dt
+            v[1] -= 0.5 * GRAVITY * dt
+            t += dt
+            if v[1] < 0.0:
+                g = float(self.ground_h(float(p[0]), float(p[2])))
+                if np.isfinite(g) and p[1] <= g:
+                    denom = float(prev[1] - p[1])
+                    f = min(max((prev[1] - g) / denom, 0.0), 1.0) \
+                        if denom > 1e-9 else 1.0
+                    return prev + (p - prev) * f
+        return None
+
+    def _predict_term_impact(self, aim):
+        """Predicted impact for a candidate aim, INCLUDING the burn
+        the round still owes: nulling Vg toward a moved aim adds real
+        velocity and flight time, so predicting the coast from the
+        pre-burn state chases a drifting fixed point (measured: three
+        gate passes walking the aim 44->38->22 km while the stack
+        burned retrograde and finally overshot 291 km).  Burn-to-null
+        at TWIN_DT with the shared force model, then coast."""
+        spec = self.spec
+        p = self.pos.copy()
+        v = self.vel.copy()
+        mass = self.mass
+        idx = self.stage_idx
+        burned = self._burned_in_stage
+        tau_rem = max(self._tau(), 1.0)
+        t = 0.0
+        while t < 40.0:
+            v_req = ((aim - p) / max(tau_rem, 1.0)
+                     + UP * (0.5 * GRAVITY * max(tau_rem, 1.0)))
+            vg = v_req - v
+            nvg = float(np.linalg.norm(vg))
+            if nvg <= TERM_VG_MS:
+                break
+            if idx >= len(spec.stages):
+                break                      # depleted: coast as-is
+            st = spec.stages[idx]
+            if burned >= st.prop_kg:
+                mass -= st.gross_kg - st.prop_kg
+                idx += 1
+                burned = 0.0
+                continue
+            a = st.thrust_n / mass
+            v = v + (vg / max(nvg, 1e-9)) * min(a * TWIN_DT, nvg)
+            mass -= st.mdot * TWIN_DT
+            burned += st.mdot * TWIN_DT
+            v = v + _stack_drag_dv(p, v, mass, spec.diameter_m, TWIN_DT)
+            v = v - UP * (GRAVITY * TWIN_DT)
+            p = p + v * TWIN_DT
+            t += TWIN_DT
+            tau_rem -= TWIN_DT
+        return self._ballistic_impact(p, v)
+
+    def _update_drag_bias(self, exact: bool = False,
+                          powered: bool = False) -> None:
+        """Aim long: the Lambert demand is a VACUUM arc, but the coast
+        bleeds real speed to drag — far beyond the PBV's trim budget
+        on map-scale arcs.  So DURING boost (every few seconds) the
+        aim iterates to the fixed point where the drag-bearing coast
+        of the current demand lands ON the mark, and the MAIN STAGES
+        absorb the bigger demand — exactly where the delta-v lives.
+        Nothing may move the aim after termination: a post-term move
+        reopens Vg and the bus trim double-counts the correction
+        (measured +13 km long on a 60 km shot)."""
+        d = self._target - self._silo
+        rng = max(math.hypot(float(d[0]), float(d[2])), 1.0)
+        cap = 0.5 * rng
+        gain = 1.0
+        last_nm = None
+        best_nm, best_aim = None, self._aim.copy()
+        for _ in range(10 if exact else 4):
+            if powered:
+                hit = self._predict_term_impact(self._aim)
+            else:
+                hit = self._ballistic_impact(self.pos, self._v_req())
+            if hit is None:
+                break
+            miss = np.array([hit[0] - self._target[0], 0.0,
+                             hit[2] - self._target[2]])
+            nm = float(np.linalg.norm(miss))
+            if best_nm is None or nm < best_nm:
+                best_nm, best_aim = nm, self._aim.copy()
+            if nm > 0.6 * rng:
+                # The arc cannot reach at all (flat transit through
+                # dense air) — no bias fixes that; the TOA search's
+                # drag-coast gate is responsible for lofting instead.
+                break
+            if nm < 120.0:
+                return
+            if (exact and not powered
+                    and last_nm is not None and nm > last_nm * 0.7):
+                # (Powered passes keep unit gain: burn-to-null makes
+                # the response slope ~1 and adaptation OSCILLATED —
+                # measured a 90k -> -85k aim lunge on a 700 km shot.)
+                # Weak response (aiming 1 m longer moves the impact
+                # well under 1 m — drag eats the extra demand): push
+                # with a bigger gain, Newton-style.  Only from an
+                # exact state — mid-boost predictions are approximate
+                # and big gains there made the aim swing (measured
+                # 1.8e6 m of excursion on a 3500 km shot).
+                gain = min(gain * 1.8, 6.0)
+            last_nm = nm
+            step = gain * miss
+            ns = float(np.linalg.norm(step))
+            if ns > 0.25 * rng:             # one move never lunges
+                step = step * (0.25 * rng / ns)
+            self._aim = self._aim - step
+            bias = self._aim - self._target
+            nb = float(np.linalg.norm(bias))
+            if nb > cap:
+                self._aim = self._target + bias * (cap / nb)
+                break
+        # The last move is unverified: keep the best EVALUATED aim
+        # instead of whatever the final lunge produced (exit-by-count
+        # overshoots measured 1.4 km LONG on an 8 km shot).
+        if best_nm is not None:
+            self._aim = best_aim
 
     def _slew(self, want: np.ndarray, dt: float) -> None:
         """Rate-limit the attitude toward the commanded direction."""
@@ -542,8 +761,20 @@ class IcbmLaunch:
             st = spec.stages[self.stage_idx]
             start = sum(s.burn_s for s in spec.stages[:self.stage_idx])
             agl = self.pos[1] - self._silo[1]
-            if (agl >= spec.gate_agl_m
-                    and float(np.linalg.norm(self.vg())) <= TERM_VG_MS):
+            at_term = (agl >= spec.gate_agl_m
+                       and float(np.linalg.norm(self.vg())) <= TERM_VG_MS)
+            if at_term and not self._bias_locked:
+                # ONE drag-bias pass, with a predictor that includes
+                # the extra burn the moved aim demands (burn-to-null,
+                # then coast).  The aim then LOCKS: re-running the
+                # pass every gate hit chased a drifting fixed point
+                # while stages burned themselves empty.  After the
+                # lock the stage simply finishes nulling Vg against
+                # the corrected aim and terminates.
+                self._bias_locked = True
+                self._update_drag_bias(exact=True, powered=True)
+                at_term = float(np.linalg.norm(self.vg())) <= TERM_VG_MS
+            if at_term:
                 # THRUST TERMINATION: the round has the velocity it
                 # needs — solids blow the forward vent ports (Minuteman
                 # I/II mechanism, generalized), liquids shut down.  The
@@ -560,15 +791,22 @@ class IcbmLaunch:
                     self._release_t = self.t + 1.5
             elif burn < start + st.burn_s:
                 thrusting = True
-                # Thrust follows the guidance law EXACTLY — TVC autopilot
-                # bandwidth dwarfs our dt (a 2.5% average alignment lag
-                # from slew-limiting the thrust accumulated 180 m/s of
-                # unremovable Vg, measured).  The slew-limited axis is
-                # the DRAWN attitude only.
+                # Thrust rides the SLEW-LIMITED body axis while the Vg
+                # error is large (physical TVC lag, absorbed by the
+                # closed guidance loop), blending to exact demand
+                # tracking below FINE_STEER_VG_MS — the vernier-class
+                # fine trim that nulls the last few m/s.  (Pure slewed
+                # thrust left 180 m/s of unremovable Vg, measured: the
+                # demand direction SPINS as |Vg| -> 0, faster than any
+                # slew can track.)
                 dirc = self._thrust_dir()
                 self._slew(dirc, dt)
+                nvg = float(np.linalg.norm(self.vg()))
+                w = min(1.0, max(0.0, 1.0 - nvg / FINE_STEER_VG_MS))
+                tdir = dirc * w + self.axis * (1.0 - w)
+                tdir = tdir / max(float(np.linalg.norm(tdir)), 1e-9)
                 a = st.thrust_n / self.mass
-                self.vel += dirc * (a * dt)
+                self.vel += tdir * (a * dt)
                 self.mass -= st.mdot * dt
                 self._burned_in_stage = st.prop_kg * min(
                     1.0, (burn - start) / st.burn_s)
@@ -583,12 +821,29 @@ class IcbmLaunch:
                     self.rv_only = True
                     self.burnout_t = self.t
                     self.mass = spec.bus_kg + self._bus_prop_left
+                    # Depletion path never crosses the Vg-null gate:
+                    # converge the drag bias here (once), from the
+                    # assumption the bus nulls the (small, twin-
+                    # verified) residual Vg onto each demand.
+                    if not self._bias_locked:
+                        self._bias_locked = True
+                        self._update_drag_bias(exact=True)
                     if len(self._marks) > 1:
                         self._release_t = self.t + 1.5
         elif self._bus_prop_left > 0.0 and not self._cut:
             vg = self.vg()
             nvg = float(np.linalg.norm(vg))
-            if nvg < VG_TRIM_MS or self._tau() < TAU_GUARD_S:
+            if (self.burnout_t is not None
+                    and self.t - self.burnout_t > BUS_TRIM_WINDOW_S):
+                # The PBV finishes its insertion trim in seconds and
+                # is DONE.  Without this window, coast-long drag kept
+                # reopening Vg and the bus chased it all the way down
+                # — 9 km long on a 700 km shot (the drag-bias predictor
+                # models an unpowered coast, as it should).
+                self._cut = True
+                if spec.cutoff_event and not self._term_fired:
+                    events.append(("cutoff", self.pos.copy()))
+            elif nvg < VG_TRIM_MS or self._tau() < TAU_GUARD_S:
                 self._cut = True
                 if spec.cutoff_event and not self._term_fired:
                     events.append(("cutoff", self.pos.copy()))
@@ -607,6 +862,11 @@ class IcbmLaunch:
                         events.append(("cutoff", self.pos.copy()))
 
         prev = self.pos.copy()
+        if not self.rv_only:
+            self.vel += _stack_drag_dv(self.pos, self.vel, self.mass,
+                                       spec.diameter_m, dt)
+        else:
+            self.vel += _rv_drag_dv(self.pos, self.vel, dt)
         self.vel[1] -= GRAVITY * dt
         self.pos += self.vel * dt
         self.apex_m = max(self.apex_m, float(self.pos[1]))
@@ -623,6 +883,14 @@ class IcbmLaunch:
             tau_k = max(self._tau() + 1.5 * k, 5.0)
             v_req_k = ((tgt - self.pos) / tau_k
                        + UP * (0.5 * GRAVITY * tau_k))
+            # One drag-aim iteration: fly the vacuum demand through the
+            # real reentry drag, shift the aim by the horizontal miss.
+            hit = self._ballistic_impact(self.pos, v_req_k)
+            if hit is not None:
+                miss = hit - tgt
+                tgt_b = tgt - np.array([miss[0], 0.0, miss[2]])
+                v_req_k = ((tgt_b - self.pos) / tau_k
+                           + UP * (0.5 * GRAVITY * tau_k))
             self._rvs.append(_Rv(self.pos.copy(), v_req_k.copy(), tgt,
                                  self.ground_h))
             events.append(("mirv_sep", self.pos.copy()))

@@ -19,6 +19,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from sim.physics import (cd_from_mach_scalar, drag_force_scalar,
+                         mach_scalar)
+
 from engine.particles import (
     Effects,
     FIRE_BUOYANCY,
@@ -214,8 +217,44 @@ def _wind(fx, y: float) -> np.ndarray:
     return fn(float(y)) if fn is not None else WIND.astype(np.float64)
 
 
+# Display-launch flight physics (2026-07-17, replaces the constant-
+# accel scripted tilt): thrust follows the BODY axis, which slews
+# toward the commanded pitch program at a finite TVC/fin rate, so the
+# tip-over is flown, not keyframed.  Solid prop fraction and body slew
+# rates from the S-300 section of
+# docs/research/missile_flight_physics_reference.md.
+PROP_FRACTION = 0.45         # solid booster propellant / launch mass
+THRUST_AVG_X = 0.78          # thrust sized so the researched
+                             # boost_accel is the BURN-AVERAGE accel
+                             # (mass halves over the burn)
+BODY_SLEW_DEG_S = {          # attitude rate under power (TVC + fins)
+    "9m96": 90.0,            # dual-pulse dogfighter, thrust vectoring
+    "iskander": 35.0,        # 3.8 t quasi-ballistic airframe
+}
+BODY_SLEW_DEFAULT = 45.0     # 48N6/5V55/40N6 class
+COAST_RELAX_DEG_S = 60.0     # weathervane rate toward the velocity
+                             # vector once the motor is out
+
+
+def _slew_vec(cur: np.ndarray, want: np.ndarray, rate_deg_s: float,
+              dt: float) -> np.ndarray:
+    """Rotate unit vector ``cur`` toward ``want``, rate-limited."""
+    want = want / max(float(np.linalg.norm(want)), 1e-9)
+    cosang = float(np.clip(np.dot(cur, want), -1.0, 1.0))
+    ang = math.acos(cosang)
+    max_step = math.radians(rate_deg_s) * dt
+    if ang <= max_step or ang < 1e-9:
+        return want.copy()
+    f = max_step / ang
+    mixed = cur * (1.0 - f) + want * f
+    return mixed / float(np.linalg.norm(mixed))
+
+
 class ScriptedLaunch:
-    """One missile flying its variant's cold-launch script (no guidance)."""
+    """One missile flying its variant's cold-launch script — with real
+    forces: body-axis thrust, exponential-atmosphere Mach drag, mass
+    burn-down and slew-limited steering (no guidance; the researched
+    tilt program is the attitude COMMAND, not the trajectory)."""
 
     def __init__(self, variant: MissileVariant, pad_pos, away_yaw: float,
                  tube_top: float):
@@ -240,14 +279,58 @@ class ScriptedLaunch:
         self._pad0 = np.array(pad_pos, dtype=np.float64)
         self._blast_done = False
         self._roll_done = False
+        # Flight-physics state (body attitude is INTEGRATED, the tilt
+        # program only commands it).
+        self._body = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        self.mass = float(variant.mass_kg)
+        total_burn = sum(b - a for a, b in variant.burns)
+        self._mdot = (PROP_FRACTION * variant.mass_kg
+                      / max(total_burn, 1e-6))
+        self._mass_min = variant.mass_kg * (1.0 - PROP_FRACTION)
+        self.slew_deg_s = BODY_SLEW_DEG_S.get(variant.id,
+                                              BODY_SLEW_DEFAULT)
 
     # ------------------------------------------------------------- physics
 
     @property
     def axis(self) -> np.ndarray:
+        return self._body
+
+    def _cmd_axis(self) -> np.ndarray:
+        """The commanded attitude: the researched pitch program."""
         s, c = math.sin(self.away_yaw), math.cos(self.away_yaw)
         st, ct = math.sin(self.tilt), math.cos(self.tilt)
         return np.array([s * st, ct, c * st], dtype=np.float64)
+
+    def _fly(self, dt: float) -> None:
+        """One tick of display-launch flight: slew the body toward the
+        pitch command (or the airstream on coast), thrust along the
+        BODY, burn mass, drag against the airstream, gravity."""
+        v = self.variant
+        self.tilt = min(math.radians(v.tilt_max_deg),
+                        self.tilt + math.radians(v.tilt_rate_deg) * dt)
+        sp = float(np.linalg.norm(self.vel))
+        if self.burning():
+            self._body = _slew_vec(self._body, self._cmd_axis(),
+                                   self.slew_deg_s, dt)
+            thrust = v.boost_accel * v.mass_kg * THRUST_AVG_X
+            self.vel += self._body * (thrust / self.mass * dt)
+            self.mass = max(self.mass - self._mdot * dt, self._mass_min)
+        elif sp > 5.0:
+            # Coast: the airframe weathervanes onto the airstream —
+            # bounded by the same fin authority as powered steering.
+            self._body = _slew_vec(self._body, self.vel / sp,
+                                   min(COAST_RELAX_DEG_S,
+                                       self.slew_deg_s), dt)
+        sp = float(np.linalg.norm(self.vel))
+        if sp > 1e-6:
+            alt = max(float(self.pos[1]), 0.0)
+            cd = cd_from_mach_scalar(mach_scalar(sp, alt))
+            area = math.pi * (v.diam_m * 0.5) ** 2
+            a_drag = drag_force_scalar(sp, alt, cd, area) / self.mass
+            self.vel -= (self.vel / sp) * min(a_drag * dt, sp * 0.5)
+        self.vel[1] -= GRAVITY * dt
+        self.pos += self.vel * dt
 
     def burning(self) -> bool:
         if not self.ignited:
@@ -270,29 +353,16 @@ class ScriptedLaunch:
             if self.t >= v.ignite_delay:
                 self.ignited = True
                 events.append(("ignite", self.pos.copy()))
-        elif not self._roll_done:
+        else:
             # Exhaust hits the pad an instant after light-off: fast dust
             # sheet first, then the slower rolling vortex ring over it.
             if not self._blast_done and self.t >= v.ignite_delay + 0.08:
                 self._blast_done = True
                 events.append(("pad_blast", self._pad0.copy()))
-            if self.t >= v.ignite_delay + 0.26:
+            if not self._roll_done and self.t >= v.ignite_delay + 0.26:
                 self._roll_done = True
                 events.append(("pad_roll", self._pad0.copy()))
-            self.tilt = min(math.radians(v.tilt_max_deg),
-                            self.tilt + math.radians(v.tilt_rate_deg) * dt)
-            if self.burning():
-                self.vel += self.axis * (v.boost_accel * dt)
-            self.vel[1] -= GRAVITY * dt
-            self.pos += self.vel * dt
-            return
-        else:
-            self.tilt = min(math.radians(v.tilt_max_deg),
-                            self.tilt + math.radians(v.tilt_rate_deg) * dt)
-            if self.burning():
-                self.vel += self.axis * (v.boost_accel * dt)
-            self.vel[1] -= GRAVITY * dt
-            self.pos += self.vel * dt
+            self._fly(dt)
 
     def heading(self) -> np.ndarray:
         n = float(np.linalg.norm(self.vel))
@@ -313,8 +383,9 @@ class ScriptedLaunch:
         if self.done or not self.ignited:
             return
         v = self.variant
-        h = self.heading()
-        tail = self.pos - h * (v.length_m * 0.55)
+        h = self.axis                # exhaust leaves along the BODY:
+        tail = self.pos - h * (v.length_m * 0.55)   # the wag reads in
+        # the plume, not just the mesh.
         rel_alt = max(0.0, float(tail[1]) - self._alt0)
         # Dissipation: the column must THIN OUT at a decent distance
         # instead of standing fresh from pad to apogee (user report
@@ -923,7 +994,11 @@ class GuidedLaunch(ScriptedLaunch):
                                             tau - t_leg, dt)
         sp = float(np.linalg.norm(self.vel))
         if sp > 5.0:
-            self._axis_g = self.vel / sp
+            # Slew-limited body attitude instead of a per-tick snap to
+            # velocity: the nose visibly CHASES the path through the
+            # TVC flip and hard corners (user: "on a rail").
+            self._axis_g = _slew_vec(self._axis_g, self.vel / sp,
+                                     self.slew_deg_s, dt)
         # Gate passage -> next leg (SAME criterion as the twin: sphere
         # or the along-track plane measured from the LEG START — a
         # mismatched plane normal made live flights switch legs off the
