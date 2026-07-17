@@ -134,6 +134,16 @@ more big ammunition, terrain deformation, the M globe. Six commits:
    cap/ground-ring on the Glasstone clock, yield-scaled, per-RV.
    Probe frames 60-65; round-2 cap/stem tune from my own audit.
 
+Full-suite verdict (end of the overnight run): 8 red, ALL verified
+pre-existing — test_swarm saturation, test_launch_kinematics
+[kh31p/pantsir_57e6/sm6/swarm/zircon], test_phase5b_e2e harm-mission +
+ir-drone-hunt. Re-ran a sample covering all three files in a worktree
+at 33f139e (the commit BEFORE this run): identical failures. Every
+suite the overnight work touched (cinematic, icbm, guided, ammo,
+craters, globe, nuclear burst — 100+ tests) is green. The 8 combat
+reds need their own triage session ([[overnight-run-2026-07-17]]
+already flagged pre-existing reds for user judgment).
+
 Honest remaining for the next session:
 - 60 fps x 15 s captures per weapon vs real footage values (user's
   explicit ask — structural work landed, the art loop needs eyes).
