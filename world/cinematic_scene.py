@@ -67,6 +67,13 @@ class CinematicScene:
         self.tiles = [SceneTile(scene_dir, rec) for rec in m["tiles"]]
         self.surround = [SceneTile(scene_dir, rec)
                          for rec in m.get("surround", [])]
+        # Expansion rings (tools/bake_cinematic_ring.py): same chunk
+        # schema at coarser cells — 64 km of 2 m-source alps (surround2)
+        # and the ~160 km GLO-30 horizon (surround3).
+        self.surround2 = [SceneTile(scene_dir, rec)
+                          for rec in m.get("surround2", [])]
+        self.surround3 = [SceneTile(scene_dir, rec)
+                          for rec in m.get("surround3", [])]
 
         dtm = m["dtm"]
         self._cell = float(dtm["cell"])
@@ -107,8 +114,43 @@ class CinematicScene:
         self._sur = field
         self._sur_cell = cell
         self._sur_x0, self._sur_z0 = x0, z0
+        self._sur_x1, self._sur_z1 = x1, z1
         self.ext_x0, self.ext_x1 = x0, x1
         self.ext_z0, self.ext_z1 = z0, z1
+        # Far rings: fine-to-coarse physics mosaics; the walkable world
+        # (and the ICBM target designator) now ends at the LAST ring.
+        self._far = []
+        for tiles in (self.surround2, self.surround3):
+            fld = self._build_ring_field(tiles)
+            if fld is not None:
+                self._far.append(fld)
+                self.ext_x0 = min(self.ext_x0, fld[2])
+                self.ext_z0 = min(self.ext_z0, fld[3])
+                self.ext_x1 = max(self.ext_x1, fld[4])
+                self.ext_z1 = max(self.ext_z1, fld[5])
+
+    def _build_ring_field(self, tiles):
+        """(field, cell, x0, z0, x1, z1) mosaic for one uniform ring."""
+        if not tiles:
+            return None
+        x0 = min(t.x0 for t in tiles)
+        z0 = min(t.z0 for t in tiles)
+        x1 = max(t.x0 + t.size for t in tiles)
+        z1 = max(t.z0 + t.size for t in tiles)
+        size = tiles[0].size
+        with np.load(tiles[0].hgt_path) as z:
+            n_in = z["h"].shape[0] - 2
+        cell = size / (n_in - 1)
+        nx = int(round((x1 - x0) / cell)) + 1
+        nz = int(round((z1 - z0) / cell)) + 1
+        field = np.full((nz, nx), np.nan, dtype=np.float32)
+        for t in tiles:
+            with np.load(t.hgt_path) as zf:
+                inner = zf["h"][1:-1, 1:-1]
+            ix = int(round((t.x0 - x0) / cell))
+            iz = int(round((t.z0 - z0) / cell))
+            field[iz:iz + n_in, ix:ix + n_in] = inner
+        return (field, cell, x0, z0, x1, z1)
 
     # ---------------------------------------------------------- samplers
 
@@ -144,10 +186,28 @@ class CinematicScene:
         return ((h00 * (1 - fx) + h10 * fx) * (1 - fz)
                 + (h01 * (1 - fx) + h11 * fx) * fz)
 
+    def _far_h(self, x: float, z: float) -> float:
+        """Fine-to-coarse expansion rings; NaN when off every ring."""
+        for field, cell, fx0, fz0, fx1, fz1 in getattr(self, "_far", []):
+            if not (fx0 <= x <= fx1 and fz0 <= z <= fz1):
+                continue
+            gx = min(max((x - fx0) / cell, 0.0), field.shape[1] - 1.001)
+            gz = min(max((z - fz0) / cell, 0.0), field.shape[0] - 1.001)
+            i0, j0 = int(gx), int(gz)
+            fxw, fzw = gx - i0, gz - j0
+            h00 = float(field[j0, i0]);     h10 = float(field[j0, i0 + 1])
+            h01 = float(field[j0 + 1, i0]); h11 = float(field[j0 + 1, i0 + 1])
+            h = ((h00 * (1 - fxw) + h10 * fxw) * (1 - fzw)
+                 + (h01 * (1 - fxw) + h11 * fxw) * fzw)
+            if np.isfinite(h):
+                return h
+        return float("nan")
+
     def ground_h(self, x: float, z: float) -> float:
         """Walkable height at (x, z): 1 m LiDAR bare earth inside the
-        core, the coarse surround field beyond it, blended across the
-        core border so the seam never forms a phantom cliff."""
+        core, the coarse surround field beyond it, then the expansion
+        rings — blended across the core border so the seam never forms
+        a phantom cliff."""
         inside = (self.x0 <= x <= self.x1 and self.z0 <= z <= self.z1)
         if self._sur is None:
             return self._core_h(x, z)
@@ -161,7 +221,12 @@ class CinematicScene:
                 return self._core_h(x, z)
             w = edge / self.BLEND_BAND_M
             return self._core_h(x, z) * w + s * (1.0 - w)
-        return self._surround_h(x, z)
+        if (self._sur_x0 <= x <= self._sur_x1
+                and self._sur_z0 <= z <= self._sur_z1):
+            s = self._surround_h(x, z)
+            if np.isfinite(s):
+                return s
+        return self._far_h(x, z)
 
     def blocked(self, x: float, z: float) -> bool:
         """True where the LiDAR surface is a wall (tree/building cell in
@@ -176,7 +241,7 @@ class CinematicScene:
         if not (self.ext_x0 <= x <= self.ext_x1
                 and self.ext_z0 <= z <= self.ext_z1):
             return True
-        return not np.isfinite(self._surround_h(x, z))
+        return not np.isfinite(self.ground_h(x, z))
 
     # ------------------------------------------------------------ spawn
 

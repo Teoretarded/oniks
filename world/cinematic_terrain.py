@@ -362,10 +362,13 @@ class CinematicTerrain:
                                        skirt_drop=drops[2], clutter=c20))
                 t.tex = _upload_texture(decode_futs[rec.hgt_path].result())
                 self.tiles.append(t)
-            # Coarse surround ring: always-drawn far chunks so the world
-            # keeps going past the fine scene instead of ending in void.
+            # Coarse surround ring + expansion rings: always-drawn far
+            # chunks so the world keeps going past the fine scene —
+            # heterogeneous chunk sizes are fine (cell derives per rec).
             self.surround = []
-            for rec in getattr(scene, "surround", []):
+            for rec in (list(getattr(scene, "surround", []))
+                        + list(getattr(scene, "surround2", []))
+                        + list(getattr(scene, "surround3", []))):
                 with np.load(rec.hgt_path) as z:
                     h = z["h"]
                 mesh = _TexturedMesh(*build_tile_arrays(

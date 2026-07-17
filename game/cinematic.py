@@ -52,7 +52,7 @@ BASE_FOV = 68.0
 # free-holding hopeless — that's what I-key tracking is for.
 BINO_FOVS = (BASE_FOV, 30.0, 14.0, 7.0, 3.4, 1.7, 0.68)
 FREECAM_SPEED0 = 45.0        # m/s, wheel-scaled
-TELEPORT_MAX_M = 30_000.0
+TELEPORT_MAX_M = 220_000.0   # ray reach: the world now ends at ring 3
 
 # Fresh overlay palette — deliberately NOT the game's brass terminal ink:
 # near-black glass, hairline white rules, one cool accent.

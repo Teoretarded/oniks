@@ -1049,3 +1049,33 @@ def test_icbm_full_flight_through_state_events_reaches_impact():
     assert err < 150.0
     st.sim_step(1.0 / 120.0)
     assert m not in st.launches             # pruned; smoke lives on
+
+
+# ------------------------------------------------------- expansion rings
+
+def test_expansion_rings_extend_ground_and_bounds(surround_scene, tmp_path):
+    """surround2/surround3 chunks (map expansion 2026-07-17) join the
+    physics chain: ground_h falls through surround -> ring2 -> ring3,
+    walkable/targetable bounds grow to the LAST ring, and off-ring stays
+    blocked."""
+    meta = json.loads((surround_scene / "scene.json").read_text())
+    # Ring2: one 256 m chunk east of the surround at y = 20.
+    np.savez(surround_scene / "r2_hgt.npz",
+             h=np.full((7, 7), 20.0, dtype=np.float32))
+    meta["surround2"] = [{"x0": 192.0, "z0": -64.0, "size": 256.0,
+                          "hgt": "r2_hgt.npz", "tex": "missing.jpg"}]
+    # Ring3: one 512 m chunk beyond that at y = 40.
+    np.savez(surround_scene / "r3_hgt.npz",
+             h=np.full((7, 7), 40.0, dtype=np.float32))
+    meta["surround3"] = [{"x0": 448.0, "z0": -64.0, "size": 512.0,
+                          "hgt": "r3_hgt.npz", "tex": "missing.jpg"}]
+    (surround_scene / "scene.json").write_text(json.dumps(meta),
+                                               encoding="utf-8")
+    sc = CinematicScene(str(surround_scene))
+    assert sc.ext_x1 == 960.0                    # 448 + 512: ring3 wins
+    assert sc.ground_h(160.0, 64.0) == pytest.approx(7.0)   # surround
+    assert sc.ground_h(300.0, 30.0) == pytest.approx(20.0)  # ring2
+    assert sc.ground_h(700.0, 30.0) == pytest.approx(40.0)  # ring3
+    assert not sc.blocked(300.0, 30.0)
+    assert not sc.blocked(700.0, 30.0)
+    assert sc.blocked(700.0, 600.0)              # off every field
