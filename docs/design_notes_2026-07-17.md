@@ -144,6 +144,29 @@
     (chunky Starstreak aiming unit; bare-cylinder tubes; big white eject
     blob) — hands off per your instruction.
 
+## 3b. Full-suite verdict (overnight run, ~1300 tests, -n auto)
+- GREEN except the failures below — ALL verified PRE-EXISTING at the
+  checkpoint commit 444ef00 (they came in with the prior sessions'
+  never-committed delta, NOT this run's changes):
+  1. test_launch_kinematics[zircon/kh31p/swarm/pantsir_57e6] — the public
+     phase LABEL chatters (Zircon flaps CLIMB<->CRUISE 5x after boost; the
+     HUD phase text will flicker in-game too). FC corridor chatter
+     surfacing in labels; needs label hysteresis, a design/tuning call.
+     ([sm6] also failed once mid-run but passes on the settled tree.)
+  2. test_phase5a_e2e::test_awacs_cue_forms_track_own_radar_silent — the
+     AWACS cue no longer forms a ship fire-control track in the seeded
+     scenario (len(tracks) == 0).
+  3. test_phase5b_e2e::test_harm_mission_silence_degrades_and_belief_flips_back
+     — HARM-vs-silence belief flow broken in the seeded scenario.
+  4. test_phase5b_e2e::test_ir_drone_hunt_kills_with_no_rwr_lock —
+     "AIM-9X never killed the drone" (possibly the same close-HIGH-target
+     family as the SM-2 drone bug this run fixed, but in the IR/fighter
+     chain — worth checking against the new air-intercept floor pattern).
+  5. test_swarm lone leak + test_s300_rounds_distinct high-envelope
+     energy death (items 0-1 in the list above).
+- FIXED from the failure list: test_testing_catalog (stale category pin —
+  the EFFECTS tab session added the category, never refreshed the pin).
+
 ## 4. How I'd add the new content (implementation sketches)
 - Each entry: what it reuses, what's new, the counterplay.
 1. SeaRAM/RAM inner layer (enemy ships)

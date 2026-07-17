@@ -27,7 +27,7 @@ def test_catalog_ids_categories_and_entries_are_stable_and_immutable():
     assert len(ids) == len(set(ids))
     assert CATEGORIES == (
         "ALL", "GROUND", "STRUCTURES", "AIRCRAFT", "SHIPS",
-        "MISSILES", "WEATHER",
+        "MISSILES", "WEATHER", "EFFECTS",
     )
     assert all(asset.category in CATEGORIES[1:] for asset in TEST_ASSETS)
     assert all(asset.builder_ref.count(":") == 1 for asset in TEST_ASSETS)
