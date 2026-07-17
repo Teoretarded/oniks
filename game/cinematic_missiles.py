@@ -106,6 +106,17 @@ class MissileVariant:
     base_cloud_mult: float = 1.0    # eject cloud scale
     ground_blast_mult: float = 1.0  # pad wall-jet particle scale
     shake_amp: float = 0.75     # observer shake (m) at the acoustic hit
+    # Flight-computer data (universal T-targeting, 2026-07-17): open
+    # figures for the real rounds — mass, body diameter, an average
+    # supersonic Cd, structural g ceiling, aero lift authority, the
+    # published engagement range, and the warhead for impact scale.
+    mass_kg: float = 1800.0
+    diam_m: float = 0.519
+    cd: float = 0.32
+    g_max: float = 25.0
+    lift_q_gain: float = 4.0e-4   # lat m/s^2 per Pa of dynamic pressure
+    range_km: float = 150.0
+    warhead_kg: float = 145.0
 
 
 # Values from docs/research/s300_launch_visuals.md (GPT-5.6 Sol footage
@@ -124,7 +135,9 @@ VARIANTS = (
         smoke_rate=68.0, smoke_size=(6.5, 50.0), column_persist_s=280.0,
         fireball_scale=1.0, life_s=40.0,
         smoke_per_m=2.00, width_mult=1.0, base_cloud_mult=1.30,
-        ground_blast_mult=1.15, shake_amp=0.75),
+        ground_blast_mult=1.15, shake_amp=0.75,
+        mass_kg=1835.0, diam_m=0.519, cd=0.32, g_max=25.0,
+        lift_q_gain=4.0e-4, range_km=150.0, warhead_kg=145.0),
     MissileVariant(
         id="5v55", label="5V55", blurb="FIRST GENERATION - FILTHY OLD BOOSTER",
         length_m=7.25, eject_v0=30.0, ignite_delay=0.85,
@@ -136,7 +149,9 @@ VARIANTS = (
         smoke_rate=78.0, smoke_size=(6.0, 46.0), column_persist_s=240.0,
         fireball_scale=0.9, life_s=32.0,
         smoke_per_m=2.60, width_mult=1.15, base_cloud_mult=1.35,
-        ground_blast_mult=1.25, shake_amp=0.60),
+        ground_blast_mult=1.25, shake_amp=0.60,
+        mass_kg=1665.0, diam_m=0.508, cd=0.34, g_max=25.0,
+        lift_q_gain=3.8e-4, range_km=75.0, warhead_kg=133.0),
     MissileVariant(
         id="9m96", label="9M96E2", blurb="AGILE DUAL-PULSE - THIN AND CLEAN",
         length_m=4.75, eject_v0=32.0, ignite_delay=0.7,
@@ -148,7 +163,9 @@ VARIANTS = (
         smoke_rate=34.0, smoke_size=(3.0, 27.0), column_persist_s=170.0,
         fireball_scale=0.6, life_s=30.0,
         smoke_per_m=0.72, width_mult=0.44, base_cloud_mult=0.48,
-        ground_blast_mult=0.36, shake_amp=0.22),
+        ground_blast_mult=0.36, shake_amp=0.22,
+        mass_kg=420.0, diam_m=0.240, cd=0.30, g_max=60.0,
+        lift_q_gain=6.5e-4, range_km=120.0, warhead_kg=24.0),
     MissileVariant(
         id="40n6", label="40N6", blurb="THE 400 KM MONSTER - HUGE COLUMN",
         length_m=8.8, eject_v0=33.0, ignite_delay=1.0,
@@ -160,7 +177,9 @@ VARIANTS = (
         smoke_rate=76.0, smoke_size=(10.0, 72.0), column_persist_s=330.0,
         fireball_scale=1.3, life_s=45.0,
         smoke_per_m=3.30, width_mult=1.60, base_cloud_mult=2.10,
-        ground_blast_mult=2.30, shake_amp=1.10),
+        ground_blast_mult=2.30, shake_amp=1.10,
+        mass_kg=1893.0, diam_m=0.519, cd=0.32, g_max=20.0,
+        lift_q_gain=3.5e-4, range_km=380.0, warhead_kg=180.0),
 )
 
 VARIANT_BY_ID = {v.id: v for v in VARIANTS}
@@ -543,6 +562,423 @@ class ScriptedLaunch:
             speed = r.uniform(5.0, 11.0, len(idx))
             fx.smoke.vel[idx, 0] = (np.sin(ang) * speed).astype(np.float32)
             fx.smoke.vel[idx, 2] = (np.cos(ang) * speed).astype(np.float32)
+
+
+
+# ----------------------------------------------------- universal T-targeting
+
+RHO0 = 1.225               # sea-level air density (kg/m^3)
+SCALE_H = 8500.0           # exponential-atmosphere scale height (m)
+SAM_TWIN_DT = 0.1          # planning twin step (segment hit tests keep
+                           # coarse strides exact; 0.05 doubled the
+                           # L-press cost for no measured accuracy)
+SAM_HIT_M = 25.0           # twin counts the mark reached inside this
+SAM_CLEAR_M = 250.0        # glide line must clear terrain by this much
+SAM_GATE_UP_M = 150.0      # extra climb bias over the binding crest
+SAM_CLEAR_ENDS_M = 800.0   # ...except this close to launch/impact
+SAM_SLEW_DEG_S = 55.0      # cold-launch TVC flip rate (drawn + thrust)
+SAM_ROUTE_STEP_M = 200.0   # terrain profile sampling along the route
+SAM_GATE_R = 300.0         # gate waypoints count as passed inside this
+SAM_TAU_GROWTH = 1.15      # fastest-route search: tau bump per retry
+SAM_DIRECT_TAU_MULT = 2.2  # direct tau ceiling before gates are tried
+
+
+def _air_rho(y_asl: float) -> float:
+    return RHO0 * math.exp(-max(y_asl, 0.0) / SCALE_H)
+
+
+def _seg_dist(a: np.ndarray, b: np.ndarray, p: np.ndarray) -> float:
+    """Distance from point ``p`` to segment a->b (per-tick paths move
+    50-80 m — a point-sample proximity test flies straight THROUGH
+    the mark between ticks)."""
+    seg = b - a
+    n2 = float(np.dot(seg, seg))
+    t = float(np.dot(p - a, seg)) / n2 if n2 > 1e-12 else 0.0
+    t = min(max(t, 0.0), 1.0)
+    return float(np.linalg.norm(p - (a + seg * t)))
+
+
+class GuidedLaunch(ScriptedLaunch):
+    """A pad round flying to a designated GROUND mark (T-targeting).
+
+    Same launch theater and particle art as ScriptedLaunch — this class
+    only replaces the kinematics with a flight computer: PIECEWISE
+    LAMBERT.  Each leg flies the proven drag-aware Lambert law (v_req =
+    D/tau + g*tau/2*up; thrust dead along the velocity-to-be-gained
+    while the motor burns, q-limited aero steering on the coast) at the
+    smallest arrival time a forward twin of the law can actually fly.
+    When the direct leg would need silly loft to clear terrain (a pure
+    Lambert answer to a valley wall is stratospheric — measured 180 s
+    for a 30 km shot), the planner inserts a GATE waypoint above the
+    binding crest and flies fast leg -> gate -> fast dive instead.
+    Zero RNG; ``fx.rng`` never touches the trajectory."""
+
+    def __init__(self, variant: MissileVariant, pad_pos, away_yaw: float,
+                 tube_top: float, target, ground_h, origin_alt: float = 0.0):
+        super().__init__(variant, pad_pos, away_yaw, tube_top)
+        tx, tz = float(target[0]), float(target[2])
+        self.target = np.array([tx, float(ground_h(tx, tz)), tz],
+                               dtype=np.float64)
+        self.ground_h = ground_h
+        self._origin_alt = float(origin_alt)   # scene y -> ASL for rho
+        self._axis_g = np.array([0.0, 1.0, 0.0])   # slewed attitude
+        self._t_ign = None
+        self.impacted = False
+        self._legs = self._plan()          # [(aim, tau, is_final)] | None
+        self._leg_i = 0
+        self._leg_t0 = 0.0                 # flight clock when leg began
+        self.twin_tof = -1.0
+        if self._legs is not None:
+            # The coarse search twin can pass plans the 1/120 live
+            # flight misses (measured 4.9 km divergence).  step() is
+            # deterministic, so flying THE ACTUAL step() on saved state
+            # makes the verdict bit-exact for the real flight.
+            self._legs = self._verified_legs(self._legs)
+
+    def _verified_legs(self, legs):
+        """Verify (and if needed nudge) a plan at live resolution.
+        Near-misses can be early OR late, so the final-leg clock walks
+        both directions before the expensive fine replan fallback."""
+        base = legs[-1][1]
+        for mult in (1.0, 1.1, 0.92, 1.21, 0.85, 1.35):
+            aim, _tau, fin = legs[-1]
+            legs[-1] = (aim, base * mult, fin)
+            self._legs = legs
+            ok, tof = self._verify_full()
+            if ok:
+                self.twin_tof = tof
+                return legs
+        # Last resort: re-search with the twin AT live resolution
+        # (rare; a 45 km 48N6 shot needed it in the probe).
+        global SAM_TWIN_DT
+        coarse = SAM_TWIN_DT
+        SAM_TWIN_DT = 1.0 / 120.0
+        try:
+            legs2 = self._plan_search()
+        finally:
+            SAM_TWIN_DT = coarse
+        if legs2 is not None:
+            self._legs = legs2
+            ok, tof = self._verify_full()
+            if ok:
+                self.twin_tof = tof
+                return legs2
+        return None
+
+    @property
+    def feasible(self) -> bool:
+        return self._legs is not None
+
+    # The scripted parent's axis is a yaw/tilt script; the guided round
+    # slews a real attitude with its velocity vector.
+    @property
+    def axis(self) -> np.ndarray:              # type: ignore[override]
+        return self._axis_g
+
+    def _beta(self) -> float:
+        v = self.variant
+        area = math.pi * (v.diam_m * 0.5) ** 2
+        return v.cd * area / v.mass_kg
+
+    def _lat_max(self, speed: float, y_asl: float) -> float:
+        """Steering authority (m/s^2): q-scaled lift, g-ceiling capped."""
+        v = self.variant
+        q = 0.5 * _air_rho(y_asl) * speed * speed
+        return min(v.g_max * GRAVITY, v.lift_q_gain * q * GRAVITY)
+
+    # ---------------------------------------------------------- planning
+
+    def _verify_full(self):
+        """Fly the real step() at the game's 1/120 on saved state; the
+        flight is deterministic so this IS the live outcome."""
+        saved = (self.pos.copy(), self.vel.copy(), self.t, self.ignited,
+                 self._t_ign, self._leg_i, self._leg_t0, self.done,
+                 self.impacted, self._axis_g.copy(), self._blast_done,
+                 self._roll_done, self._last_smoke_pos,
+                 getattr(self, "_leg_start", None))
+        self.twin_tof = 1e9                # disarm the lost-round guard
+        cap = sum(leg[1] for leg in self._legs) * 2.0 + 60.0
+        sink: list = []
+        while not self.done and self.t < cap:
+            self.step(1.0 / 120.0, sink)
+        ok = (self.impacted and float(
+            np.linalg.norm(self.pos - self.target)) <= SAM_HIT_M)
+        tof = self.t
+        (self.pos, self.vel, self.t, self.ignited, self._t_ign,
+         self._leg_i, self._leg_t0, self.done, self.impacted,
+         self._axis_g, self._blast_done, self._roll_done,
+         self._last_smoke_pos, leg_start) = saved
+        if leg_start is None:
+            if hasattr(self, "_leg_start"):
+                del self._leg_start
+        else:
+            self._leg_start = leg_start
+        return ok, tof
+
+    def _plan(self):
+        rng_m = math.hypot(self.target[0] - self.pos[0],
+                           self.target[2] - self.pos[2])
+        if rng_m > self.variant.range_km * 1000.0:
+            return None
+        return self._plan_search()
+
+    def _plan_search(self):
+        v = self.variant
+        res = self._plan_from(self.pos.copy(),
+                              np.array([0.0, v.eject_v0, 0.0]),
+                              -v.ignite_delay, self.target,
+                              is_final=True, depth=0)
+        return res[0] if res is not None else None
+
+    def _plan_from(self, pos, vel, t_off, goal, is_final, depth):
+        """Plan legs from a flight state.  Returns (legs, end_pos,
+        end_vel, end_t_off) or None.  Direct Lambert first at growing
+        tau; once tau would mean silly loft, split at the binding crest
+        (depth-limited) and keep both sub-legs fast."""
+        dist = float(np.linalg.norm(goal - pos))
+        floor = max(6.0, dist / 900.0)     # can't beat ~Mach 2.6 average
+        tau = floor
+        tried_gate = False
+        for k in range(26):
+            res = self._twin_leg(pos, vel, t_off, goal, tau, is_final)
+            if res is not None:
+                legs = [(np.asarray(goal, dtype=np.float64), tau,
+                         is_final)]
+                return legs, res[0], res[1], res[2]
+            if (not tried_gate and depth < 2
+                    and tau > floor * SAM_DIRECT_TAU_MULT):
+                tried_gate = True
+                gate = self._binding_gate(pos, goal)
+                if gate is not None:
+                    r1 = self._plan_from(pos, vel, t_off, gate,
+                                         is_final=False, depth=depth + 1)
+                    if r1 is not None:
+                        legs1, p1, v1, t1 = r1
+                        r2 = self._plan_from(p1, v1, t1, goal,
+                                             is_final=is_final,
+                                             depth=depth + 1)
+                        if r2 is not None:
+                            legs2, p2, v2, t2 = r2
+                            return legs1 + legs2, p2, v2, t2
+            # Uniform ladder: feasibility is NOT monotone in tau, an
+            # accelerating ladder skipped 48 s windows into 275 s plans
+            # (measured).
+            tau *= SAM_TAU_GROWTH
+        return None
+
+    def _binding_gate(self, pos, goal):
+        """Waypoint above the crest that most blocks the pos->goal
+        chord, or None when the chord is clear."""
+        total = math.hypot(goal[0] - pos[0], goal[2] - pos[2])
+        n = max(3, min(400, int(total / SAM_ROUTE_STEP_M)))
+        best_def, best = 0.0, None
+        for i in range(1, n):
+            f = i / n
+            s = f * total
+            if s < SAM_CLEAR_ENDS_M or total - s < SAM_CLEAR_ENDS_M:
+                continue
+            x = pos[0] + (goal[0] - pos[0]) * f
+            z = pos[2] + (goal[2] - pos[2]) * f
+            g = float(self.ground_h(float(x), float(z)))
+            if not np.isfinite(g):
+                continue
+            line = pos[1] + (goal[1] - pos[1]) * f
+            deficit = (g + SAM_CLEAR_M) - line
+            if deficit > best_def:
+                best_def = deficit
+                best = np.array([x, g + SAM_CLEAR_M + SAM_GATE_UP_M, z])
+        return best
+
+    def _twin_leg(self, pos, vel, t_off, goal, tau, is_final):
+        """Fly one Lambert leg at coarse dt.  Success -> (end_pos,
+        end_vel, end_t_off); None on terrain/short/timeout."""
+        pos = pos.copy()
+        vel = vel.copy()
+        t = 0.0
+        tick = 0
+        hd_total = math.hypot(goal[0] - pos[0], goal[2] - pos[2])
+        start = pos.copy()
+        while t < tau + 3.0:
+            prev = pos.copy()
+            if t_off + t >= 0.0:
+                pos, vel = self._fly_tick(pos, vel, t_off + t, goal,
+                                          tau - t, SAM_TWIN_DT)
+            else:                          # unlit hang out of the tube
+                vel = vel + np.array([0.0, -GRAVITY * SAM_TWIN_DT, 0.0])
+                pos = pos + vel * SAM_TWIN_DT
+            t += SAM_TWIN_DT
+            tick += 1
+            hit_r = SAM_HIT_M if is_final else SAM_GATE_R
+            if _seg_dist(prev, pos, goal) < hit_r:
+                return pos, vel, t_off + t
+            if not is_final:
+                # Passing the gate's along-track plane also counts.
+                u = goal - start
+                u[1] = 0.0
+                nu = float(np.linalg.norm(u))
+                if nu > 1e-6 and float(np.dot(pos - goal, u / nu)) > 0.0:
+                    return pos, vel, t_off + t
+            # Terrain every 4th tick, ends exempted.
+            dx = math.hypot(goal[0] - pos[0], goal[2] - pos[2])
+            end_d = min(hd_total - dx, dx)
+            if (tick % 4 == 0 and end_d > SAM_CLEAR_ENDS_M
+                    and t_off + t > 2.0):
+                g = float(self.ground_h(float(pos[0]), float(pos[2])))
+                if np.isfinite(g) and pos[1] < g + 40.0:
+                    return None            # flew into a ridge
+            if is_final and vel[1] < 0.0 and pos[1] < goal[1] - 150.0:
+                return None                # into the ground short
+        return None
+
+    # ------------------------------------------------------------ the law
+
+    def _fly_tick(self, pos, vel, t_glob, goal, tau_rem, dt):
+        """One tick of the Lambert law (shared by twin and live)."""
+        v = self.variant
+        tau_rem = max(tau_rem, 0.5)
+        v_req = ((goal - pos) / tau_rem
+                 + np.array([0.0, 0.5 * GRAVITY * tau_rem, 0.0]))
+        speed = float(np.linalg.norm(vel))
+        y_asl = float(pos[1]) + self._origin_alt
+        if any(a <= t_glob < b for a, b in v.burns):
+            vg = v_req - vel
+            nvg = float(np.linalg.norm(vg))
+            if nvg > 1e-6:
+                # TVC flip: thrust walks from vertical onto the demand
+                # at the real cold-launch slam rate, then rides it.
+                want = vg / nvg
+                lim = math.radians(SAM_SLEW_DEG_S) * max(t_glob, 0.0)
+                up = np.array([0.0, 1.0, 0.0])
+                cosang = float(np.clip(np.dot(up, want), -1.0, 1.0))
+                ang = math.acos(cosang)
+                if ang > lim:
+                    f = lim / ang
+                    want = up * (1.0 - f) + want * f
+                    want = want / float(np.linalg.norm(want))
+                vel = vel + want * (v.boost_accel * dt)
+        elif speed > 1e-6:
+            # Coast: q-limited aero steering toward the Lambert demand.
+            want = v_req / max(float(np.linalg.norm(v_req)), 1e-9)
+            have = vel / speed
+            cosang = float(np.clip(np.dot(have, want), -1.0, 1.0))
+            ang = math.acos(cosang)
+            max_ang = self._lat_max(speed, y_asl) / max(speed, 1.0) * dt
+            if ang > 1e-6:
+                f = min(1.0, max_ang / ang)
+                new_dir = have * (1.0 - f) + want * f
+                new_dir = new_dir / float(np.linalg.norm(new_dir))
+                vel = new_dir * speed
+        # Gravity + drag (exponential atmosphere).
+        vel = vel + np.array([0.0, -GRAVITY * dt, 0.0])
+        speed = float(np.linalg.norm(vel))
+        if speed > 1e-6:
+            drag = 0.5 * _air_rho(y_asl) * speed * self._beta()
+            vel = vel * max(0.0, 1.0 - drag * dt)
+        return pos + vel * dt, vel
+
+    # ------------------------------------------------------- live flight
+
+    def step(self, dt: float, events: list) -> None:
+        if self.done:
+            return
+        v = self.variant
+        self.t += dt
+        if not self.ignited:
+            self.vel[1] -= GRAVITY * dt
+            self.pos += self.vel * dt
+            if self.t >= v.ignite_delay:
+                self.ignited = True
+                self._t_ign = self.t
+                events.append(("ignite", self.pos.copy()))
+            return
+        if not self._blast_done and self.t >= v.ignite_delay + 0.08:
+            self._blast_done = True
+            events.append(("pad_blast", self._pad0.copy()))
+        if not self._roll_done and self.t >= v.ignite_delay + 0.26:
+            self._roll_done = True
+            events.append(("pad_roll", self._pad0.copy()))
+        tf = self.t - self._t_ign
+        aim, tau, is_final = self._legs[self._leg_i]
+        t_leg = tf - self._leg_t0
+        if not hasattr(self, "_leg_start"):
+            self._leg_start = self.pos.copy()
+        prev = self.pos.copy()
+        self.pos, self.vel = self._fly_tick(self.pos, self.vel, tf, aim,
+                                            tau - t_leg, dt)
+        sp = float(np.linalg.norm(self.vel))
+        if sp > 5.0:
+            self._axis_g = self.vel / sp
+        # Gate passage -> next leg (SAME criterion as the twin: sphere
+        # or the along-track plane measured from the LEG START — a
+        # mismatched plane normal made live flights switch legs off the
+        # twin's plan and drift 250+ m at 45 km, measured).
+        if not is_final:
+            u = aim - self._leg_start
+            u[1] = 0.0
+            nu = float(np.linalg.norm(u))
+            passed = (_seg_dist(prev, self.pos, aim) < SAM_GATE_R
+                      or (nu > 1e-6
+                          and float(np.dot(self.pos - aim, u / nu)) > 0.0))
+            if passed or t_leg > tau + 5.0:
+                self._leg_i = min(self._leg_i + 1, len(self._legs) - 1)
+                self._leg_t0 = tf
+                self._leg_start = self.pos.copy()
+            return
+        # Impact: mark proximity (segment test) or terrain crossing.
+        if _seg_dist(prev, self.pos, self.target) < 15.0:
+            self.pos = self.target.copy()
+            events.append(("impact", self.pos.copy()))
+            self.impacted = True
+            self.done = True
+            return
+        if self.vel[1] < 0.0:
+            g = float(self.ground_h(float(self.pos[0]),
+                                    float(self.pos[2])))
+            if np.isfinite(g) and self.pos[1] <= g:
+                denom = float(prev[1] - self.pos[1])
+                f = min(max((prev[1] - g) / denom, 0.0), 1.0) \
+                    if denom > 1e-9 else 1.0
+                self.pos = prev + (self.pos - prev) * f
+                self.pos[1] = g
+                events.append(("impact", self.pos.copy()))
+                self.impacted = True
+                self.done = True
+                return
+        if tf > self.twin_tof * 1.6 + 30.0:
+            self.done = True               # lost-round guard
+
+    def impact_fx(self, fx, pos) -> None:
+        """Warhead-scaled ground burst: flash, frag dust sheet, rising
+        column — sized by warhead_kg (24 kg 9M96 vs 180 kg 40N6)."""
+        v = self.variant
+        s = (v.warhead_kg / 145.0) ** (1.0 / 3.0)   # cube-root scaling
+        r = fx.rng
+        p = np.asarray(pos, dtype=np.float64) + np.array([0.0, 0.6, 0.0])
+        w = _wind(fx, float(p[1]))
+        fx.fire.emit(3, p, 0.8, (0.0, 0.0, 0.0), 0.0, (0.10, 0.18),
+                     (9.0 * s, 15.0 * s),
+                     ((1.0, 0.97, 0.85), (1.0, 0.8, 0.4)), r)
+        fx.fire.emit(int(30 * s) + 6, p, 2.0 * s, (0.0, 10.0, 0.0), 8.0,
+                     (0.25, 0.7), (1.2 * s, 4.5 * s),
+                     ((1.0, 0.85, 0.5), (1.0, 0.45, 0.1)), r)
+        idx = fx.smoke.emit(int(70 * s) + 10, p, 2.0 * s,
+                            (0.0, 1.2, 0.0), 0.7, (2.5, 6.0),
+                            (2.0 * s, 14.0 * s),
+                            ((0.52, 0.47, 0.40), (0.42, 0.39, 0.35)), r,
+                            alpha01=(0.8, 0.06), fade_in=0.04,
+                            stretch=0.03)
+        if len(idx):
+            ang = r.uniform(0.0, 2.0 * np.pi, len(idx))
+            sp = r.uniform(26.0, 48.0, len(idx)) * s
+            fx.smoke.vel[idx, 0] = (np.sin(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 2] = (np.cos(ang) * sp).astype(np.float32)
+            fx.smoke.vel[idx, 1] = r.uniform(1.0, 4.0, len(idx)) \
+                .astype(np.float32)
+        fx.smoke.emit(int(36 * s) + 8, p + np.array([0.0, 3.0, 0.0]),
+                      3.5 * s, w + np.array([0.0, 5.0, 0.0]), 2.5,
+                      (16.0, 36.0), (4.0 * s, 26.0 * s),
+                      ((0.50, 0.46, 0.41), (0.40, 0.39, 0.37)), r,
+                      alpha01=(0.6, 0.04), fade_in=0.10)
 
 
 def next_variant(current_id: str, step: int = 1) -> MissileVariant:

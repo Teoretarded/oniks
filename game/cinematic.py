@@ -34,6 +34,7 @@ from engine.text import BODY_SIZE, HEADER_SIZE, SMALL_SIZE
 from game.cinematic_icbm import ICBM_BY_ID, ICBMS, IcbmLaunch
 from game.cinematic_missiles import (
     CinematicEffects,
+    GuidedLaunch,
     ScriptedLaunch,
     VARIANTS,
     next_variant,
@@ -307,9 +308,11 @@ class CinematicState(GameState):
                 fn()
 
     def effective_time_scale(self) -> float:
-        """1x always — except the '.' coast warp while an ICBM flies."""
-        if self.warp_i > 0 and any(isinstance(m, IcbmLaunch) and not m.done
-                                   for m in self.launches):
+        """1x always — except the '.' warp while a TARGETED round flies
+        (ICBM or a guided pad round; scripted shows stay realtime)."""
+        if self.warp_i > 0 and any(
+                isinstance(m, (IcbmLaunch, GuidedLaunch)) and not m.done
+                for m in self.launches):
             return WARPS[self.warp_i]
         return 1.0
 
@@ -493,8 +496,8 @@ class CinematicState(GameState):
                 self.follow = not self.follow
                 self._say("CHASE CAM" if self.follow else "CHASE CAM OFF")
             elif ev.key == pygame.K_PERIOD:
-                if any(isinstance(m, IcbmLaunch) and not m.done
-                       for m in self.launches):
+                if any(isinstance(m, (IcbmLaunch, GuidedLaunch))
+                       and not m.done for m in self.launches):
                     self.warp_i = (self.warp_i + 1) % len(WARPS)
                     self._say(f"TIME X{WARPS[self.warp_i]:.0f}")
                 else:
@@ -645,8 +648,25 @@ class CinematicState(GameState):
             self._say(f"TUBE CYCLING - "
                       f"{self._min_relaunch_s - last.t:.1f} S")
             return
-        m = ScriptedLaunch(self.variant, self._pad, self._pad_yaw,
-                           self._tube_top)
+        if self.icbm_target is not None:
+            # Universal T-targeting: with a mark set, the pad round
+            # flies its computed fastest route to it (user order
+            # 2026-07-17); the scripted show only fires unmarked.
+            m = GuidedLaunch(self.variant, self._pad, self._pad_yaw,
+                             self._tube_top, tuple(self.icbm_target),
+                             self.scene.ground_h,
+                             origin_alt=self.scene.origin_alt)
+            if not m.feasible:
+                self._say(f"{self.variant.label}: NO ROUTE TO THE MARK "
+                          f"(RANGE {self.variant.range_km:.0f} KM)")
+                return
+            rng = math.hypot(self.icbm_target[0] - self._pad[0],
+                             self.icbm_target[2] - self._pad[2])
+            self._say(f"{self.variant.label} AWAY - "
+                      f"{rng / 1000.0:.1f} KM TO THE MARK")
+        else:
+            m = ScriptedLaunch(self.variant, self._pad, self._pad_yaw,
+                               self._tube_top)
         self.launches.append(m)
         mouth = self._pad + np.array([0.0, self._tube_top, 0.0])
         m.eject_fx(self.effects, mouth, float(self._pad[1]))
@@ -772,8 +792,9 @@ class CinematicState(GameState):
             else:
                 self._door_anim[sid] = max(
                     0.0, self._door_anim[sid] - dt / 8.0)
-        if not any(isinstance(m, IcbmLaunch) for m in self.launches):
-            self.warp_i = 0          # warp is an ICBM-flight tool only
+        if not any(isinstance(m, (IcbmLaunch, GuidedLaunch))
+                   for m in self.launches):
+            self.warp_i = 0          # warp is a targeted-flight tool only
         if self.effects is not None:
             self.effects.update(dt)
         if self.fog is not None:
@@ -1055,11 +1076,17 @@ class CinematicState(GameState):
         text = self.text
         drew = self._draw_spotter(w, h)
         self._draw_target_marker(w, h)
-        if LAUNCHERS[self.launcher_i][0] != "s300" and not self.ui_open:
-            hint = ("AIM + T SETS TARGET   L LAUNCHES"
-                    if self.icbm_target is None else
-                    "L LAUNCHES   C CHASE CAM   . TIME WARP")
-            text.draw_text(28, h - 30, hint, (*UI_DIM, 0.85), SMALL_SIZE)
+        if not self.ui_open:
+            if LAUNCHERS[self.launcher_i][0] != "s300":
+                hint = ("AIM + T SETS TARGET   L LAUNCHES"
+                        if self.icbm_target is None else
+                        "L LAUNCHES   C CHASE CAM   . TIME WARP")
+                text.draw_text(28, h - 30, hint, (*UI_DIM, 0.85),
+                               SMALL_SIZE)
+            elif self.icbm_target is not None:
+                text.draw_text(28, h - 30,
+                               "L FLIES TO YOUR MARK   T MOVES IT",
+                               (*UI_DIM, 0.85), SMALL_SIZE)
         fade = 1.0 - max(0.0, min(1.0, (self.t - 5.0) / 2.0))
         if fade > 0.0:
             title = self.scene.title
