@@ -770,6 +770,7 @@ class CinematicState(GameState):
                     delay = float(np.linalg.norm(pos - eye)) \
                         / SPEED_OF_SOUND
                     self._shake_queue.append((self.t + delay, 2.2))
+                    self._spawn_crater(m, pos)
                     self._say("IMPACT")
             m.emit(self.effects, dt)
         # Shoulder weapons fly AFTER the targets moved (their rounds home
@@ -829,6 +830,24 @@ class CinematicState(GameState):
                                             gain=gain * 0.6)
                 else:
                     self.app.audio.play(name, pos=pos, gain=gain)
+
+    def _spawn_crater(self, m, pos) -> None:
+        """Terrain deformation at impact: crater size from the round.
+        Nuclear: Glasstone dry-soil surface burst (1 Mt ~ 350 m
+        diameter); conventional: cube-root HE scaling."""
+        add = getattr(self.scene, "add_crater", None)
+        if add is None:                # fakes/tests without the overlay
+            return
+        if isinstance(m, IcbmLaunch):
+            w_mt = m.spec.yield_kt / 1000.0
+            radius = 175.0 * max(w_mt, 1e-6) ** 0.3
+            depth = radius / 2.8
+        elif isinstance(m, GuidedLaunch):
+            radius = max(2.5, 0.9 * m.variant.warhead_kg ** (1.0 / 3.0))
+            depth = radius / 2.4
+        else:
+            return
+        add(float(pos[0]), float(pos[2]), radius, depth)
 
     def _freecam_move(self, dt, fwd, strafe, up, sprint) -> None:
         yaw, pitch = self.walker.yaw, self.walker.pitch

@@ -24,6 +24,7 @@ Baked layout (all files relative to the scene dir):
 from __future__ import annotations
 
 import json
+import math
 import os
 
 import numpy as np
@@ -82,6 +83,12 @@ class CinematicScene:
                                               m["obstacle"]["file"]))
         self._nz, self._nx = self._dtm.shape
         self._load_surround_field(scene_dir)
+        # Terrain deformation (2026-07-17): impact craters as a runtime
+        # height DELTA over the baked data — physics and renderer read
+        # the same list, so boots, missiles and pixels agree.
+        self._craters: list = []       # (x, z, R, depth, rev)
+        self._crater_cells: dict = {}  # spatial hash -> crater indices
+        self.crater_rev = 0            # bumps on every add (renderer)
 
     def _load_surround_field(self, scene_dir: str) -> None:
         """Assemble the coarse surround chunks into ONE walkable height
@@ -207,7 +214,13 @@ class CinematicScene:
         """Walkable height at (x, z): 1 m LiDAR bare earth inside the
         core, the coarse surround field beyond it, then the expansion
         rings — blended across the core border so the seam never forms
-        a phantom cliff."""
+        a phantom cliff.  Impact craters ride on top as a delta."""
+        h = self._baked_h(x, z)
+        if self._craters:
+            h += self.crater_delta(x, z)
+        return h
+
+    def _baked_h(self, x: float, z: float) -> float:
         inside = (self.x0 <= x <= self.x1 and self.z0 <= z <= self.z1)
         if self._sur is None:
             return self._core_h(x, z)
@@ -227,6 +240,100 @@ class CinematicScene:
             if np.isfinite(s):
                 return s
         return self._far_h(x, z)
+
+    # ------------------------------------------------------------ craters
+
+    CRATER_CAP = 96            # oldest craters retire past this
+    _CRATER_CELL = 512.0       # spatial-hash cell (m)
+
+    def add_crater(self, x: float, z: float, radius_m: float,
+                   depth_m: float) -> None:
+        """Punch a crater into the world: bowl + raised rim, applied to
+        BOTH physics sampling and (via crater_rev) the renderer."""
+        x, z = float(x), float(z)
+        radius_m = max(1.0, float(radius_m))
+        depth_m = max(0.2, float(depth_m))
+        self._craters.append((x, z, radius_m, depth_m))
+        if len(self._craters) > self.CRATER_CAP:
+            self._craters.pop(0)
+            self._crater_cells = {}
+            for i, c in enumerate(self._craters):
+                self._hash_crater(i, c)
+        else:
+            self._hash_crater(len(self._craters) - 1,
+                              self._craters[-1])
+        self.crater_rev += 1
+
+    def _hash_crater(self, idx: int, c) -> None:
+        x, z, r, _d = c
+        reach = r * 1.8
+        cs = self._CRATER_CELL
+        for gj in range(int((z - reach) // cs), int((z + reach) // cs) + 1):
+            for gi in range(int((x - reach) // cs),
+                            int((x + reach) // cs) + 1):
+                self._crater_cells.setdefault((gi, gj), []).append(idx)
+
+    @staticmethod
+    def _crater_profile(r: np.ndarray, radius: float, depth: float):
+        """Signed height delta at radial distance r: parabolic bowl,
+        raised lip peaking just outside the rim (classic ejecta form)."""
+        rr = r / radius
+        bowl = -depth * np.clip(1.0 - rr * rr, 0.0, 1.0) ** 2
+        lip_arg = (rr - 1.05) / 0.65
+        lip = (0.22 * depth
+               * np.clip(1.0 - lip_arg * lip_arg, 0.0, 1.0) ** 2)
+        return np.where(rr < 1.7, bowl + lip, 0.0)
+
+    def crater_delta(self, x: float, z: float) -> float:
+        """Summed crater height delta at one point (hot path: spatial
+        hash lookup, then only nearby craters)."""
+        cs = self._CRATER_CELL
+        idxs = self._crater_cells.get((int(x // cs), int(z // cs)))
+        if not idxs:
+            return 0.0
+        total = 0.0
+        for i in idxs:
+            cx, cz, r, d = self._craters[i]
+            dist = math.hypot(x - cx, z - cz)
+            if dist < r * 1.7:
+                total += float(self._crater_profile(
+                    np.float64(dist), r, d))
+        return total
+
+    def crater_delta_grid(self, xs: np.ndarray,
+                          zs: np.ndarray) -> np.ndarray:
+        """(len(zs), len(xs)) summed crater delta — the renderer's mesh
+        rebuild path.  Zero-cost when no crater touches the rect."""
+        out = np.zeros((len(zs), len(xs)), np.float32)
+        if not self._craters:
+            return out
+        x0, x1 = float(np.min(xs)), float(np.max(xs))
+        z0, z1 = float(np.min(zs)), float(np.max(zs))
+        for cx, cz, r, d in self._craters:
+            reach = r * 1.7
+            if (cx + reach < x0 or cx - reach > x1
+                    or cz + reach < z0 or cz - reach > z1):
+                continue
+            rr = np.hypot(xs[None, :] - cx, zs[:, None] - cz)
+            out += self._crater_profile(rr, r, d).astype(np.float32)
+        return out
+
+    def craters_intersecting(self, x0: float, z0: float, x1: float,
+                             z1: float, since_rev: int = 0):
+        """Craters (added at rev > since_rev) touching a rect — the
+        renderer's dirty-tile test."""
+        n = len(self._craters)
+        first_rev = self.crater_rev - n + 1
+        out = []
+        for i, (cx, cz, r, d) in enumerate(self._craters):
+            rev = first_rev + i
+            if rev <= since_rev:
+                continue
+            reach = r * 1.7
+            if (cx + reach >= x0 and cx - reach <= x1
+                    and cz + reach >= z0 and cz - reach <= z1):
+                out.append((cx, cz, r, d))
+        return out
 
     def blocked(self, x: float, z: float) -> bool:
         """True where the LiDAR surface is a wall (tree/building cell in

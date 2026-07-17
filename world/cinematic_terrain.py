@@ -311,13 +311,44 @@ class _Tile:
         return float(np.hypot(dx, dz))
 
 
-def _build_l0_arrays(hgt_path: str, size: float, skirt: float):
-    """Worker-thread half of an L0 stream-in: mesh arrays only."""
+def _build_l0_arrays(hgt_path: str, size: float, skirt: float,
+                     delta2=None):
+    """Worker-thread half of an L0 stream-in: mesh arrays only.
+    ``delta2``: optional crater height delta on the same haloed grid."""
     with np.load(hgt_path) as z:
         h = z["dsm_2m"]
         clutter = z["clutter_2m"]
+    if delta2 is not None:
+        h = h + delta2
     return build_tile_arrays(h, 2.0, size, skirt_drop=skirt,
                              clutter=clutter)
+
+
+def _scorch_rgb(tex_path: str, x0: float, z0: float, size: float,
+                craters) -> np.ndarray:
+    """Worker-thread: decode a tile texture and burn crater scorch into
+    it (dark ash disc, radial falloff).  Row 0 = NORTH per the baked UV
+    convention."""
+    rgb = np.asarray(Image.open(tex_path).convert("RGB"),
+                     dtype=np.float32)
+    hpx, wpx = rgb.shape[0], rgb.shape[1]
+    ash = np.array([46.0, 42.0, 39.0])
+    for cx, cz, r, _d in craters:
+        reach = r * 1.45
+        c0 = max(0, int((cx - reach - x0) / size * wpx))
+        c1 = min(wpx, int((cx + reach - x0) / size * wpx) + 1)
+        r0 = max(0, int((1.0 - (cz + reach - z0) / size) * hpx))
+        r1 = min(hpx, int((1.0 - (cz - reach - z0) / size) * hpx) + 1)
+        if c0 >= c1 or r0 >= r1:
+            continue
+        px = x0 + (np.arange(c0, c1) + 0.5) / wpx * size
+        pz = z0 + (1.0 - (np.arange(r0, r1) + 0.5) / hpx) * size
+        rr = np.hypot(px[None, :] - cx, pz[:, None] - cz) / reach
+        m = np.clip(1.0 - rr, 0.0, 1.0) ** 1.4
+        patch = rgb[r0:r1, c0:c1]
+        rgb[r0:r1, c0:c1] = (patch * (1.0 - 0.82 * m[..., None])
+                             + ash[None, None] * (0.82 * m[..., None]))
+    return rgb.astype(np.uint8)
 
 
 def _decode_tex(path: str) -> np.ndarray:
@@ -380,18 +411,23 @@ class CinematicTerrain:
                 y_mid = float(h.mean())
                 radius = float(np.hypot(rec.size * 0.71,
                                         (h.max() - h.min()) * 0.5) + 1.0)
-                self.surround.append((mesh, tex, rec.x0, rec.z0, rec.size,
-                                      y_mid, radius))
+                self.surround.append([mesh, tex, rec.x0, rec.z0, rec.size,
+                                      y_mid, radius, rec])
         except Exception:
             self.dispose()
             raise
+        self._crater_seen = 0          # scene.crater_rev consumed so far
+        self._scorch_futs = []         # (future, kind, ref) pending swaps
         self._disposed = False
 
     # ---------------------------------------------------------- streaming
 
     def update(self, eye) -> None:
         """Build/evict L0 meshes around the eye (meshes only — every
-        texture is already resident)."""
+        texture is already resident), and fold in new impact craters."""
+        if self.scene.crater_rev != self._crater_seen:
+            self._apply_craters()
+        self._poll_scorch()
         ranked = sorted(self.tiles, key=lambda t: t.dist(eye))
         want = {t for t in ranked[:L0_LIVE_MAX] if t.dist(eye) < L0_DIST}
         for t in self.tiles:
@@ -417,7 +453,8 @@ class CinematicTerrain:
             if (t.mesh_l0 is None and t.l0_future is None
                     and not t.l0_failed):
                 t.l0_future = self._pool.submit(
-                    _build_l0_arrays, t.rec.hgt_path, t.size, t.l0_skirt)
+                    _build_l0_arrays, t.rec.hgt_path, t.size, t.l0_skirt,
+                    self._tile_delta(t, cell=2.0))
         live = [t for t in self.tiles if t.mesh_l0 is not None]
         for t in live:
             beyond_cap = t not in want and len(live) > L0_LIVE_MAX
@@ -425,6 +462,105 @@ class CinematicTerrain:
                 t.mesh_l0.delete()
                 t.mesh_l0 = None
                 live.remove(t)
+
+    # ------------------------------------------------------------ craters
+
+    def _tile_delta(self, t, cell: float):
+        """Haloed crater delta grid for a core tile at ``cell`` m, or
+        None when no crater touches it (the common case)."""
+        sc = self.scene
+        if not getattr(sc, "_craters", None):
+            return None
+        if not sc.craters_intersecting(t.x0, t.z0, t.x0 + t.size,
+                                       t.z0 + t.size):
+            return None
+        n = int(round(t.size / cell))
+        xs = t.x0 + (np.arange(n + 2, dtype=np.float64) - 1.0) * cell
+        zs = t.z0 + (np.arange(n + 2, dtype=np.float64) - 1.0) * cell
+        return sc.crater_delta_grid(xs, zs)
+
+    def _apply_craters(self) -> None:
+        """Rebuild meshes + queue texture scorch for every tile/chunk a
+        NEW crater touches (impact moment: the blast masks the work)."""
+        sc = self.scene
+        since = self._crater_seen
+        self._crater_seen = sc.crater_rev
+        for t in self.tiles:
+            news = sc.craters_intersecting(t.x0, t.z0, t.x0 + t.size,
+                                           t.z0 + t.size, since_rev=since)
+            if not news:
+                continue
+            with np.load(t.rec.hgt_path) as z:
+                h2, h4, h20 = z["dsm_2m"], z["dsm_4m"], z["dsm_20m"]
+                c4, c20 = z["clutter_4m"], z["clutter_20m"]
+            d4 = self._tile_delta(t, cell=4.0)
+            d20 = self._tile_delta(t, cell=20.0)
+            drops = skirt_drops(h2, h4, h20)
+            if t.mesh_l1 is not None:
+                t.mesh_l1.delete()
+            if t.mesh_l2 is not None:
+                t.mesh_l2.delete()
+            t.mesh_l1 = _TexturedMesh(*build_tile_arrays(
+                h4 + (d4 if d4 is not None else 0.0), 4.0, t.size,
+                skirt_drop=drops[1], clutter=c4))
+            t.mesh_l2 = _TexturedMesh(*build_tile_arrays(
+                h20 + (d20 if d20 is not None else 0.0), 20.0, t.size,
+                skirt_drop=drops[2], clutter=c20))
+            if t.mesh_l0 is not None:      # re-stream with the crater
+                t.mesh_l0.delete()
+                t.mesh_l0 = None
+            if t.l0_future is not None:
+                t.l0_future.cancel()
+                t.l0_future = None
+            t.l0_failed = False
+            all_craters = sc.craters_intersecting(
+                t.x0, t.z0, t.x0 + t.size, t.z0 + t.size)
+            self._scorch_futs.append((self._pool.submit(
+                _scorch_rgb, t.rec.tex_path, t.x0, t.z0, t.size,
+                all_craters), "tile", t))
+        for entry in self.surround:
+            mesh, tex, x0, z0, size, y_mid, radius, rec = entry
+            news = sc.craters_intersecting(x0, z0, x0 + size, z0 + size,
+                                           since_rev=since)
+            if not news:
+                continue
+            with np.load(rec.hgt_path) as z:
+                h = z["h"]
+            cell = size / (h.shape[0] - 3)
+            xs = x0 + (np.arange(h.shape[1], dtype=np.float64) - 1.0) * cell
+            zs = z0 + (np.arange(h.shape[0], dtype=np.float64) - 1.0) * cell
+            h = h + sc.crater_delta_grid(xs, zs)
+            entry[0].delete()
+            entry[0] = _TexturedMesh(*build_tile_arrays(
+                h, cell, size, skirt_drop=70.0))
+            all_craters = sc.craters_intersecting(x0, z0, x0 + size,
+                                                  z0 + size)
+            self._scorch_futs.append((self._pool.submit(
+                _scorch_rgb, rec.tex_path, x0, z0, size, all_craters),
+                "chunk", entry))
+
+    def _poll_scorch(self) -> None:
+        """GL thread: swap in finished scorched textures."""
+        still = []
+        for fut, kind, ref in self._scorch_futs:
+            if not fut.done():
+                still.append((fut, kind, ref))
+                continue
+            try:
+                rgb = fut.result()
+            except Exception as exc:       # noqa: BLE001 — keep old tex
+                print(f"[cinematic] scorch failed: {exc}")
+                continue
+            new_tex = _upload_texture(rgb)
+            if kind == "tile":
+                if ref.tex:
+                    glDeleteTextures([ref.tex])
+                ref.tex = new_tex
+            else:
+                if ref[1]:
+                    glDeleteTextures([ref[1]])
+                ref[1] = new_tex
+        self._scorch_futs = still
 
     # ------------------------------------------------------------ shadows
 
@@ -475,7 +611,7 @@ class CinematicTerrain:
         glActiveTexture(GL_TEXTURE0)
         model = np.zeros((4, 4), dtype=np.float32)
         model[0, 0] = model[1, 1] = model[2, 2] = model[3, 3] = 1.0
-        for mesh, tex, sx0, sz0, size, y_mid, radius in self.surround:
+        for mesh, tex, sx0, sz0, size, y_mid, radius, _rec in self.surround:
             cx = sx0 + size * 0.5 - eye[0]
             cy = y_mid - eye[1]
             cz = sz0 + size * 0.5 - eye[2]

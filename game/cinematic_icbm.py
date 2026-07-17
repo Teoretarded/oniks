@@ -98,6 +98,7 @@ class IcbmSpec:
     gate_agl_m: float        # below this fly the vertical program
     shake_amp: float         # observer shake at the acoustic hit
     cutoff_event: bool       # liquids report engine shutdown
+    yield_kt: float = 300.0  # warhead yield (crater + impact scale)
     # Visual identity (research doc 1.5 / 2.5 plume phenomenology).
     flame_core: tuple = (1.0, 0.98, 0.88)
     flame_edge: tuple = (1.0, 0.57, 0.14)
@@ -128,6 +129,8 @@ MINUTEMAN_III = IcbmSpec(
     base_depth_m=22.0,       # 80 ft tube, 18.3 m missile: nose near mouth
     tof_floor_s=75.0, gate_agl_m=1500.0,
     shake_amp=1.4, cutoff_event=False,
+    yield_kt=300.0,          # W87
+
     # Aluminized solid: brilliant white-orange flame, DENSE white pillar.
     flame_core=(1.0, 0.99, 0.90), flame_edge=(1.0, 0.62, 0.16),
     flame_len_x=1.6,
@@ -148,6 +151,8 @@ SARMAT = IcbmSpec(
     base_depth_m=33.0,       # ~39 m silo, TPK; tail rides near the bottom
     tof_floor_s=105.0, gate_agl_m=1800.0,
     shake_amp=1.8, cutoff_event=True,
+    yield_kt=800.0,          # single-warhead loadout (MIRV later)
+
     # Hypergolic N2O4/UDMH: hard orange flame, thin brown-grey haze —
     # the mortar puff at the silo is the dirtiest moment of the launch.
     flame_core=(1.0, 0.88, 0.62), flame_edge=(1.0, 0.48, 0.12),
