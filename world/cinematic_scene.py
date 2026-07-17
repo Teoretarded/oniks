@@ -86,7 +86,7 @@ class CinematicScene:
         # Terrain deformation (2026-07-17): impact craters as a runtime
         # height DELTA over the baked data — physics and renderer read
         # the same list, so boots, missiles and pixels agree.
-        self._craters: list = []       # (x, z, R, depth, rev)
+        self._craters: list = []       # (x, z, R, depth, gz_h)
         self._crater_cells: dict = {}  # spatial hash -> crater indices
         self.crater_rev = 0            # bumps on every add (renderer)
 
@@ -217,7 +217,7 @@ class CinematicScene:
         a phantom cliff.  Impact craters ride on top as a delta."""
         h = self._baked_h(x, z)
         if self._craters:
-            h += self.crater_delta(x, z)
+            h += self.crater_delta(x, z, baked=h)
         return h
 
     def _baked_h(self, x: float, z: float) -> float:
@@ -249,11 +249,17 @@ class CinematicScene:
     def add_crater(self, x: float, z: float, radius_m: float,
                    depth_m: float) -> None:
         """Punch a crater into the world: bowl + raised rim, applied to
-        BOTH physics sampling and (via crater_rev) the renderer."""
+        BOTH physics sampling and (via crater_rev) the renderer.
+
+        Craters CUT toward the ground-zero elevation captured here
+        (cut-to-target, never fill): on flat ground that reproduces the
+        old relative-delta bowl exactly, on a summit it removes the
+        summit instead of lowering the whole peak by a constant."""
         x, z = float(x), float(z)
         radius_m = max(1.0, float(radius_m))
         depth_m = max(0.2, float(depth_m))
-        self._craters.append((x, z, radius_m, depth_m))
+        gz_h = float(self.ground_h(x, z))    # pre-impact surface at GZ
+        self._craters.append((x, z, radius_m, depth_m, gz_h))
         if len(self._craters) > self.CRATER_CAP:
             self._craters.pop(0)
             self._crater_cells = {}
@@ -265,7 +271,7 @@ class CinematicScene:
         self.crater_rev += 1
 
     def _hash_crater(self, idx: int, c) -> None:
-        x, z, r, _d = c
+        x, z, r = c[0], c[1], c[2]
         reach = r * 1.8
         cs = self._CRATER_CELL
         for gj in range(int((z - reach) // cs), int((z + reach) // cs) + 1):
@@ -274,49 +280,57 @@ class CinematicScene:
                 self._crater_cells.setdefault((gi, gj), []).append(idx)
 
     @staticmethod
-    def _crater_profile(r: np.ndarray, radius: float, depth: float):
-        """Signed height delta at radial distance r: parabolic bowl,
-        raised lip peaking just outside the rim (classic ejecta form)."""
-        rr = r / radius
-        bowl = -depth * np.clip(1.0 - rr * rr, 0.0, 1.0) ** 2
+    def _carve(h, dist, radius: float, depth: float, gz_h: float):
+        """Apply one crater to surface height(s) ``h`` at radial
+        distance(s) ``dist``: the bowl interior is CUT down toward the
+        ground-zero elevation (parabolic target surface, never fills),
+        the ejecta lip rides additively just outside the rim.  Works
+        scalar or vectorized."""
+        rr = dist / radius
+        target = gz_h - depth * np.clip(1.0 - rr * rr, 0.0, 1.0) ** 2
         lip_arg = (rr - 1.05) / 0.65
         lip = (0.22 * depth
                * np.clip(1.0 - lip_arg * lip_arg, 0.0, 1.0) ** 2)
-        return np.where(rr < 1.7, bowl + lip, 0.0)
+        return np.where(rr < 1.0, np.minimum(h, target), h) + lip
 
-    def crater_delta(self, x: float, z: float) -> float:
+    def crater_delta(self, x: float, z: float,
+                     baked: float | None = None) -> float:
         """Summed crater height delta at one point (hot path: spatial
-        hash lookup, then only nearby craters)."""
+        hash lookup, then only nearby craters).  ``baked`` is the
+        crater-free surface height at (x, z); computed when omitted."""
         cs = self._CRATER_CELL
         idxs = self._crater_cells.get((int(x // cs), int(z // cs)))
         if not idxs:
             return 0.0
-        total = 0.0
+        h0 = self._baked_h(x, z) if baked is None else float(baked)
+        h = h0
         for i in idxs:
-            cx, cz, r, d = self._craters[i]
+            cx, cz, r, d, gz = self._craters[i]
             dist = math.hypot(x - cx, z - cz)
             if dist < r * 1.7:
-                total += float(self._crater_profile(
-                    np.float64(dist), r, d))
-        return total
+                h = float(self._carve(np.float64(h), np.float64(dist),
+                                      r, d, gz))
+        return h - h0
 
-    def crater_delta_grid(self, xs: np.ndarray,
-                          zs: np.ndarray) -> np.ndarray:
-        """(len(zs), len(xs)) summed crater delta — the renderer's mesh
-        rebuild path.  Zero-cost when no crater touches the rect."""
-        out = np.zeros((len(zs), len(xs)), np.float32)
+    def crater_delta_grid(self, xs: np.ndarray, zs: np.ndarray,
+                          baked: np.ndarray) -> np.ndarray:
+        """(len(zs), len(xs)) summed crater delta over the crater-free
+        ``baked`` height grid — the renderer's mesh rebuild path adds
+        this onto the stored DSM.  Craters carve chronologically."""
+        base = np.asarray(baked, np.float64)
         if not self._craters:
-            return out
+            return np.zeros(base.shape, np.float32)
+        h = base.copy()
         x0, x1 = float(np.min(xs)), float(np.max(xs))
         z0, z1 = float(np.min(zs)), float(np.max(zs))
-        for cx, cz, r, d in self._craters:
+        for cx, cz, r, d, gz in self._craters:
             reach = r * 1.7
             if (cx + reach < x0 or cx - reach > x1
                     or cz + reach < z0 or cz - reach > z1):
                 continue
-            rr = np.hypot(xs[None, :] - cx, zs[:, None] - cz)
-            out += self._crater_profile(rr, r, d).astype(np.float32)
-        return out
+            dist = np.hypot(xs[None, :] - cx, zs[:, None] - cz)
+            h = self._carve(h, dist, r, d, gz)
+        return (h - base).astype(np.float32)
 
     def craters_intersecting(self, x0: float, z0: float, x1: float,
                              z1: float, since_rev: int = 0):
@@ -325,14 +339,15 @@ class CinematicScene:
         n = len(self._craters)
         first_rev = self.crater_rev - n + 1
         out = []
-        for i, (cx, cz, r, d) in enumerate(self._craters):
+        for i, c in enumerate(self._craters):
+            cx, cz, r = c[0], c[1], c[2]
             rev = first_rev + i
             if rev <= since_rev:
                 continue
             reach = r * 1.7
             if (cx + reach >= x0 and cx - reach <= x1
                     and cz + reach >= z0 and cz - reach <= z1):
-                out.append((cx, cz, r, d))
+                out.append(c)
         return out
 
     def blocked(self, x: float, z: float) -> bool:
@@ -356,6 +371,27 @@ class CinematicScene:
         s = self.spawn
         return (float(s["x"]), float(s["z"])), float(
             np.radians(s.get("yaw_deg", 0.0)))
+
+
+def nuclear_crater_dims(w_kt: float) -> tuple[float, float]:
+    """Crater (radius_m, depth_m) for a nuclear surface burst.
+
+    Sized from the Glasstone fireball radius (~590 m x W_Mt^0.4 at
+    breakaway) rather than the dry-soil apparent crater (~175 m x
+    W_Mt^0.3): with cut-to-target carving this is what makes a summit
+    hit visibly remove the summit — the player-facing read the user
+    asked for (2026-07-17) — while staying anchored to a real, cited
+    length scale for the destroyed zone."""
+    w_mt = max(float(w_kt) / 1000.0, 1e-6)
+    radius = 590.0 * w_mt ** 0.4
+    return radius, radius / 2.5
+
+
+def he_crater_dims(warhead_kg: float) -> tuple[float, float]:
+    """Crater (radius_m, depth_m) for a conventional HE warhead:
+    cube-root scaling on charge mass."""
+    radius = max(2.5, 0.9 * float(warhead_kg) ** (1.0 / 3.0))
+    return radius, radius / 2.4
 
 
 def halo_axes(x0: float, z0: float, size: float,

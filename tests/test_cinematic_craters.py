@@ -62,7 +62,8 @@ def test_crater_grid_matches_point_sampler(flat_scene):
     sc.add_crater(160.0, 90.0, radius_m=12.0, depth_m=4.0)
     xs = np.arange(60.0, 200.0, 7.0)
     zs = np.arange(60.0, 200.0, 7.0)
-    grid = sc.crater_delta_grid(xs, zs)
+    baked = np.full((len(zs), len(xs)), 10.0)   # the flat scene surface
+    grid = sc.crater_delta_grid(xs, zs, baked)
     for j in range(0, len(zs), 3):
         for i in range(0, len(xs), 3):
             assert grid[j, i] == pytest.approx(
@@ -105,6 +106,67 @@ def test_walker_and_designation_see_the_crater(flat_scene):
     assert abs(h1 - h2) < 0.5
 
 
+@pytest.fixture()
+def peak_scene(tmp_path):
+    """A 256 m scene: valley floor y = 10 with a 120 m cone at center."""
+    nx = nz = 257
+    r = np.hypot(np.arange(nx)[None, :] - 128.0,
+                 np.arange(nz)[:, None] - 128.0)
+    dtm = (10.0 + np.clip(120.0 * (1.0 - r / 60.0), 0.0, None)
+           ).astype(np.float32)
+    np.save(tmp_path / "dtm_1m.npy", dtm)
+    np.save(tmp_path / "obstacle.npy", np.zeros((nz, nx), dtype=np.uint8))
+    meta = {
+        "name": "peak", "title": "PEAK", "subtitle": "TEST",
+        "attribution": "test data", "epsg": 2056,
+        "origin_e": 0.0, "origin_n": 0.0, "origin_alt": 100.0,
+        "x0": 0.0, "x1": 256.0, "z0": 0.0, "z1": 256.0,
+        "dtm": {"cell": 1.0, "file": "dtm_1m.npy"},
+        "obstacle": {"cell": 1.0, "file": "obstacle.npy"},
+        "spawn": {"x": 20.0, "z": 20.0, "yaw_deg": 0.0},
+        "s300": {"x": 30.0, "z": 30.0, "yaw_deg": 180.0},
+        "tiles": [], "surround": [],
+    }
+    (tmp_path / "scene.json").write_text(json.dumps(meta), encoding="utf-8")
+    return tmp_path
+
+
+def test_crater_decapitates_a_summit(peak_scene):
+    """Cut-to-target contract: a crater centered on a summit removes
+    the top by the full crater depth (not a draped relative dent), the
+    cut never FILLS terrain, and the far field stays untouched."""
+    sc = CinematicScene(str(peak_scene))
+    summit = sc.ground_h(128.0, 128.0)
+    assert summit == pytest.approx(130.0, abs=0.5)
+    slope_before = sc.ground_h(160.0, 128.0)      # r=32: mid-slope
+    far_before = sc.ground_h(20.0, 20.0)          # valley floor
+    sc.add_crater(128.0, 128.0, radius_m=80.0, depth_m=35.0)
+    # Summit: cut to gz_h - depth (two-sided: not less, not more).
+    assert sc.ground_h(128.0, 128.0) == pytest.approx(summit - 35.0,
+                                                      abs=0.5)
+    # Mid-slope sits far below the bowl's target surface: cut-only
+    # means it is never raised toward it (lip ejecta < 8 m allowed).
+    slope_after = sc.ground_h(160.0, 128.0)
+    assert slope_after <= slope_before + 0.22 * 35.0 + 0.5
+    assert slope_after >= slope_before - 0.5      # and no cut out here
+    # Far field: bit-identical.
+    assert sc.ground_h(20.0, 20.0) == pytest.approx(far_before, abs=1e-6)
+
+
+def test_nuclear_crater_dims_scale():
+    """Fireball-anchored sizing: 300 kt ~ 360 m radius, 1 Mt ~ 590 m,
+    monotonic in yield, depth locked to radius/2.5 (two-sided so the
+    spectacle can't quietly shrink OR explode past realism)."""
+    from world.cinematic_scene import nuclear_crater_dims
+    r300, d300 = nuclear_crater_dims(300.0)
+    r1000, d1000 = nuclear_crater_dims(1000.0)
+    assert 320.0 < r300 < 400.0
+    assert 550.0 < r1000 < 630.0
+    assert r300 < r1000
+    assert d300 == pytest.approx(r300 / 2.5)
+    assert d1000 == pytest.approx(r1000 / 2.5)
+
+
 def test_halo_axes_match_stored_dsm_grids(flat_scene):
     """Regression (2026-07-17 crash): the renderer's crater-delta grid
     must be the SAME shape as the stored haloed DSMs.  A 1 km tile
@@ -123,7 +185,7 @@ def test_halo_axes_match_stored_dsm_grids(flat_scene):
     sc = CinematicScene(str(flat_scene))
     sc.add_crater(128.0, 128.0, radius_m=40.0, depth_m=15.0)
     xs, zs = halo_axes(0.0, 0.0, 256.0, 4.0)
-    dsm_like = np.zeros((len(zs), len(xs)), np.float32)
-    summed = dsm_like + sc.crater_delta_grid(xs, zs)
+    dsm_like = np.full((len(zs), len(xs)), 10.0, np.float32)
+    summed = dsm_like + sc.crater_delta_grid(xs, zs, dsm_like)
     assert summed.shape == dsm_like.shape
-    assert summed.min() < -10.0          # the bowl actually landed
+    assert summed.min() < 0.0            # the bowl actually landed

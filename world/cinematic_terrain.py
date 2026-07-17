@@ -333,7 +333,8 @@ def _scorch_rgb(tex_path: str, x0: float, z0: float, size: float,
                      dtype=np.float32)
     hpx, wpx = rgb.shape[0], rgb.shape[1]
     ash = np.array([46.0, 42.0, 39.0])
-    for cx, cz, r, _d in craters:
+    for c in craters:
+        cx, cz, r = c[0], c[1], c[2]
         reach = r * 1.45
         c0 = max(0, int((cx - reach - x0) / size * wpx))
         c1 = min(wpx, int((cx + reach - x0) / size * wpx) + 1)
@@ -465,17 +466,22 @@ class CinematicTerrain:
 
     # ------------------------------------------------------------ craters
 
-    def _tile_delta(self, t, cell: float):
+    def _tile_delta(self, t, cell: float, baked=None):
         """Haloed crater delta grid for a core tile at ``cell`` m, or
-        None when no crater touches it (the common case)."""
+        None when no crater touches it (the common case).  ``baked``
+        is the tile's stored DSM at that cell (loaded on demand when
+        omitted) — cut-to-target carving needs the real surface."""
         sc = self.scene
         if not getattr(sc, "_craters", None):
             return None
         if not sc.craters_intersecting(t.x0, t.z0, t.x0 + t.size,
                                        t.z0 + t.size):
             return None
+        if baked is None:
+            with np.load(t.rec.hgt_path) as z:
+                baked = z[f"dsm_{int(cell)}m"]
         xs, zs = halo_axes(t.x0, t.z0, t.size, cell)
-        return sc.crater_delta_grid(xs, zs)
+        return sc.crater_delta_grid(xs, zs, baked)
 
     def _apply_craters(self) -> None:
         """Rebuild meshes + queue texture scorch for every tile/chunk a
@@ -491,8 +497,8 @@ class CinematicTerrain:
             with np.load(t.rec.hgt_path) as z:
                 h2, h4, h20 = z["dsm_2m"], z["dsm_4m"], z["dsm_20m"]
                 c4, c20 = z["clutter_4m"], z["clutter_20m"]
-            d4 = self._tile_delta(t, cell=4.0)
-            d20 = self._tile_delta(t, cell=20.0)
+            d4 = self._tile_delta(t, cell=4.0, baked=h4)
+            d20 = self._tile_delta(t, cell=20.0, baked=h20)
             drops = skirt_drops(h2, h4, h20)
             if t.mesh_l1 is not None:
                 t.mesh_l1.delete()
@@ -527,7 +533,7 @@ class CinematicTerrain:
             cell = size / (h.shape[0] - 3)
             xs = x0 + (np.arange(h.shape[1], dtype=np.float64) - 1.0) * cell
             zs = z0 + (np.arange(h.shape[0], dtype=np.float64) - 1.0) * cell
-            h = h + sc.crater_delta_grid(xs, zs)
+            h = h + sc.crater_delta_grid(xs, zs, h)
             entry[0].delete()
             entry[0] = _TexturedMesh(*build_tile_arrays(
                 h, cell, size, skirt_drop=70.0))

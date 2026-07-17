@@ -43,7 +43,8 @@ from game.cinematic_missiles import (
 from game.cinematic_weapons import WeaponRig
 from game.states import GameState
 from game.walker import Walker
-from world.cinematic_scene import CinematicScene
+from world.cinematic_scene import CinematicScene, he_crater_dims, \
+    nuclear_crater_dims
 
 MOUSE_SENS = 0.0022          # rad per pixel at the native FOV
 HEADBOB_HZ_PER_M = 1.0 / 0.75
@@ -1056,19 +1057,17 @@ class CinematicState(GameState):
 
     def _spawn_crater(self, m, pos) -> None:
         """Terrain deformation at impact: crater size from the round.
-        Nuclear: Glasstone dry-soil surface burst (1 Mt ~ 350 m
-        diameter); conventional: cube-root HE scaling."""
+        Nuclear: fireball-anchored destroyed zone (cinematic_scene.
+        nuclear_crater_dims); conventional: cube-root HE scaling."""
         add = getattr(self.scene, "add_crater", None)
         if add is None:                # fakes/tests without the overlay
             return
         if isinstance(m, IcbmLaunch):
             w_kt = (m.impact_yield_kt()
                     if hasattr(m, "impact_yield_kt") else m.spec.yield_kt)
-            radius = 175.0 * max(w_kt / 1000.0, 1e-6) ** 0.3
-            depth = radius / 2.8
+            radius, depth = nuclear_crater_dims(w_kt)
         elif isinstance(m, GuidedLaunch):
-            radius = max(2.5, 0.9 * m.variant.warhead_kg ** (1.0 / 3.0))
-            depth = radius / 2.4
+            radius, depth = he_crater_dims(m.variant.warhead_kg)
         else:
             return
         add(float(pos[0]), float(pos[2]), radius, depth)
