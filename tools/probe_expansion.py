@@ -57,6 +57,15 @@ def main() -> None:
     frames(state, 8)
     shot(app, "43_rings_from_20km")
 
+    # 2b) The massif faces from the valley rim (user screenshot vantage:
+    # ring bleed painted uncolored blobs across these cliffs).
+    state.fc_pos = np.array([-3000.0, sc.ground_h(-3000.0, 1000.0)
+                             + 3500.0, 1000.0])
+    state.walker.yaw = math.radians(118.0)
+    state.walker.pitch = math.radians(-6.0)
+    frames(state, 8)
+    shot(app, "46_massif_faces")
+
     # 3) Boots on ring-2 ground 25 km south (walkable expansion).
     wk = state.walker
     gx, gz = 4000.0, -25000.0

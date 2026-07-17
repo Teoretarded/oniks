@@ -41,7 +41,7 @@ R3_EXTENT_KM = 160                 # total extent, centred on the scene
 R3_CHUNK_KM = 40
 R3_CELL_M = 250
 R3_TEX = 512
-TUCK_M = 12.0
+TUCK_M = 18.0
 
 
 def _scene_json(scene: str) -> dict:
@@ -90,7 +90,18 @@ def _clamp_under(grid: np.ndarray, xs: np.ndarray, zs: np.ndarray,
                  0, field.shape[1] - 1)
     jj = np.clip(np.round((zs - fz0) / cell).astype(int),
                  0, field.shape[0] - 1)
-    lim = field[jj[:, None], ii[None, :]] - tuck
+    # MIN over a 3x3 finer-field window: a coarse cell interpolating
+    # between clamped posts can still bulge ABOVE the finer surface
+    # mid-cell on knife ridges (user report: uncolored blobs all over
+    # the massif faces).  Clamping to the local minimum kills that.
+    lim = None
+    for dj in (-1, 0, 1):
+        j2 = np.clip(jj + dj, 0, field.shape[0] - 1)
+        for di in (-1, 0, 1):
+            i2 = np.clip(ii + di, 0, field.shape[1] - 1)
+            v = field[j2[:, None], i2[None, :]]
+            lim = v if lim is None else np.fmin(lim, v)
+    lim = lim - tuck
     ok = inside & np.isfinite(lim)
     out = np.where(ok, np.minimum(grid, lim), grid)
     return np.where(inside & ~np.isfinite(lim), grid - tuck, out)

@@ -79,9 +79,10 @@ class IcbmSpec:
     bus_isp_s: float         # storable bipropellant (RS-14 class)
     door_s: float            # closure door / silo lid slide time
     base_depth_m: float      # missile TAIL below ground at rest
-    toa_s: float             # time of arrival after ignition (the loft knob)
+    coast_min_s: float       # post-boost coast floor (loft floor)
+    coast_max_s: float       # coast cap (full-loft ceiling)
     gate_agl_m: float        # below this fly the vertical program
-    spin_hz: float           # GEMS orthogonal rotation rate
+    weave_period_s: float    # GEMS S-turn half-cycle pacing
     shake_amp: float         # observer shake at the acoustic hit
     cutoff_event: bool       # liquids report engine shutdown
     # Visual identity (research doc 1.5 / 2.5 plume phenomenology).
@@ -112,7 +113,8 @@ MINUTEMAN_III = IcbmSpec(
     bus_isp_s=290.0,
     door_s=1.5,              # 110 t door on gas actuators, ~35 mph
     base_depth_m=22.0,       # 80 ft tube, 18.3 m missile: nose near mouth
-    toa_s=340.0, gate_agl_m=1500.0, spin_hz=0.06,
+    coast_min_s=90.0, coast_max_s=155.0, gate_agl_m=1500.0,
+    weave_period_s=26.0,
     shake_amp=1.4, cutoff_event=False,
     # Aluminized solid: brilliant white-orange flame, DENSE white pillar.
     flame_core=(1.0, 0.99, 0.90), flame_edge=(1.0, 0.62, 0.16),
@@ -132,7 +134,8 @@ SARMAT = IcbmSpec(
     bus_isp_s=300.0,
     door_s=6.0,              # the huge lid walks open on rails
     base_depth_m=33.0,       # ~39 m silo, TPK; tail rides near the bottom
-    toa_s=560.0, gate_agl_m=1800.0, spin_hz=0.05,
+    coast_min_s=120.0, coast_max_s=300.0, gate_agl_m=1800.0,
+    weave_period_s=34.0,
     shake_amp=1.8, cutoff_event=True,
     # Hypergolic N2O4/UDMH: hard orange flame, thin brown-grey haze —
     # the mortar puff at the silo is the dirtiest moment of the launch.
@@ -194,8 +197,13 @@ class IcbmLaunch:
         self._burned_in_stage = 0.0
         self._bus_prop_left = spec.bus_prop_kg
         self._cut = False                # bus finished (trim done / cutoff)
-        self._spin_e1 = None
-        self._spin_e2 = None
+        # Range-adaptive time of arrival (user report: fixed TOA made a
+        # 20 km shot loiter and corkscrew overhead for minutes): total
+        # flight = full burn schedule + a coast that scales with range.
+        rng = math.hypot(self._target[0] - sx, self._target[2] - sz)
+        coast = min(max(rng / 250.0 + 40.0, spec.coast_min_s),
+                    spec.coast_max_s)
+        self._toa = sum(s.burn_s for s in spec.stages) + coast
         # Subsequent-stage delta-v capability, precomputed once.
         self._dv_after = self._dv_after_table()
         if door_open:                    # silo door already stands open
@@ -256,7 +264,7 @@ class IcbmLaunch:
     # -------------------------------------------------------------- guidance
 
     def _tau(self) -> float:
-        return self.spec.toa_s - (self.t - self.ignite_t)
+        return self._toa - (self.t - self.ignite_t)
 
     def _v_req(self) -> np.ndarray:
         tau = max(self._tau(), 1.0)
@@ -284,26 +292,23 @@ class IcbmLaunch:
         if nvg < 1e-6 or cap < 1e-6:
             return self.axis.copy()
         e = vg / nvg
-        if self._spin_e1 is None:
-            r = np.cross(e, UP)
-            if np.linalg.norm(r) < 1e-6:
-                r = np.cross(e, np.array([1.0, 0.0, 0.0]))
-            self._spin_e1 = r / np.linalg.norm(r)
-            self._spin_e2 = np.cross(e, self._spin_e1)
-        # Re-orthogonalize the spin frame against the drifting Vg axis.
-        e1 = self._spin_e1 - e * float(np.dot(self._spin_e1, e))
-        n1 = float(np.linalg.norm(e1))
-        if n1 < 1e-6:
-            e1 = np.cross(e, UP)
-            n1 = float(np.linalg.norm(e1))
-        e1 /= n1
-        e2 = np.cross(e, e1)
-        self._spin_e1, self._spin_e2 = e1, e2
+        # GEMS energy waste as PLANAR S-turns (the documented look),
+        # not a rotating cone — the old corkscrew drew literal circles
+        # in the sky (user screenshot).  Waste lives in the horizontal
+        # axis across the target track, sign smoothly alternating.
+        across = np.array([math.cos(az), 0.0, -math.sin(az)])
+        n = across - e * float(np.dot(across, e))
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-6:
+            n = np.cross(e, UP)
+            nn = float(np.linalg.norm(n))
+        n /= nn
+        sgn = math.tanh(2.5 * math.sin(
+            2.0 * math.pi * (self.t - self.ignite_t)
+            / self.spec.weave_period_s))
         ratio = min(max(nvg / cap, 0.0), 1.0)
         theta = math.acos(ratio)
-        ph = 2.0 * math.pi * self.spec.spin_hz * (self.t - self.ignite_t)
-        n = e1 * math.cos(ph) + e2 * math.sin(ph)
-        return e * math.cos(theta) + n * math.sin(theta)
+        return e * math.cos(theta) + n * (math.sin(theta) * sgn)
 
     def _slew(self, want: np.ndarray, dt: float) -> None:
         """Rate-limit the attitude toward the commanded direction."""
@@ -442,7 +447,7 @@ class IcbmLaunch:
                 events.append(("impact", self.pos.copy()))
                 self.done = True
                 return
-        if self.t - (self.ignite_t or 0.0) > spec.toa_s + 180.0:
+        if self.t - (self.ignite_t or 0.0) > self._toa + 180.0:
             self.done = True             # lost round guard
 
     def heading(self) -> np.ndarray:
