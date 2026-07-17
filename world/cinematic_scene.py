@@ -373,6 +373,31 @@ class CinematicScene:
             np.radians(s.get("yaw_deg", 0.0)))
 
 
+def punch_core_hole(verts: np.ndarray, indices: np.ndarray,
+                    chunk_x0: float, chunk_z0: float,
+                    core: tuple, margin: float = 64.0):
+    """Drop a coarse surround chunk's triangles that lie fully inside
+    the fine-core rect (shrunk by ``margin``).
+
+    The fine LiDAR tiles always draw there, and the 32 m ring-1 chunks
+    were held under them by only a blind 8 m tuck — on bare cliffs the
+    coarse chord rose proud of the 2 m face and both won the depth
+    test in different pixels: the 'overlapping mountains' report
+    (2026-07-17).  Triangles straddling the border survive as tucked
+    crack-cover behind the core edge; chunk-perimeter skirt walls that
+    hang inside the core are dropped with everything else."""
+    cx0, cz0, cx1, cz1 = core
+    px = verts[:, 0] + chunk_x0
+    pz = verts[:, 2] + chunk_z0
+    inside = ((px > cx0 + margin) & (px < cx1 - margin)
+              & (pz > cz0 + margin) & (pz < cz1 - margin))
+    tri = indices.reshape(-1, 3)
+    drop = inside[tri].all(axis=1)
+    if not drop.any():
+        return verts, indices
+    return verts, np.ascontiguousarray(tri[~drop].reshape(-1))
+
+
 def nuclear_crater_dims(w_kt: float) -> tuple[float, float]:
     """Crater (radius_m, depth_m) for a nuclear surface burst.
 

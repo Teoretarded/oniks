@@ -91,7 +91,7 @@ from PIL import Image
 from engine.shader import Shader
 from engine.shaderlib import HAZE_GLSL
 from world.cinematic_scene import SKIRT_MARGIN, build_tile_arrays, \
-    halo_axes, skirt_drops
+    halo_axes, punch_core_hole, skirt_drops
 
 # EXT_texture_filter_anisotropic constants (core-adopted everywhere real).
 _GL_TEXTURE_MAX_ANISOTROPY = 0x84FE
@@ -403,9 +403,11 @@ class CinematicTerrain:
                         + list(getattr(scene, "surround3", []))):
                 with np.load(rec.hgt_path) as z:
                     h = z["h"]
-                mesh = _TexturedMesh(*build_tile_arrays(
-                    h, rec.size / (h.shape[0] - 3), rec.size,
-                    skirt_drop=70.0))
+                mesh = _TexturedMesh(*punch_core_hole(
+                    *build_tile_arrays(h, rec.size / (h.shape[0] - 3),
+                                       rec.size, skirt_drop=70.0),
+                    rec.x0, rec.z0,
+                    (scene.x0, scene.z0, scene.x1, scene.z1)))
                 rgb = np.asarray(Image.open(rec.tex_path).convert("RGB"),
                                  dtype=np.uint8)
                 tex = _upload_texture(rgb)
@@ -535,8 +537,9 @@ class CinematicTerrain:
             zs = z0 + (np.arange(h.shape[0], dtype=np.float64) - 1.0) * cell
             h = h + sc.crater_delta_grid(xs, zs, h)
             entry[0].delete()
-            entry[0] = _TexturedMesh(*build_tile_arrays(
-                h, cell, size, skirt_drop=70.0))
+            entry[0] = _TexturedMesh(*punch_core_hole(
+                *build_tile_arrays(h, cell, size, skirt_drop=70.0),
+                x0, z0, (sc.x0, sc.z0, sc.x1, sc.z1)))
             all_craters = sc.craters_intersecting(x0, z0, x0 + size,
                                                   z0 + size)
             self._scorch_futs.append((self._pool.submit(
